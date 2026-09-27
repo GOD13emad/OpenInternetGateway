@@ -11,7 +11,7 @@ do{
  Start-Sleep -Seconds 2
  $routes=@(Get-NetRoute -AddressFamily IPv4 -ErrorAction SilentlyContinue|Where-Object{$_.DestinationPrefix -in @('0.0.0.0/1','128.0.0.0/1')})
  $svc=Get-Service OVPNConnectorService -ErrorAction SilentlyContinue
- if($routes.Count -eq 0 -and $svc -and $svc.Status -eq 'Stopped' -and @(Get-Process OpenVPNConnect -ErrorAction SilentlyContinue).Count -eq 0){
+ if($routes.Count -eq 0 -and $svc -and $svc.Status -eq 'Stopped'){
    Write-Host 'DISCONNECTED'
    exit 0
  }

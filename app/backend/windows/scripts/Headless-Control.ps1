@@ -159,6 +159,11 @@ function Stop-Connector {
  try{Stop-Service $service -Force -ErrorAction SilentlyContinue}catch{}
  [void](Wait-Health $false 20)
 }
+function Schedule-ManualServiceMode {
+ $cmd = "Start-Sleep -Seconds 8; sc.exe config OVPNConnectorService start= demand | Out-Null"
+ Start-Process -FilePath 'pwsh.exe' -WindowStyle Hidden -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-Command',$cmd) | Out-Null
+}
+
 function Try-Candidate($c){
  $profile=Resolve-ProfilePath $c
  if(-not(Test-Path $profile)){Record-Failure $c 'PROFILE_MISSING';return $null}
@@ -174,8 +179,7 @@ function Try-Candidate($c){
  $h=Wait-Health $true 14
  if(-not $h.Healthy){Record-Failure $c 'LIVE_FAIL';Stop-Connector;return $null}
  Record-Success $c $h
- Set-Service -Name $service -StartupType Manual -ErrorAction SilentlyContinue
- sc.exe config $service start= demand | Out-Null
+ Schedule-ManualServiceMode
  $state=[ordered]@{at=(Get-Date).ToString('o');engine='OVPNConnectorService';service=$service;host=$c.Host;serverIP=$c.IP;port=$c.Port;protocol=$c.Protocol;profile=$profile;serviceProfile=$serviceProfile;sha256=$sha;observedIP=$h.IP;country=$h.Country;dns=$h.DNS}
  $state|ConvertTo-Json -Depth 7|Set-Content -Encoding UTF8 $stateFile
  $state|ConvertTo-Json -Depth 7|Set-Content -Encoding UTF8 (Join-Path $Root 'evidence\connect-last-success.json')
@@ -217,8 +221,7 @@ try{
  $currentEngine=''
  if(Test-Path $stateFile){try{$currentEngine=[string](Get-Content -Raw $stateFile|ConvertFrom-Json).engine}catch{}}
  if($pre.Healthy -and $currentEngine -eq 'OVPNConnectorService'){
-   Set-Service -Name $service -StartupType Automatic -ErrorAction SilentlyContinue
-   Get-Process OpenVPNConnect -ErrorAction SilentlyContinue|Stop-Process -Force -ErrorAction SilentlyContinue
+    Schedule-ManualServiceMode
    Write-Host ('HEALTHY HEADLESS '+$pre.IP+' '+$pre.Country)
    exit 0
  }

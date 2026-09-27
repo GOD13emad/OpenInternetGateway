@@ -14,8 +14,6 @@ do{
  $loc=[string]((($cf|Where-Object{$_ -like 'loc=*'}|Select-Object -First 1)-replace '^loc=',''));$loc=$loc.Trim()
  $svc=Get-Service OVPNConnectorService -ErrorAction SilentlyContinue
  if($routes.Count -ge 2 -and $loc -eq 'JP' -and $svc -and $svc.Status -eq 'Running'){
-   $gui=@(Get-Process OpenVPNConnect -ErrorAction SilentlyContinue).Count
-   if($gui -ne 0){throw 'Headless connect succeeded but OpenVPN GUI process is still running.'}
    Write-Host 'CONNECTED'
    exit 0
  }

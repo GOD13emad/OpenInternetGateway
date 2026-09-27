@@ -64,7 +64,7 @@ test('Windows backend is fully headless, self-healing, and independent from Open
   assert.match(factory,/successes\.json/i);
   assert.match(factory,/quarantine\.json/i);
   assert.match(auto,/OpenInternetGateway-AutoRecovery/i);
-  assert.doesNotMatch(production,/OpenVPNConnect\.exe/i);
+  assert.doesNotMatch(production,/OpenVPNConnect(?:\.exe)?/i);
   assert.doesNotMatch(production,/--connect-shortcut/i);
   assert.ok(fs.existsSync(path.join(base,'Headless-Control.ps1')));
   assert.ok(fs.existsSync(path.join(base,'Bootstrap-HeadlessConnector.ps1')));
