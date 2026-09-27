@@ -10,7 +10,20 @@ CONSOLE_CONN="OIG-Console-Gateway"
 KEEP="$STATE/linux.keep"
 LOCK="$STATE/gateway.lock"
 FACTORY_PY="$OIG_HOME/linux/config_factory.py"
+DESIRED="$STATE/desired-state"
 mkdir -p "$STATE" "$EVIDENCE"
+
+set_desired() {
+  printf '%s\n' "$1" > "$DESIRED"
+}
+
+desired_state() {
+  if [[ -f "$DESIRED" ]]; then
+    tr -d '\r\n' < "$DESIRED"
+  else
+    echo on
+  fi
+}
 
 delete_connection_name() {
   local target="$1"
@@ -28,7 +41,7 @@ delete_named_connections() {
 }
 
 json_status() {
-  local cf ip loc dns poison routes iface relay auto_state auto effective
+  local cf ip loc dns poison routes iface relay auto_state auto effective desired
   cf="$(curl -4 --max-time 4 -s https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null || true)"
   ip="$(printf '%s\n' "$cf" | awk -F= '$1=="ip"{print $2;exit}')"
   loc="$(printf '%s\n' "$cf" | awk -F= '$1=="loc"{print $2;exit}')"
@@ -52,6 +65,8 @@ PY
 )"
   fi
 
+  desired="$(desired_state)"
+
   if systemctl --user is-enabled openinternetgateway-recovery.timer >/dev/null 2>&1; then
     auto=true
     auto_state="$(systemctl --user is-active openinternetgateway-recovery.timer 2>/dev/null || true)"
@@ -60,16 +75,17 @@ PY
     auto_state="Missing"
   fi
 
-  python3 - "$ip" "$loc" "$dns" "$poison" "$routes" "$relay" "$auto" "$auto_state" "$iface" <<'PY'
+  python3 - "$ip" "$loc" "$dns" "$poison" "$routes" "$relay" "$auto" "$auto_state" "$iface" "$desired" <<'PY'
 import json,sys
-ip,loc,dns,poison,routes,relay,auto,state,iface=sys.argv[1:]
+ip,loc,dns,poison,routes,relay,auto,state,iface,desired=sys.argv[1:]
 dns_list=[x for x in dns.split(",") if x]
 r=int(routes or 0)
 connected=(r>=2 and bool(loc) and loc!="IR" and poison=="false")
 print(json.dumps({
     "connected":connected,"ip":ip,"country":loc,"dns":dns_list,
     "poison":poison=="true","fullRoutes":r,"relay":relay,
-    "autoRecovery":auto=="true","autoRecoveryState":state,"interface":iface
+    "autoRecovery":auto=="true","autoRecoveryState":state,"interface":iface,
+    "desiredState":desired
 },separators=(",",":")))
 PY
 }
@@ -240,6 +256,7 @@ connect_gateway() {
 }
 
 disconnect_gateway() {
+  set_desired off
   rm -f "$KEEP"
   stop_watchdog
   delete_named_connections
@@ -252,6 +269,11 @@ refresh_cache() {
 }
 
 ensure_gateway() {
+  if [[ "$(desired_state)" != "on" ]]; then
+    if healthy; then disconnect_gateway >/dev/null 2>&1 || true; fi
+    echo "DESIRED OFF"
+    return 0
+  fi
   python3 "$FACTORY_PY" ensure --common "$OIG_COMMON" >/dev/null 2>&1 || true
   if healthy; then
     json_status > "$EVIDENCE/auto-recovery-last.json"
@@ -361,9 +383,9 @@ fi
 
 case "$action" in
   status) json_status ;;
-  connect) connect_gateway ;;
+  connect) set_desired on; connect_gateway ;;
   disconnect) disconnect_gateway ;;
-  refresh) refresh_cache; connect_gateway ;;
+  refresh) set_desired on; refresh_cache; connect_gateway ;;
   ensure) ensure_gateway ;;
   factory-status) python3 "$FACTORY_PY" status --common "$OIG_COMMON" ;;
   factory-refresh) python3 "$FACTORY_PY" refresh --common "$OIG_COMMON" ;;

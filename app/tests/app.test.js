@@ -81,6 +81,25 @@ test('desktop app owns a dynamic OIG tray and background startup',()=>{
 });
 
 
+test('version is runtime-derived and quit disconnects the managed tunnel',()=>{
+  const main=fs.readFileSync(path.join(root,'src/main/main.js'),'utf8');
+  const backend=fs.readFileSync(path.join(root,'src/main/platform-backend.js'),'utf8');
+  const html=fs.readFileSync(path.join(root,'src/renderer/index.html'),'utf8');
+  const renderer=fs.readFileSync(path.join(root,'src/renderer/app.js'),'utf8');
+  const linux=fs.readFileSync(path.join(root,'backend/linux/oig-linux.sh'),'utf8');
+  assert.match(main,/version:\s*app\.getVersion\(\)/);
+  assert.match(main,/backend\.action\('disconnect'\)/);
+  assert.match(main,/process\.platform === 'linux'/);
+  assert.match(main,/SIGTERM/);
+  assert.match(backend,/version:\s*this\.version/);
+  assert.doesNotMatch(html,/R2\.2\.1/);
+  assert.match(html,/id="appVersion"/);
+  assert.match(renderer,/state\.platform\.version/);
+  assert.match(linux,/DESIRED=.*desired-state/);
+  assert.match(linux,/set_desired off/);
+  assert.match(linux,/DESIRED OFF/);
+});
+
 test('Linux Debian package path is sandbox-safe',()=>{
   const afterPack=fs.readFileSync(path.join(root,'tools/afterPack.js'),'utf8');
   const afterInstall=fs.readFileSync(path.join(root,'build/linux-after-install.sh'),'utf8');

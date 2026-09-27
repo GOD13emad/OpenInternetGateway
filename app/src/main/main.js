@@ -9,6 +9,8 @@ let backend;
 let trayPoll;
 let trayRefreshing = false;
 let lastStatus = null;
+let quitInProgress = false;
+let allowQuit = false;
 const startInBackground = process.argv.includes('--background');
 
 const gotSingleInstanceLock = app.requestSingleInstanceLock();
@@ -54,10 +56,10 @@ function createWindow() {
     }
   });
   mainWindow.on('close', (event) => {
-    if (!app.isQuitting) {
-      event.preventDefault();
-      mainWindow.hide();
-    }
+    if (app.isQuitting) return;
+    event.preventDefault();
+    if (process.platform === 'linux') requestQuit();
+    else mainWindow.hide();
   });
 }
 
@@ -75,7 +77,7 @@ function renderTray(status = lastStatus) {
     { label: 'Connect', enabled: !connected, click: async () => { try { await backend.action('connect'); } finally { refreshTrayStatus(); } } },
     { label: 'Disconnect', enabled: connected, click: async () => { try { await backend.action('disconnect'); } finally { refreshTrayStatus(); } } },
     { type: 'separator' },
-    { label: 'Quit OpenInternetGateway', click: () => { app.isQuitting = true; app.quit(); } }
+    { label: 'Quit OpenInternetGateway', click: () => requestQuit() }
   ]));
 }
 
@@ -114,6 +116,32 @@ function registerIpc() {
   });
 }
 
+async function disconnectBeforeQuit() {
+  if (!backend) return;
+  const status = await backend.status();
+  if (status?.connected) await backend.action('disconnect');
+}
+
+async function requestQuit() {
+  if (quitInProgress || allowQuit) return;
+  quitInProgress = true;
+  app.isQuitting = true;
+  if (trayPoll) clearInterval(trayPoll);
+  try {
+    await disconnectBeforeQuit();
+    allowQuit = true;
+    app.quit();
+  } catch (error) {
+    console.error('OpenInternetGateway refused to quit before tunnel disconnect:', error);
+    quitInProgress = false;
+    app.isQuitting = false;
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.show();
+      mainWindow.focus();
+    }
+  }
+}
+
 app.on('second-instance', () => {
   if (!mainWindow) return;
   if (mainWindow.isMinimized()) mainWindow.restore();
@@ -123,6 +151,7 @@ app.on('second-instance', () => {
 
 app.whenReady().then(async () => {
   backend = new Backend({
+    version: app.getVersion(),
     resourcesPath: process.resourcesPath,
     appPath: app.getAppPath(),
     userData: app.getPath('userData'),
@@ -145,4 +174,14 @@ app.on('activate', () => {
   else createWindow();
 });
 
-app.on('before-quit', () => { app.isQuitting = true; if (trayPoll) clearInterval(trayPoll); });
+process.on('SIGTERM', () => requestQuit());
+process.on('SIGINT', () => requestQuit());
+
+app.on('before-quit', (event) => {
+  if (allowQuit) {
+    if (trayPoll) clearInterval(trayPoll);
+    return;
+  }
+  event.preventDefault();
+  requestQuit();
+});

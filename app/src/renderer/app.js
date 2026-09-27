@@ -196,7 +196,9 @@ async function init() {
 
   state.platform = await window.gateway.platform();
   setText('platformBadge', (state.platform.platform === 'win32' ? 'Windows' : 'Linux') + ' · ' + state.platform.arch);
+  setText('appVersion', 'v' + (state.platform.version || '—') + ' · Stable Headless');
   $('systemInfo').innerHTML = [
+    ['Version', state.platform.version],
     ['Platform', state.platform.platform],
     ['Architecture', state.platform.arch],
     ['Hostname', state.platform.hostname],

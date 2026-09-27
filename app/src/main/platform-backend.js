@@ -40,7 +40,8 @@ function copyDir(src, dst) {
 }
 
 class Backend {
-  constructor({ resourcesPath, appPath, userData, emit }) {
+  constructor({ version, resourcesPath, appPath, userData, emit }) {
+    this.version = version || '';
     this.resourcesPath = resourcesPath;
     this.appPath = appPath;
     this.userData = userData;
@@ -104,6 +105,7 @@ class Backend {
   platformInfo() {
     return {
       platform: this.platform,
+      version: this.version,
       release: os.release(),
       arch: os.arch(),
       hostname: os.hostname(),

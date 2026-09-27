@@ -1,5 +1,14 @@
 # Changelog
 
+## 2.2.3
+
+- Fixed the dashboard version label so it is derived from the packaged application version instead of a stale hard-coded 2.2.1 string.
+- Linux window close / application quit now performs a managed tunnel disconnect before the Electron process exits.
+- Added SIGTERM/SIGINT graceful shutdown handling so desktop-environment quit paths also disconnect the managed tunnel.
+- Added Linux desired-state persistence: explicit Disconnect/Quit records OFF and Auto-Recovery refuses to reconnect while OFF.
+- Preserved Windows close-to-tray behavior; explicit Quit disconnects the OIG-managed tunnel before exit.
+- Added regression coverage for runtime-derived version display and quit/disconnect lifecycle.
+
 ## 2.2.2
 
 - Fixed Linux Debian packaging so the installed application lives at `/opt/open-internet-gateway` instead of a path containing spaces.
