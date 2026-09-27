@@ -1,5 +1,13 @@
 # Changelog
 
+## 2.2.2
+
+- Fixed Linux Debian packaging so the installed application lives at `/opt/open-internet-gateway` instead of a path containing spaces.
+- Fixed Chromium/Electron zygote startup under the setuid sandbox on Linux.
+- Preserved the public product name “Open Internet Gateway” while changing only the internal Linux FPM install directory.
+- Updated Debian post-install hardening to target the no-space install path.
+- Added a regression test for the Linux package-path/sandbox contract.
+
 ## 2.2.1
 
 - Decoupled the Windows product runtime from the OpenVPN Connect desktop UI.

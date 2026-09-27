@@ -4,7 +4,7 @@ Open Internet Gateway (OIG) is a cross-platform desktop application that maintai
 
 The Windows and Linux backends are different, but both sit behind the same Electron dashboard, system-tray workflow, health model, and Self-Healing Config Factory.
 
-## Release 2.2.1
+## Release 2.2.2
 
 ### Windows
 
@@ -85,7 +85,7 @@ Validated on Ubuntu 24.04-class systems with:
 - OpenVPN 2.6+
 - systemd user services
 
-The Debian package is the preferred Linux install. AppImage is also provided for portable use; some distributions may require FUSE compatibility or an extracted AppImage workflow.
+The Debian package is the preferred Linux install. Linux Debian installs to `/opt/open-internet-gateway` so Chromium's setuid sandbox does not inherit a path containing spaces. AppImage is also provided for portable use; some distributions may require FUSE compatibility or an extracted AppImage workflow.
 
 ## Building
 
@@ -123,7 +123,7 @@ See [SECURITY.md](SECURITY.md).
 
 ## Release signing
 
-The Windows 2.2.1 installer is reproducibly hashed but is **not Authenticode-signed by a trusted publisher**. Verify release checksums before installation.
+The Windows 2.2.2 installer is reproducibly hashed but is **not Authenticode-signed by a trusted publisher**. Verify release checksums before installation.
 
 ## Scope
 

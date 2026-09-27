@@ -79,3 +79,12 @@ test('desktop app owns a dynamic OIG tray and background startup',()=>{
   assert.match(main,/--background/);
   assert.match(main,/setInterval\(refreshTrayStatus/);
 });
+
+
+test('Linux Debian package path is sandbox-safe',()=>{
+  const afterPack=fs.readFileSync(path.join(root,'tools/afterPack.js'),'utf8');
+  const afterInstall=fs.readFileSync(path.join(root,'build/linux-after-install.sh'),'utf8');
+  assert.match(afterPack,/sanitizedProductName\s*=\s*['"]open-internet-gateway['"]/);
+  assert.match(afterInstall,/APPDIR="\/opt\/open-internet-gateway"/);
+  assert.doesNotMatch(afterInstall,/\/opt\/Open Internet Gateway/);
+});

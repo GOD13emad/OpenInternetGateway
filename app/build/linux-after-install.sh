@@ -1,6 +1,6 @@
 #!/bin/sh
 set -eu
-APPDIR="/opt/Open Internet Gateway"
+APPDIR="/opt/open-internet-gateway"
 if [ -d "$APPDIR" ]; then
   chmod 0755 "$APPDIR"
   find "$APPDIR" -type d -exec chmod 0755 {} \;

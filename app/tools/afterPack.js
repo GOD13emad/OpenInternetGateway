@@ -12,6 +12,11 @@ function chmodDirs(root) {
 module.exports = async function afterPack(context) {
   if (context.electronPlatformName !== 'linux') return;
 
+  // FPM uses appInfo.sanitizedProductName as the /opt install directory. Chromium's Linux
+  // setuid sandbox cannot safely launch when that path contains spaces, so keep the public
+  // product name but force only the Linux package install directory to a no-space name.
+  context.packager.appInfo.sanitizedProductName = 'open-internet-gateway';
+
   // electron-builder can inherit a restrictive umask into /opt payload directories.
   // Keep application directories traversable by normal desktop users.
   chmodDirs(context.appOutDir);
