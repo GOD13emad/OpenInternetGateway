@@ -91,6 +91,9 @@ test('version is runtime-derived and quit disconnects the managed tunnel',()=>{
   assert.match(main,/backend\.action\('disconnect'\)/);
   assert.match(main,/process\.platform === 'linux'/);
   assert.match(main,/SIGTERM/);
+  assert.match(main,/watch-parent\.sh/);
+  assert.match(main,/app-process\.lease/);
+  assert.match(main,/detached:\s*true/);
   assert.match(backend,/version:\s*this\.version/);
   assert.doesNotMatch(html,/R2\.2\.1/);
   assert.match(html,/id="appVersion"/);
@@ -98,6 +101,14 @@ test('version is runtime-derived and quit disconnects the managed tunnel',()=>{
   assert.match(linux,/DESIRED=.*desired-state/);
   assert.match(linux,/set_desired off/);
   assert.match(linux,/DESIRED OFF/);
+});
+
+test('Linux independent exit watchdog enforces disconnect safely',()=>{
+  const watchdog=fs.readFileSync(path.join(root,'backend/linux/watch-parent.sh'),'utf8');
+  assert.match(watchdog,/\/proc\/\$pid\/stat/);
+  assert.match(watchdog,/app-process\.lease/);
+  assert.match(watchdog,/replacement-active/);
+  assert.match(watchdog,/oig-linux\.sh" disconnect/);
 });
 
 test('Linux Debian package path is sandbox-safe',()=>{

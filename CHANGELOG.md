@@ -1,5 +1,13 @@
 # Changelog
 
+## 2.2.4
+
+- Added an independent Linux parent-exit watchdog so closing, terminating, or crashing the desktop process cannot leave the OIG-managed tunnel running.
+- The watchdog binds to PID plus Linux process start-time and an app-process lease to avoid PID-reuse and rapid-restart races.
+- Preserved the in-process graceful disconnect path as the first line of defense; the independent watchdog is the fail-safe.
+- Live design regression proved app exit -> tunnel removed -> desired state OFF -> Auto-Recovery remains OFF.
+- Corrected Windows runtime-state auditing to use the authoritative %LOCALAPPDATA%\\OpenInternetGateway backend root rather than the immutable packaged resources copy.
+
 ## 2.2.3
 
 - Fixed the dashboard version label so it is derived from the packaged application version instead of a stale hard-coded 2.2.1 string.

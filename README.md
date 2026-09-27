@@ -4,7 +4,7 @@ Open Internet Gateway (OIG) is a cross-platform desktop application that maintai
 
 The Windows and Linux backends are different, but both sit behind the same Electron dashboard, system-tray workflow, health model, and Self-Healing Config Factory.
 
-## Release 2.2.3
+## Release 2.2.4
 
 ### Windows
 
@@ -18,7 +18,7 @@ OIG does **not** use the OpenVPN Connect desktop UI as its runtime.
 - OIG starts at login with `--background` so the tray can remain available without opening the dashboard.
 - Auto-Recovery runs through one elevated scheduled task and a headless backend.
 
-Validated Windows 2.2.3 state includes JP egress, clean DNS, two protected IPv4 routes, Config Factory recovery, and a live headless connector with zero OpenVPN Connect GUI processes.
+Validated Windows 2.2.4 state includes JP egress, clean DNS, two protected IPv4 routes, Config Factory recovery, and a live headless connector with zero OpenVPN Connect GUI processes.
 
 ### Linux
 
@@ -27,10 +27,10 @@ Linux uses NetworkManager's OpenVPN integration and systemd user recovery.
 - UUID-only connection lifecycle avoids duplicate-name races.
 - Effective routing is validated through the active tunnel interface.
 - Auto-Recovery uses a user-level systemd timer.
-- On Linux, closing/quitting the application disconnects the OIG-managed tunnel; Auto-Recovery respects the persisted OFF state and does not reconnect until the user connects again.
+- On Linux, closing/quitting the application disconnects the OIG-managed tunnel; an independent parent-exit watchdog enforces the same outcome if the Electron process is terminated unexpectedly. Auto-Recovery respects the persisted OFF state and does not reconnect until the user connects again.
 - Release assets include Debian and AppImage builds.
 
-Validated Linux 2.2.3 state includes JP egress, `tun0`, clean DNS, full-route validation, cold-start Config Factory recovery, clean disconnect rollback, and persistent Auto-Recovery.
+Validated Linux 2.2.4 state includes JP egress, `tun0`, clean DNS, full-route validation, cold-start Config Factory recovery, clean disconnect rollback, and persistent Auto-Recovery.
 
 ## Self-Healing Config Factory
 
@@ -123,7 +123,7 @@ See [SECURITY.md](SECURITY.md).
 
 ## Release signing
 
-The Windows 2.2.3 installer is reproducibly hashed but is **not Authenticode-signed by a trusted publisher**. Verify release checksums before installation.
+The Windows 2.2.4 installer is reproducibly hashed but is **not Authenticode-signed by a trusted publisher**. Verify release checksums before installation.
 
 ## Scope
 

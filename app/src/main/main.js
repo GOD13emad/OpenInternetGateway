@@ -1,4 +1,5 @@
 const { app, BrowserWindow, ipcMain, Menu, Tray, nativeImage, shell, nativeTheme } = require('electron');
+const { spawn } = require('child_process');
 const path = require('path');
 const fs = require('fs');
 const Backend = require('./platform-backend');
@@ -116,6 +117,36 @@ function registerIpc() {
   });
 }
 
+function linuxProcStartToken(pid) {
+  try {
+    const raw = fs.readFileSync('/proc/' + String(pid) + '/stat', 'utf8').trim();
+    const end = raw.lastIndexOf(') ');
+    if (end < 0) return '';
+    const fieldsAfterComm = raw.slice(end + 2).split(/\s+/);
+    return fieldsAfterComm[19] || '';
+  } catch {
+    return '';
+  }
+}
+
+function startLinuxExitWatchdog() {
+  if (process.platform !== 'linux' || !backend || process.env.OIG_CAPTURE_ONLY === '1') return;
+  const root = backend.backendRoot;
+  const watcher = path.join(root, 'linux', 'watch-parent.sh');
+  const start = linuxProcStartToken(process.pid);
+  if (!root || !start || !fs.existsSync(watcher)) return;
+  const stateDir = path.join(root, 'state');
+  fs.mkdirSync(stateDir, { recursive: true });
+  fs.writeFileSync(path.join(stateDir, 'app-process.lease'), String(process.pid) + ' ' + start + '\n');
+  try { fs.chmodSync(watcher, 0o755); } catch {}
+  const child = spawn('/bin/bash', [watcher, String(process.pid), start, root], {
+    detached: true,
+    stdio: 'ignore',
+    env: { ...process.env, OIG_HOME: root, OIG_COMMON: path.join(root, 'common') }
+  });
+  child.unref();
+}
+
 async function disconnectBeforeQuit() {
   if (!backend) return;
   const status = await backend.status();
@@ -161,6 +192,7 @@ app.whenReady().then(async () => {
     }
   });
   await backend.initialize();
+  startLinuxExitWatchdog();
   if (process.platform === 'win32' && app.isPackaged) {
     app.setLoginItemSettings({ openAtLogin: true, path: process.execPath, args: ['--background'] });
   }

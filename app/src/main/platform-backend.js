@@ -98,7 +98,9 @@ class Backend {
         }
       }
       this.backendRoot = stable;
-      try { fs.chmodSync(path.join(stable, 'linux', 'oig-linux.sh'), 0o755); } catch {}
+      for (const file of ['oig-linux.sh', 'watch-parent.sh']) {
+        try { fs.chmodSync(path.join(stable, 'linux', file), 0o755); } catch {}
+      }
     }
   }
 
