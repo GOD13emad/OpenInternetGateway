@@ -1,0 +1,62 @@
+# Dependencies / build output
+app/node_modules/
+app/dist/
+release/
+release-assets/
+*.zip
+*.tgz
+*.7z
+
+# Transfer / local staging
+app-final-source*
+app-final-transfer*
+app-source-transfer*
+app/linux-*-bundle*
+transfer-parts/
+
+# Machine-local runtime / evidence
+state/
+evidence/
+runtime/
+PROJECT_BRAIN.md
+EVIDENCE_RECORD.md
+*.log
+*.partial
+*.keep
+*.pid
+
+# Experimental engineering workspace
+/research/
+/scripts/
+/config/
+/Install.ps1
+/OpenInternetGateway.ps1
+/OpenInternetGateway-Menu.ps1
+
+# Generated provider data
+*.ovpn
+vpngate-mirror-api.csv
+**/common/runtime/
+**/common/evidence/
+**/backend/windows/runtime/
+**/backend/windows/evidence/
+**/backend/windows/state/
+
+# Local GUI evidence
+app/evidence-*.png
+app/evidence-*.json
+
+# Keep only distributable app tooling
+app/tools/*
+!app/tools/validate.js
+!app/tools/afterPack.js
+
+# Electron archives and local build helpers
+app/electron-v*.zip
+app/node_modules-transfer.tgz
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

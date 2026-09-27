@@ -1,0 +1,81 @@
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const fs = require('fs');
+const path = require('path');
+const root = path.resolve(__dirname,'..');
+
+test('renderer exposes all primary product workflows',()=>{
+  const html=fs.readFileSync(path.join(root,'src/renderer/index.html'),'utf8');
+  for(const text of ['Refresh configs','Repair now','Automatic recovery','Console Gateway','Self-Healing Config Factory','Refresh configs','Diagnostics','Activity','Settings']) assert.match(html,new RegExp(text,'i'));
+});
+
+test('secure Electron boundary is configured',()=>{
+  const main=fs.readFileSync(path.join(root,'src/main/main.js'),'utf8');
+  assert.match(main,/contextIsolation:\s*true/);
+  assert.match(main,/nodeIntegration:\s*false/);
+  assert.match(main,/sandbox:\s*true/);
+});
+
+test('Linux backend implements required actions',()=>{
+  const sh=fs.readFileSync(path.join(root,'backend/linux/oig-linux.sh'),'utf8');
+  for(const action of ['connect','disconnect','refresh','ensure','auto-install','auto-remove','console-status','console-enable','console-disable']) assert.ok(sh.includes(action));
+});
+
+test('package includes Windows and Linux installers',()=>{
+  const pkg=JSON.parse(fs.readFileSync(path.join(root,'package.json'),'utf8'));
+  assert.equal(pkg.build.win.target[0].target,'nsis');
+  assert.ok(pkg.build.linux.target.includes('AppImage'));
+  assert.ok(pkg.build.linux.target.includes('deb'));
+});
+
+
+test('Config Factory is wired through platform and renderer',()=>{
+  const backend=fs.readFileSync(path.join(root,'src/main/platform-backend.js'),'utf8');
+  const renderer=fs.readFileSync(path.join(root,'src/renderer/app.js'),'utf8');
+  assert.match(backend,/factory-refresh/);
+  assert.match(backend,/configPool/);
+  assert.match(renderer,/poolValidated/);
+  assert.match(renderer,/factoryRefresh/);
+});
+
+
+test('desktop app enforces single-instance tray UX',()=>{
+  const main=fs.readFileSync(path.join(root,'src/main/main.js'),'utf8');
+  assert.match(main,/requestSingleInstanceLock/);
+  assert.match(main,/second-instance/);
+  assert.match(main,/mainWindow\.show\(\)/);
+});
+
+
+test('Windows backend is fully headless, self-healing, and independent from OpenVPN UI', { skip: !fs.existsSync(path.resolve(root,'backend/windows/scripts')) }, ()=>{
+  const base=path.resolve(root,'backend/windows/scripts');
+  const connect=fs.readFileSync(path.join(base,'Connect-OpenInternet.ps1'),'utf8');
+  const disconnect=fs.readFileSync(path.join(base,'Disconnect-OpenInternet.ps1'),'utf8');
+  const ensure=fs.readFileSync(path.join(base,'Ensure-OpenInternet.ps1'),'utf8');
+  const factory=fs.readFileSync(path.join(base,'Config-Factory.ps1'),'utf8');
+  const headless=fs.readFileSync(path.join(base,'Headless-Control.ps1'),'utf8');
+  const bootstrap=fs.readFileSync(path.join(base,'Bootstrap-HeadlessConnector.ps1'),'utf8');
+  const auto=fs.readFileSync(path.join(base,'Install-AutoRecovery.ps1'),'utf8');
+  const production=connect+'\n'+disconnect+'\n'+ensure+'\n'+headless+'\n'+bootstrap;
+
+  assert.match(headless,/ovpnconnector\.exe/i);
+  assert.match(headless,/OVPNConnectorService/i);
+  assert.match(headless,/ProgramData\\OpenInternetGateway/i);
+  assert.match(factory,/successes\.json/i);
+  assert.match(factory,/quarantine\.json/i);
+  assert.match(auto,/OpenInternetGateway-AutoRecovery/i);
+  assert.doesNotMatch(production,/OpenVPNConnect\.exe/i);
+  assert.doesNotMatch(production,/--connect-shortcut/i);
+  assert.ok(fs.existsSync(path.join(base,'Headless-Control.ps1')));
+  assert.ok(fs.existsSync(path.join(base,'Bootstrap-HeadlessConnector.ps1')));
+});
+
+
+test('desktop app owns a dynamic OIG tray and background startup',()=>{
+  const main=fs.readFileSync(path.join(root,'src/main/main.js'),'utf8');
+  assert.match(main,/function renderTray/);
+  assert.match(main,/OpenInternetGateway —/);
+  assert.match(main,/setLoginItemSettings/);
+  assert.match(main,/--background/);
+  assert.match(main,/setInterval\(refreshTrayStatus/);
+});

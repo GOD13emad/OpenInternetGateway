@@ -1,0 +1,100 @@
+{
+  "name": "open-internet-gateway",
+  "version": "2.2.1",
+  "description": "Cross-platform censorship-resilient Internet gateway with headless OpenVPN, anti-flap recovery, and a self-healing configuration factory.",
+  "main": "src/main/main.js",
+  "author": {
+    "name": "GOD13emad",
+    "email": "GOD13emad@users.noreply.github.com"
+  },
+  "license": "MIT",
+  "scripts": {
+    "start": "electron .",
+    "lint": "node tools/validate.js",
+    "test": "node --test tests/*.test.js",
+    "dist": "electron-builder",
+    "dist:win": "electron-builder --win nsis",
+    "dist:linux": "electron-builder --linux AppImage deb"
+  },
+  "devDependencies": {
+    "electron": "44.4.5",
+    "electron-builder": "^26.0.12"
+  },
+  "build": {
+    "appId": "io.openinternet.gateway",
+    "productName": "Open Internet Gateway",
+    "asar": true,
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "src/**/*",
+      "assets/**/*",
+      "package.json"
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "artifactName": "OpenInternetGateway-Setup-${version}.${ext}",
+      "icon": "assets/icon.ico",
+      "extraResources": [
+        {
+          "from": "backend/windows",
+          "to": "backend/windows"
+        },
+        {
+          "from": "common",
+          "to": "backend/common"
+        }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Open Internet Gateway"
+    },
+    "linux": {
+      "target": [
+        "AppImage",
+        "deb"
+      ],
+      "category": "Network",
+      "artifactName": "OpenInternetGateway-${version}-${arch}.${ext}",
+      "icon": "assets/icon.png",
+      "extraResources": [
+        {
+          "from": "backend/linux",
+          "to": "backend/linux"
+        },
+        {
+          "from": "common",
+          "to": "backend/common"
+        }
+      ],
+      "maintainer": "GOD13emad <GOD13emad@users.noreply.github.com>",
+      "syncDesktopName": true,
+      "synopsis": "Validated self-healing full-device Internet gateway"
+    },
+    "afterPack": "tools/afterPack.js",
+    "deb": {
+      "afterInstall": "build/linux-after-install.sh"
+    }
+  },
+  "homepage": "https://github.com/GOD13emad/OpenInternetGateway",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/GOD13emad/OpenInternetGateway.git"
+  },
+  "bugs": {
+    "url": "https://github.com/GOD13emad/OpenInternetGateway/issues"
+  },
+  "desktopName": "OpenInternetGateway.desktop"
+}

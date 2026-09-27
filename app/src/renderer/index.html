@@ -1,0 +1,186 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; img-src 'self' data:;">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Open Internet Gateway</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-mark">
+          <svg viewBox="0 0 48 48" aria-hidden="true"><path d="M24 4 42 12v11c0 11.4-7.3 18-18 21C13.3 41 6 34.4 6 23V12L24 4Z"/><path class="wave" d="M13 25c5-8 10 8 15 0s8-3 10 0"/></svg>
+        </div>
+        <div><strong>Open Internet</strong><span>Gateway</span></div>
+      </div>
+
+      <nav class="nav">
+        <button class="nav-item active" data-page="overview">
+          <span class="nav-icon">⌂</span><span>Overview</span>
+        </button>
+        <button class="nav-item" data-page="diagnostics">
+          <span class="nav-icon">◈</span><span>Diagnostics</span>
+        </button>
+        <button class="nav-item" data-page="activity">
+          <span class="nav-icon">≋</span><span>Activity</span>
+        </button>
+        <button class="nav-item" data-page="settings">
+          <span class="nav-icon">⚙</span><span>Settings</span>
+        </button>
+      </nav>
+
+      <div class="sidebar-bottom">
+        <div class="side-status">
+          <span class="dot" id="sidebarDot"></span>
+          <div><b id="sidebarStatus">Checking…</b><small id="sidebarCountry">Network status</small></div>
+        </div>
+        <div class="version">R2.2.1 · Stable Headless</div>
+      </div>
+    </aside>
+
+    <main class="content">
+      <header class="topbar">
+        <div>
+          <h1 id="pageTitle">Overview</h1>
+          <p id="pageSubtitle">Private, resilient, full-device Internet routing.</p>
+        </div>
+        <div class="top-actions">
+          <span class="platform-badge" id="platformBadge">…</span>
+          <button class="icon-button" id="refreshStatus" title="Refresh status">↻</button>
+        </div>
+      </header>
+
+      <section class="page active" id="page-overview">
+        <div class="hero-grid">
+          <article class="connection-card panel">
+            <div class="connection-ambient"></div>
+            <div class="card-kicker">SECURE TUNNEL</div>
+            <button class="power-orb" id="powerButton" aria-label="Connect or disconnect">
+              <span class="power-glyph">⏻</span>
+              <span class="orb-ring"></span>
+            </button>
+            <div class="connection-copy">
+              <h2 id="connectionTitle">Checking connection</h2>
+              <p id="connectionDetail">Reading route and DNS state…</p>
+            </div>
+            <div class="connection-actions">
+              <button class="btn secondary" id="refreshConnect">Refresh configs</button>
+              <button class="btn ghost" id="ensureButton">Repair now</button>
+            </div>
+          </article>
+
+          <div class="side-stack">
+            <article class="panel health-card">
+              <div class="panel-head">
+                <div><span class="eyebrow">HEALTH</span><h3>Protection status</h3></div>
+                <span class="score" id="healthScore">—</span>
+              </div>
+              <div class="health-list">
+                <div class="health-row"><span class="health-icon" id="routeIcon">•</span><div><b>Full-device route</b><small id="routeHealth">Checking</small></div></div>
+                <div class="health-row"><span class="health-icon" id="dnsIcon">•</span><div><b>DNS integrity</b><small id="dnsHealth">Checking</small></div></div>
+                <div class="health-row"><span class="health-icon" id="recoveryIcon">•</span><div><b>Auto-Recovery</b><small id="recoveryHealth">Checking</small></div></div>
+                <div class="health-row"><span class="health-icon" id="factoryIcon">•</span><div><b>Config Factory</b><small id="factoryHealth">Checking</small></div></div>
+              </div>
+            </article>
+
+            <article class="panel relay-card">
+              <div><span class="eyebrow">ACTIVE RELAY</span><h3 id="relayName">Not connected</h3><p id="relayMeta">Dynamic validated endpoint</p></div>
+              <div class="signal-bars" aria-hidden="true"><i></i><i></i><i></i><i></i></div>
+            </article>
+          </div>
+        </div>
+
+        <div class="stats-grid">
+          <article class="stat-card panel"><span class="stat-icon">◎</span><div><small>Public IP</small><strong id="ipStat">—</strong></div></article>
+          <article class="stat-card panel"><span class="stat-icon">⌖</span><div><small>Exit country</small><strong id="countryStat">—</strong></div></article>
+          <article class="stat-card panel"><span class="stat-icon">◫</span><div><small>Secure DNS</small><strong id="dnsStat">—</strong></div></article>
+          <article class="stat-card panel"><span class="stat-icon">⇄</span><div><small>Protected routes</small><strong id="routesStat">—</strong></div></article>
+        </div>
+
+        <div class="overview-lower">
+          <article class="panel feature-card">
+            <div class="feature-icon auto">↻</div>
+            <div class="feature-copy"><h3>Automatic recovery</h3><p>Checks the tunnel and restores a validated route after network or power interruptions.</p></div>
+            <button class="btn compact" id="autoButton">Manage</button>
+          </article>
+          <article class="panel feature-card">
+            <div class="feature-icon console">▣</div>
+            <div class="feature-copy"><h3>Console Gateway</h3><p>Share the validated tunnel through a dedicated game-console Ethernet adapter.</p></div>
+            <button class="btn compact" id="consoleButton">Status</button>
+          </article>
+          <article class="panel feature-card factory-card">
+            <div class="feature-icon factory">◇</div>
+            <div class="feature-copy factory-copy">
+              <h3>Self-Healing Config Factory</h3>
+              <p id="factorySource">Maintains multiple validated and standby tunnel profiles automatically.</p>
+              <div class="pool-metrics">
+                <span><b id="poolValidated">0</b><small>Validated</small></span>
+                <span><b id="poolStandby">0</b><small>Standby</small></span>
+                <span><b id="poolQuarantined">0</b><small>Quarantined</small></span>
+                <span><b id="poolGenerations">0</b><small>Generations</small></span>
+                <span><b id="poolProtocols">—</b><small>Transports</small></span>
+                <span><b id="poolAge">—</b><small>Pool age</small></span>
+              </div>
+            </div>
+            <button class="btn compact" id="factoryRefresh">Refresh configs</button>
+          </article>
+        </div>
+      </section>
+
+      <section class="page" id="page-diagnostics">
+        <article class="panel diagnostics-panel">
+          <div class="panel-head"><div><span class="eyebrow">LIVE TESTS</span><h3>Network diagnostics</h3></div><button class="btn secondary compact" id="runDiagnostics">Run checks</button></div>
+          <div id="diagnosticRows" class="diagnostic-list"><div class="empty">Run diagnostics to verify the route.</div></div>
+        </article>
+        <article class="panel detail-panel">
+          <span class="eyebrow">RAW STATE</span>
+          <pre id="diagnosticRaw">Waiting for diagnostic data…</pre>
+        </article>
+      </section>
+
+      <section class="page" id="page-activity">
+        <article class="panel activity-panel">
+          <div class="panel-head"><div><span class="eyebrow">EVIDENCE</span><h3>Recent activity</h3></div><button class="btn secondary compact" id="reloadActivity">Reload</button></div>
+          <div id="activityList" class="timeline"><div class="empty">No recent activity loaded.</div></div>
+        </article>
+      </section>
+
+      <section class="page" id="page-settings">
+        <div class="settings-grid">
+          <article class="panel settings-card">
+            <span class="eyebrow">APPEARANCE</span><h3>Theme</h3>
+            <div class="segmented" id="themeSwitch">
+              <button data-theme-value="dark" class="active">Dark</button>
+              <button data-theme-value="light">Light</button>
+              <button data-theme-value="system">System</button>
+            </div>
+          </article>
+          <article class="panel settings-card">
+            <span class="eyebrow">RECOVERY</span><h3>Auto-Recovery</h3>
+            <p>Install or repair the health monitor, or remove it completely.</p>
+            <div class="button-row">
+              <button class="btn" id="installRecovery">Install / repair</button>
+              <button class="btn ghost danger" id="removeRecovery">Remove</button>
+            </div>
+          </article>
+          <article class="panel settings-card wide">
+            <span class="eyebrow">SYSTEM</span><h3>Runtime information</h3>
+            <div id="systemInfo" class="system-info"></div>
+            <button class="btn secondary compact" id="openLogs">Open logs</button>
+          </article>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <div id="busyOverlay" class="busy-overlay">
+    <div class="busy-card"><div class="spinner"></div><strong id="busyTitle">Working…</strong><span id="busyDetail">Validating the network path.</span></div>
+  </div>
+  <div id="toast" class="toast"></div>
+
+  <script src="app.js"></script>
+</body>
+</html>
