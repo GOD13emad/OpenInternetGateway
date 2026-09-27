@@ -1,0 +1,133 @@
+name: release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  seed:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build public fallback pool
+        run: |
+          python3 app/backend/linux/config_factory.py refresh --common app/common
+          python3 app/backend/linux/config_factory.py status --common app/common
+          test -f app/common/runtime/udp-cache/index.json
+          test "$(find app/common/runtime/udp-cache -maxdepth 1 -name '*.ovpn' | wc -l)" -ge 6
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-seed
+          path: |
+            app/common/runtime/udp-cache
+            app/common/evidence
+          if-no-files-found: error
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+      - working-directory: app
+        run: npm ci
+      - working-directory: app
+        run: npm run lint
+      - working-directory: app
+        run: npm test
+      - working-directory: app
+        run: npm audit --audit-level=high
+
+  windows:
+    needs: seed
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-seed
+          path: app/common
+      - name: Seed Windows backend
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path app/backend/windows/runtime/udp-cache,app/backend/windows/evidence | Out-Null
+          Copy-Item app/common/runtime/udp-cache/* app/backend/windows/runtime/udp-cache -Force
+          if (Test-Path app/common/evidence/vpngate-mirror-api.csv) {
+            Copy-Item app/common/evidence/vpngate-mirror-api.csv app/backend/windows/evidence/vpngate-mirror-api.csv -Force
+          }
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+      - working-directory: app
+        run: npm ci
+      - working-directory: app
+        run: npm run dist:win
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-windows
+          path: app/dist/OpenInternetGateway-Setup-*.exe
+          if-no-files-found: error
+
+  linux:
+    needs: seed
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-seed
+          path: app/common
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+      - working-directory: app
+        run: npm ci
+      - working-directory: app
+        run: npm run dist:linux
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-linux
+          path: |
+            app/dist/OpenInternetGateway-*.AppImage
+            app/dist/OpenInternetGateway-*.deb
+          if-no-files-found: error
+
+  publish:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [seed, test, windows, linux]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: release
+          merge-multiple: true
+      - name: Generate checksums
+        run: |
+          cd release
+          sha256sum OpenInternetGateway-* > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" release/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --verify-tag \
+            --title "OpenInternetGateway $GITHUB_REF_NAME" \
+            --generate-notes
