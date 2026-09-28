@@ -249,7 +249,11 @@ try{
    }
  }
  if(-not $connected){
-   if($ProfileSha){throw 'Selected relay failed headless connector validation.'}
+   if($ProfileSha){
+     Save-Desired 'off'
+     Stop-Connector
+     throw 'Selected relay failed headless connector validation.'
+   }
    throw 'No Config Factory profile passed headless connector validation.'
  }
  & (Join-Path $PSScriptRoot 'Config-Factory.ps1') -Action Status|Out-Null

@@ -153,7 +153,9 @@ test('selected relay connection is exact rather than fallback',()=>{
   assert.match(linux,/connect-profile\)/);
   assert.match(linux,/connect_gateway "\$2"/);
   assert.match(linux,/profile_lines "\$exact_sha"/);
+  assert.match(linux,/set_desired off/);
   assert.match(windows,/\$ProfileSha/);
+  assert.match(windows,/Save-Desired 'off'/);
   assert.match(windows,/Get-Candidates \$ProfileSha/);
   assert.match(ensure,/exact-profile\.request/);
   assert.match(ensure,/-ProfileSha \$sha/);

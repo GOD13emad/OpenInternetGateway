@@ -276,6 +276,7 @@ connect_gateway() {
   delete_named_connections
   python3 "$FACTORY_PY" status --common "$OIG_COMMON" >/dev/null 2>&1 || true
   if [[ -n "$exact_sha" ]]; then
+    set_desired off
     echo "Selected relay failed validation." >&2
   else
     echo "No generated relay configuration passed validation." >&2
