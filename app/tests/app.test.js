@@ -190,13 +190,16 @@ test('Windows exact relay switch is atomic, bounded and SHA verified',()=>{
   const renderer=fs.readFileSync(path.join(root,'src/renderer/app.js'),'utf8');
   const block=backend.slice(backend.indexOf('async connectProfile'),backend.indexOf('async _directInternetPath'));
   assert.doesNotMatch(block,/this\._windows\('disconnect'\)[\s\S]*this\._windows\('connect'\)/);
-  assert.match(block,/exact-profile\.request[\s\S]*this\._windows\('connect'\)/);
+  assert.match(block,/this\.platform !== 'win32'[\s\S]*exact-profile\.request|exact-profile\.request[\s\S]*this\.platform !== 'win32'/);
+  assert.match(block,/_windows\('connect', \['-ProfileSha', sha\]\)/);
   assert.match(block,/actualSha[\s\S]*actualSha !== wanted/);
   assert.match(block,/type: 'progress'[\s\S]*stage: 'switching'/);
   assert.match(connect,/\$expectedSha/);
-  assert.match(connect,/\$waitSeconds=\$\(if\(\$expectedSha\)\{60\}else\{150\}\)/);
+  assert.match(connect,/\$idleUntil=\(Get-Date\)\.AddSeconds\(90\)/);
+  assert.match(connect,/\$waitSeconds=\$\(if\(\$expectedSha\)\{150\}else\{150\}\)/);
+  assert.match(connect,/Gateway intent remains on/);
   assert.match(connect,/CONNECTED EXACT/);
-  assert.match(connect,/Selected relay failed validation; no fallback relay was accepted/);
+  assert.match(connect,/Selected relay failed validation\. Gateway intent remains on so the previous preferred relay can be restored/);
   assert.match(renderer,/payload\.type === 'progress'/);
   assert.match(block,/restorePrevious/);
   assert.match(block,/Previous working relay was restored/);
@@ -228,6 +231,24 @@ test('failed exact relay attempt preserves preferred metadata and clears stale r
   fs.rmSync(tmp,{recursive:true,force:true});
 });
 
+test('Windows foreground exact connect owns its request and preserves gateway intent on failure',()=>{
+  const connect=fs.readFileSync(path.join(root,'backend/windows/scripts/Connect-OpenInternet.ps1'),'utf8');
+  const main=fs.readFileSync(path.join(root,'backend/windows/OpenInternetGateway.ps1'),'utf8');
+  const backend=fs.readFileSync(path.join(root,'src/main/platform-backend.js'),'utf8');
+  const headless=fs.readFileSync(path.join(root,'backend/windows/scripts/Headless-Control.ps1'),'utf8');
+  assert.match(connect,/param\(\[string\]\$ProfileSha=''/);
+  assert.match(connect,/Remove-Item -LiteralPath \$exact[\s\S]*\$idleUntil=\(Get-Date\)\.AddSeconds\(90\)/);
+  assert.match(connect,/requestId=\$requestId/);
+  assert.match(connect,/State -ne 'Running'[\s\S]*Selected relay failed validation\. Gateway intent remains on/);
+  assert.match(main,/\[string\]\$ProfileSha=''/);
+  assert.match(main,/Connect-OpenInternet\.ps1" -ProfileSha \$ProfileSha/);
+  assert.match(backend,/async _windows\(action, extraArgs = \[\]\)/);
+  assert.match(backend,/_windows\('connect', \['-ProfileSha', sha\]\)/);
+  const failure=headless.slice(headless.indexOf('if(-not $connected)'),headless.indexOf('& (Join-Path $PSScriptRoot',headless.indexOf('if(-not $connected)')));
+  assert.doesNotMatch(failure,/Save-Desired 'off'/);
+  assert.doesNotMatch(failure,/Stop-Connector/);
+});
+
 test('selected relay connection is exact rather than fallback',()=>{
   const linux=fs.readFileSync(path.join(root,'backend/linux/oig-linux.sh'),'utf8');
   const windows=fs.readFileSync(path.join(root,'backend/windows/scripts/Headless-Control.ps1'),'utf8');
@@ -238,7 +259,8 @@ test('selected relay connection is exact rather than fallback',()=>{
   assert.match(linux,/profile_lines "\$exact_sha"/);
   assert.match(linux,/set_desired off/);
   assert.match(windows,/\$ProfileSha/);
-  assert.match(windows,/Save-Desired 'off'/);
+  const exactFailure=windows.slice(windows.indexOf('if(-not $connected)'),windows.indexOf('& (Join-Path $PSScriptRoot',windows.indexOf('if(-not $connected)')));
+  assert.doesNotMatch(exactFailure,/Save-Desired 'off'/);
   assert.match(windows,/Get-Candidates \$ProfileSha/);
   assert.match(ensure,/exact-profile\.request/);
   assert.match(ensure,/-ProfileSha \$sha/);

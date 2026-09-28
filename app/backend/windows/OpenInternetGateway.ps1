@@ -1,8 +1,8 @@
 [CmdletBinding()]
-param([ValidateSet('Connect','Disconnect','Status','RefreshConnect','Ensure','AutoRecoveryInstall','AutoRecoveryRemove','ConsoleStatus','ConsoleEnable','ConsoleDisable','ConfigStatus','ConfigRefresh')][string]$Action='Status')
+param([ValidateSet('Connect','Disconnect','Status','RefreshConnect','Ensure','AutoRecoveryInstall','AutoRecoveryRemove','ConsoleStatus','ConsoleEnable','ConsoleDisable','ConfigStatus','ConfigRefresh')][string]$Action='Status',[string]$ProfileSha='')
 $Root=$PSScriptRoot
 switch($Action){
- 'Connect'{& "$Root\scripts\Connect-OpenInternet.ps1"}
+ 'Connect'{& "$Root\scripts\Connect-OpenInternet.ps1" -ProfileSha $ProfileSha}
  'RefreshConnect'{& "$Root\scripts\Config-Factory.ps1" -Action Refresh}
  'Disconnect'{& "$Root\scripts\Disconnect-OpenInternet.ps1"}
  'Ensure'{& "$Root\scripts\Ensure-OpenInternet.ps1"}

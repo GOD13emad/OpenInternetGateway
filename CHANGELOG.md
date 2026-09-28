@@ -1,5 +1,16 @@
 # Changelog
 
+## 2.5.3
+
+- Fixed Windows per-relay **Connect** and **Speed** foreground operations racing the elevated Auto-Recovery task.
+- Exact relay requests are now owned by the foreground operation: legacy requests are removed before waiting for task idle, then recreated only after the task is ready.
+- Exact-connect waits up to 90 seconds for a previous recovery operation to leave Running state instead of firing into a task configured with IgnoreNew.
+- Exact-connect validation is bounded to 150 seconds and no longer treats request-file consumption itself as failure; final task/tunnel state is authoritative.
+- A failed selected relay no longer sets the whole gateway intent to OFF, so the previous preferred relay can be restored deterministically.
+- Windows backend now passes the selected profile SHA explicitly to the Connect control path; Linux exact-profile behavior is unchanged.
+- Added regression coverage for foreground request ownership, task serialization, preserved desired state, exact SHA validation and rollback.
+- Live Windows validation after the hotfix: Connect reached an exact US relay with current SHA == preferred SHA, desired=on, connector Running and two full routes; Speed then persisted a real benchmark for the same active SHA.
+
 ## 2.5.2
 
 - Fixed exact per-row relay switching on Windows so the selected relay request cannot be consumed during a redundant disconnect phase and silently replaced by another relay.

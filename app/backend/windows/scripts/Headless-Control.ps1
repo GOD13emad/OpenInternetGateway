@@ -269,8 +269,8 @@ try{
  }
  if(-not $connected){
    if($ProfileSha){
-     Save-Desired 'off'
-     Stop-Connector
+     # A failed foreground relay choice must not turn the whole gateway intent off.
+     # connectProfile can now restore the previous preferred relay deterministically.
      throw 'Selected relay failed headless connector validation.'
    }
    throw 'No Config Factory profile passed headless connector validation.'

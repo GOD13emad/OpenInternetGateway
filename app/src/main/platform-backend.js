@@ -135,7 +135,7 @@ class Backend {
     };
   }
 
-  async _windows(action) {
+  async _windows(action, extraArgs = []) {
     const main = path.join(this.backendRoot, 'OpenInternetGateway.ps1');
     const map = {
       connect: 'Connect',
@@ -184,7 +184,7 @@ class Backend {
       return { ok: true, output: r.stdout };
     }
 
-    const r = await run('pwsh.exe', ['-NoProfile','-ExecutionPolicy','Bypass','-File',main,'-Action',mapped], {
+    const r = await run('pwsh.exe', ['-NoProfile','-ExecutionPolicy','Bypass','-File',main,'-Action',mapped,...extraArgs], {
       cwd: this.backendRoot,
       timeout: 240000
     });
@@ -320,15 +320,17 @@ class Backend {
 
     const request = path.join(this.backendRoot, 'state', 'exact-profile.request');
     const requestExact = async (sha, country, host) => {
-      try { fs.unlinkSync(request); } catch {}
-      this._writeJson(request, { sha256: sha, at: new Date().toISOString() });
+      if (this.platform !== 'win32') {
+        try { fs.unlinkSync(request); } catch {}
+        this._writeJson(request, { sha256: sha, at: new Date().toISOString() });
+      }
       this.emit({
         type: 'progress',
         action: 'connect-profile',
         stage: 'switching',
         message: 'Switching to ' + (country || 'selected') + ' relay ' + (host || '') + '…'
       });
-      if (this.platform === 'win32') await this._windows('connect');
+      if (this.platform === 'win32') await this._windows('connect', ['-ProfileSha', sha]);
       else await this._linux('connect-profile', [sha]);
     };
     const restorePrevious = async () => {
