@@ -1,5 +1,5 @@
 const $ = (id) => document.getElementById(id);
-const state = { status: null, busy: false, platform: null, page: 'overview' };
+const state = { status: null, busy: false, platform: null, page: 'overview', profiles: [], countries: [], countryFilter: '' };
 
 function setText(id, value) { const el = $(id); if (el) el.textContent = value ?? '—'; }
 function safeArray(v) { return Array.isArray(v) ? v : v ? [v] : []; }
@@ -16,7 +16,7 @@ function setBusy(on, action = '') {
   state.busy = on;
   $('busyOverlay').classList.toggle('show', on);
   if (on) {
-    const names = { connect:'Connecting', disconnect:'Disconnecting', refresh:'Refreshing config pool', ensure:'Repairing connection', 'factory-refresh':'Refreshing config pool', 'auto-install':'Installing recovery', 'auto-remove':'Removing recovery', 'console-enable':'Enabling console gateway', 'console-disable':'Disabling console gateway', 'console-status':'Checking console gateway' };
+    const names = { connect:'Connecting', disconnect:'Disconnecting', refresh:'Refreshing config pool', ensure:'Repairing connection', 'connect-profile':'Switching relay', 'benchmark-active':'Measuring real tunnel speed', 'factory-refresh':'Refreshing config pool', 'auto-install':'Installing recovery', 'auto-remove':'Removing recovery', 'console-enable':'Enabling console gateway', 'console-disable':'Disabling console gateway', 'console-status':'Checking console gateway' };
     setText('busyTitle', names[action] || 'Working…');
   }
 }
@@ -81,17 +81,158 @@ async function refreshStatus(silent = true) {
   }
 }
 
-async function runAction(action, message) {
+async function runAction(action, message, options = {}) {
   if (state.busy) return;
   setBusy(true, action);
   try {
-    const result = await window.gateway.action(action);
+    const result = await window.gateway.action(action, options);
     if (result?.status) renderStatus(result.status);
     else await refreshStatus();
     showToast(message || 'Action completed.');
     return result;
   } catch (e) {
     showToast(e.message || 'Action failed.', true);
+  } finally {
+    setBusy(false);
+  }
+}
+
+function metric(value, suffix = '') {
+  return value == null || Number.isNaN(Number(value)) ? '—' : (String(value) + suffix);
+}
+
+function renderBenchmarkSummary() {
+  const active = state.profiles.find(p => p.active);
+  const b = active?.benchmark;
+  const box = $('benchmarkSummary');
+  if (!box) return;
+  const values = [
+    b?.icmpPingMs == null ? 'Blocked / —' : metric(b.icmpPingMs, ' ms'),
+    b?.httpsLatencyMs == null ? '—' : metric(b.httpsLatencyMs, ' ms'),
+    b?.downloadMbps == null ? '—' : metric(b.downloadMbps, ' Mbps'),
+    b?.uploadMbps == null ? '—' : metric(b.uploadMbps, ' Mbps')
+  ];
+  box.querySelectorAll('b').forEach((el,i) => { el.textContent = values[i] || '—'; });
+}
+
+function renderConnections() {
+  const body = $('connectionRows');
+  if (!body) return;
+  body.innerHTML = '';
+  const filter = state.countryFilter || '';
+  const rows = state.profiles.filter(p => !filter || p.country === filter);
+  if (!rows.length) {
+    const tr = document.createElement('tr');
+    const td = document.createElement('td'); td.colSpan = 9; td.className = 'empty'; td.textContent = 'No relays match this country filter.';
+    tr.appendChild(td); body.appendChild(tr); renderBenchmarkSummary(); return;
+  }
+  for (const p of rows) {
+    const tr = document.createElement('tr');
+    if (p.active) tr.classList.add('active-row');
+    if (p.quarantined) tr.classList.add('quarantined');
+
+    const country = document.createElement('td');
+    const cc = document.createElement('span'); cc.className = 'country-chip'; cc.textContent = p.country || '—'; country.appendChild(cc);
+
+    const relay = document.createElement('td'); relay.className = 'relay-cell';
+    const rb = document.createElement('b'); rb.textContent = p.host || p.ip || 'Relay';
+    const rs = document.createElement('small'); rs.textContent = (p.ip || '—') + ':' + (p.port || '—');
+    relay.append(rb, rs);
+
+    const protocol = document.createElement('td');
+    const pc = document.createElement('span'); pc.className = 'protocol-chip'; pc.textContent = p.protocol || '—'; protocol.appendChild(pc);
+
+    const sourcePing = document.createElement('td'); sourcePing.className = 'metric-source';
+    sourcePing.textContent = p.sourcePingMs == null ? '—' : (p.sourcePingMs + ' ms');
+
+    const livePing = document.createElement('td'); livePing.className = 'metric-real';
+    livePing.textContent = p.benchmark?.icmpPingMs != null ? (p.benchmark.icmpPingMs + ' ms ICMP') : (p.benchmark?.httpsLatencyMs != null ? (p.benchmark.httpsLatencyMs + ' ms HTTPS') : '—');
+
+    const down = document.createElement('td'); down.className = 'metric-real';
+    down.textContent = p.benchmark?.downloadMbps == null ? 'Not tested' : (p.benchmark.downloadMbps + ' Mbps');
+
+    const up = document.createElement('td'); up.className = 'metric-real';
+    up.textContent = p.benchmark?.uploadMbps == null ? 'Not tested' : (p.benchmark.uploadMbps + ' Mbps');
+
+    const status = document.createElement('td');
+    const sc = document.createElement('span');
+    sc.className = 'state-chip ' + (p.active ? 'active' : p.quarantined ? 'bad' : p.validated ? 'validated' : '');
+    sc.textContent = p.active ? 'ACTIVE' : p.quarantined ? 'QUARANTINED' : p.validated ? 'VALIDATED' : p.preferred ? 'PREFERRED' : 'STANDBY';
+    status.appendChild(sc);
+
+    const actions = document.createElement('td'); actions.className = 'row-actions';
+    const connect = document.createElement('button'); connect.className = 'btn secondary'; connect.textContent = p.active ? 'Active' : 'Connect';
+    connect.disabled = p.active || p.quarantined;
+    connect.dataset.action = 'connect-profile'; connect.dataset.sha = p.sha256;
+    const test = document.createElement('button'); test.className = 'btn'; test.textContent = 'Test';
+    test.disabled = p.quarantined; test.dataset.action = 'test-profile'; test.dataset.sha = p.sha256;
+    actions.append(connect, test);
+
+    tr.append(country, relay, protocol, sourcePing, livePing, down, up, status, actions);
+    body.appendChild(tr);
+  }
+  renderBenchmarkSummary();
+}
+
+async function loadConnections() {
+  const body = $('connectionRows');
+  if (body) body.innerHTML = '<tr><td colspan="9" class="empty">Loading connection inventory…</td></tr>';
+  try {
+    const result = await window.gateway.profiles();
+    state.profiles = result?.profiles || [];
+    state.countries = result?.countries || [];
+    const select = $('countryFilter');
+    const previous = state.countryFilter;
+    select.innerHTML = '<option value="">All countries</option>';
+    for (const country of state.countries) {
+      const option = document.createElement('option'); option.value = country; option.textContent = country; select.appendChild(option);
+    }
+    if (previous && state.countries.includes(previous)) select.value = previous;
+    else state.countryFilter = '';
+    renderConnections();
+  } catch (e) {
+    if (body) body.innerHTML = '<tr><td colspan="9" class="empty">Unable to read connection inventory.</td></tr>';
+    showToast(e.message || 'Unable to load connections.', true);
+  }
+}
+
+async function connectOrTestProfile(sha256, testAfter = false) {
+  if (state.busy) return;
+  setBusy(true, 'connect-profile');
+  try {
+    const selected = state.profiles.find(p => p.sha256 === sha256);
+    if (!selected?.active) {
+      const connected = await window.gateway.action('connect-profile', { sha256 });
+      if (connected?.status) renderStatus(connected.status);
+    }
+    if (testAfter) {
+      setBusy(true, 'benchmark-active');
+      const measured = await window.gateway.action('benchmark-active');
+      if (measured?.status) renderStatus(measured.status);
+      const b = measured?.benchmark;
+      showToast(b ? ('Measured ' + b.downloadMbps + ' Mbps down · ' + b.uploadMbps + ' Mbps up') : 'Measurement completed.');
+    } else {
+      showToast('Relay selected and validated.');
+    }
+    await loadConnections();
+  } catch (e) {
+    showToast(e.message || 'Relay operation failed.', true);
+  } finally {
+    setBusy(false);
+  }
+}
+
+async function benchmarkCurrent() {
+  if (state.busy) return;
+  setBusy(true, 'benchmark-active');
+  try {
+    const result = await window.gateway.action('benchmark-active');
+    if (result?.status) renderStatus(result.status);
+    const b = result?.benchmark;
+    showToast(b ? ('Actual speed: ' + b.downloadMbps + ' Mbps down · ' + b.uploadMbps + ' Mbps up') : 'Measurement completed.');
+    await loadConnections();
+  } catch (e) {
+    showToast(e.message || 'Real speed test failed.', true);
   } finally {
     setBusy(false);
   }
@@ -148,11 +289,13 @@ function setPage(name) {
   document.querySelectorAll('.page').forEach(p => p.classList.toggle('active', p.id === 'page-' + name));
   const meta = {
     overview:['Overview','Private, resilient, full-device Internet routing.'],
+    connections:['Connections','Choose countries and relays, then measure real tunnel performance.'],
     diagnostics:['Diagnostics','Verify egress, DNS integrity and recovery readiness.'],
     activity:['Activity','Evidence from connection and recovery events.'],
     settings:['Settings','Appearance, recovery and runtime information.']
   }[name];
   setText('pageTitle', meta[0]); setText('pageSubtitle', meta[1]);
+  if (name === 'connections') loadConnections();
   if (name === 'diagnostics') loadDiagnostics();
   if (name === 'activity') loadActivity();
 }
@@ -160,6 +303,15 @@ function setPage(name) {
 async function init() {
   document.querySelectorAll('.nav-item').forEach(b => b.addEventListener('click', () => setPage(b.dataset.page)));
   $('powerButton').addEventListener('click', () => runAction(state.status?.connected ? 'disconnect' : 'connect', state.status?.connected ? 'Disconnected.' : 'Connected and validated.'));
+  $('reloadConnections').addEventListener('click', loadConnections);
+  $('benchmarkCurrent').addEventListener('click', benchmarkCurrent);
+  $('countryFilter').addEventListener('change', e => { state.countryFilter = e.target.value; renderConnections(); });
+  $('connectionRows').addEventListener('click', e => {
+    const button = e.target.closest('button[data-action]');
+    if (!button || button.disabled) return;
+    if (button.dataset.action === 'connect-profile') connectOrTestProfile(button.dataset.sha, false);
+    if (button.dataset.action === 'test-profile') connectOrTestProfile(button.dataset.sha, true);
+  });
   $('refreshConnect').addEventListener('click', () => runAction('refresh', 'Config pool refreshed. Active relay was not changed.'));
   $('ensureButton').addEventListener('click', () => runAction('ensure', 'Health check completed.'));
   $('refreshStatus').addEventListener('click', () => refreshStatus(false));

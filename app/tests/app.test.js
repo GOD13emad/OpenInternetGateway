@@ -141,6 +141,34 @@ test('multi-country config factories retain country metadata and no JP-only gate
   assert.match(platform,/\$loc -ne 'IR'/);
 });
 
+test('connection inventory exposes honest source-vs-live metrics and selectable profiles',()=>{
+  const html=fs.readFileSync(path.join(root,'src/renderer/index.html'),'utf8');
+  const renderer=fs.readFileSync(path.join(root,'src/renderer/app.js'),'utf8');
+  const preload=fs.readFileSync(path.join(root,'src/preload/preload.js'),'utf8');
+  const main=fs.readFileSync(path.join(root,'src/main/main.js'),'utf8');
+  const backend=fs.readFileSync(path.join(root,'src/main/platform-backend.js'),'utf8');
+  const linux=fs.readFileSync(path.join(root,'backend/linux/oig-linux.sh'),'utf8');
+  const win=fs.readFileSync(path.join(root,'backend/windows/scripts/Headless-Control.ps1'),'utf8');
+  assert.match(html,/data-page="connections"/);
+  assert.match(html,/Source ping/);
+  assert.match(html,/Actual download/);
+  assert.match(html,/Actual upload/);
+  assert.match(html,/Some relays block ICMP/);
+  assert.match(renderer,/benchmark-active/);
+  assert.match(renderer,/connect-profile/);
+  assert.match(preload,/gateway:profiles/);
+  assert.match(main,/gateway:profiles/);
+  assert.match(backend,/async profiles\(\)/);
+  assert.match(backend,/connection-benchmarks\.json/);
+  assert.match(backend,/preferred-profile\.json/);
+  assert.match(backend,/speed\.cloudflare\.com\/__down/);
+  assert.match(backend,/speed\.cloudflare\.com\/__up/);
+  assert.match(linux,/preferred-profile\.json/);
+  assert.match(linux,/configuredCountry/);
+  assert.match(win,/preferred-profile\.json/);
+  assert.match(win,/Preferred/);
+});
+
 test('Linux Debian package path is sandbox-safe',()=>{
   const afterPack=fs.readFileSync(path.join(root,'tools/afterPack.js'),'utf8');
   const afterInstall=fs.readFileSync(path.join(root,'build/linux-after-install.sh'),'utf8');

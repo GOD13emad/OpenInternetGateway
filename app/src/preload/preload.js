@@ -2,6 +2,7 @@ const { contextBridge, ipcRenderer } = require('electron');
 
 contextBridge.exposeInMainWorld('gateway', {
   status: () => ipcRenderer.invoke('gateway:status'),
+  profiles: () => ipcRenderer.invoke('gateway:profiles'),
   action: (action, options = {}) => ipcRenderer.invoke('gateway:action', action, options),
   diagnostics: () => ipcRenderer.invoke('gateway:diagnostics'),
   activity: () => ipcRenderer.invoke('gateway:activity'),

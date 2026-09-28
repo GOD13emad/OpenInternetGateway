@@ -10,6 +10,7 @@ $serviceLog=Join-Path $programData 'ovpnconnector.log'
 $desiredFile=Join-Path $Root 'state\desired-state.json'
 $resultFile=Join-Path $Root 'evidence\headless-control-last.json'
 $stateFile=Join-Path $Root 'state\current-openvpn-profile.json'
+$preferredFile=Join-Path $Root 'state\preferred-profile.json'
 $factory=Join-Path $Root 'runtime\config-factory'
 $successFile=Join-Path $factory 'successes.json'
 $failureFile=Join-Path $factory 'failures.json'
@@ -117,6 +118,9 @@ function Get-Candidates {
  $idx=Join-Path $Root 'runtime\udp-cache\index.json'
  if(-not(Test-Path $idx)){return @()}
  $success=Read-Map $successFile;$quar=Read-Map $quarantineFile
+ $preferred=''
+ if(Test-Path $preferredFile){try{$preferred=[string](Get-Content -Raw $preferredFile|ConvertFrom-Json).sha256}catch{}}
+ $preferred=$preferred.ToLowerInvariant()
  $rows=@()
  foreach($c in @(Get-Content -Raw $idx|ConvertFrom-Json)){
    $key=Config-Key $c
@@ -129,11 +133,12 @@ function Get-Candidates {
      try{$lastSuccess=[DateTimeOffset]::Parse([string]$entry.at).UtcTicks}catch{}
    }
    $rows += [pscustomobject]@{
-     Item=$c;Headless=$headless;Validated=$validated;LastSuccess=$lastSuccess;
+     Item=$c;Preferred=$(if($preferred -and $key -eq $preferred){1}else{0});
+     Headless=$headless;Validated=$validated;LastSuccess=$lastSuccess;
      Proto=$(if([string]$c.Protocol -eq 'udp'){0}else{1});Rank=[int]$c.Rank
    }
  }
- return @($rows|Sort-Object @{Expression='Headless';Descending=$true},@{Expression='Validated';Descending=$true},@{Expression='LastSuccess';Descending=$true},Proto,Rank|Select-Object -First 4|ForEach-Object {$_.Item})
+ return @($rows|Sort-Object @{Expression='Preferred';Descending=$true},@{Expression='Headless';Descending=$true},@{Expression='Validated';Descending=$true},@{Expression='LastSuccess';Descending=$true},Proto,Rank|Select-Object -First 6|ForEach-Object {$_.Item})
 }
 function Resolve-ProfilePath($c){
  $p=[string]$c.Profile

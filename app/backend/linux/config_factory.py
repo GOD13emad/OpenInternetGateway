@@ -245,11 +245,13 @@ def status(common, evidence, min_pool=6):
         protocols[pr]=protocols.get(pr,0)+1
         cc=str(c.get("Country","") or "??")
         countries[cc]=countries.get(cc,0)+1
+    metadata_complete=all(bool(str(c.get("Country","")).strip()) for c in idx) if idx else False
     obj={
-        "at":now(),"pool":len(idx),"validated":validated,
+        "at":now(),"schemaVersion":2,"pool":len(idx),"validated":validated,
         "standby":max(0,len(idx)-validated),"quarantined":len(quarantine),
         "generations":generations,"lastRefresh":last,"ageHours":age,
-        "source":source,"healthy":len(idx)>=min_pool,"protocols":protocols,"countries":countries
+        "source":source,"healthy":len(idx)>=min_pool,"metadataComplete":metadata_complete,
+        "protocols":protocols,"countries":countries
     }
     write_json(factory/"status.json",obj)
     return obj
@@ -270,7 +272,8 @@ def restore_latest_generation(common):
 def ensure(common,evidence,min_pool=6,max_age=8):
     s=status(common,evidence,min_pool)
     stale=s["ageHours"] is None or s["ageHours"]>max_age
-    if s["pool"]<min_pool or stale:
+    migration_needed=not bool(s.get("metadataComplete"))
+    if s["pool"]<min_pool or stale or migration_needed:
         try:
             refresh_snapshot(evidence)
             promote(common,evidence)

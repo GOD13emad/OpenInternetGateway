@@ -61,8 +61,10 @@ function Write-Status {
  }
  $ageHours=$null
  if($lastRefresh){try{$ageHours=[Math]::Round(((Get-Date)-[DateTimeOffset]::Parse($lastRefresh).LocalDateTime).TotalHours,2)}catch{}}
+ $metadataComplete=($items.Count -gt 0 -and @($items|Where-Object {[string]::IsNullOrWhiteSpace([string]$_.Country)}).Count -eq 0)
  $obj=[ordered]@{
    at=(Get-Date).ToString('o')
+   schemaVersion=2
    pool=$items.Count
    validated=$validated
    standby=$standby
@@ -72,6 +74,7 @@ function Write-Status {
    ageHours=$ageHours
    source=$source
    healthy=($items.Count -ge $MinPool)
+   metadataComplete=$metadataComplete
    protocols=$protocols
    countries=$countries
  }
@@ -89,7 +92,7 @@ if($Action -eq 'Ensure'){
  $s=Write-Status
  $stale=$false
  if($null -eq $s.ageHours){$stale=$true}elseif([double]$s.ageHours -gt $MaxAgeHours){$stale=$true}
- if($s.pool -lt $MinPool -or $stale){
+ if($s.pool -lt $MinPool -or $stale -or -not [bool]$s.metadataComplete){
    try{& (Join-Path $PSScriptRoot 'Refresh-VpnGateCache.ps1')}catch{
      if(-not(Test-Path (Join-Path $active 'index.json'))){
        if(-not(Restore-LatestGeneration)){throw}

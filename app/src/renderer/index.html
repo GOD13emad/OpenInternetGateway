@@ -21,6 +21,9 @@
         <button class="nav-item active" data-page="overview">
           <span class="nav-icon">⌂</span><span>Overview</span>
         </button>
+        <button class="nav-item" data-page="connections">
+          <span class="nav-icon">⇆</span><span>Connections</span>
+        </button>
         <button class="nav-item" data-page="diagnostics">
           <span class="nav-icon">◈</span><span>Diagnostics</span>
         </button>
@@ -128,6 +131,32 @@
             <button class="btn compact" id="factoryRefresh">Refresh configs</button>
           </article>
         </div>
+      </section>
+
+      <section class="page" id="page-connections">
+        <article class="panel connections-panel">
+          <div class="panel-head connection-tools">
+            <div><span class="eyebrow">RELAY INVENTORY</span><h3>Available connections</h3><p class="panel-note">Ping from the source is shown separately from measurements made on this device. Download/upload values are only shown after a real tunnel test.</p></div>
+            <div class="connection-controls">
+              <select id="countryFilter" class="select-control" aria-label="Country filter"><option value="">All countries</option></select>
+              <button class="btn secondary compact" id="reloadConnections">Reload</button>
+              <button class="btn compact" id="benchmarkCurrent">Test current</button>
+            </div>
+          </div>
+          <div class="benchmark-summary" id="benchmarkSummary">
+            <span><small>Live ping</small><b>—</b></span>
+            <span><small>HTTPS latency</small><b>—</b></span>
+            <span><small>Actual download</small><b>—</b></span>
+            <span><small>Actual upload</small><b>—</b></span>
+          </div>
+          <div class="connection-table-wrap">
+            <table class="connection-table">
+              <thead><tr><th>Country</th><th>Relay</th><th>Protocol</th><th>Source ping</th><th>Live ping</th><th>Actual ↓</th><th>Actual ↑</th><th>Status</th><th></th></tr></thead>
+              <tbody id="connectionRows"><tr><td colspan="9" class="empty">Loading connection inventory…</td></tr></tbody>
+            </table>
+          </div>
+          <p class="measurement-note">“Source ping” comes from VPN Gate metadata. “Live ping” and actual throughput are measured by this computer. Some relays block ICMP, so live ping may be unavailable even when the tunnel works.</p>
+        </article>
       </section>
 
       <section class="page" id="page-diagnostics">

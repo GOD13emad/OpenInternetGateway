@@ -116,13 +116,18 @@ start_watchdog() {
 }
 
 profile_lines() {
-  python3 - "$OIG_COMMON/runtime/udp-cache/index.json" "$OIG_COMMON/runtime/config-factory/quarantine.json" <<'PY'
+  python3 - "$OIG_COMMON/runtime/udp-cache/index.json" "$OIG_COMMON/runtime/config-factory/quarantine.json" "$STATE/preferred-profile.json" <<'PY'
 import json,sys,os
 data=json.load(open(sys.argv[1],encoding="utf-8-sig"))
 try:
     q=json.load(open(sys.argv[2],encoding="utf-8-sig"))
 except Exception:
     q={}
+try:
+    pref=json.load(open(sys.argv[3],encoding="utf-8-sig")).get("sha256","").lower()
+except Exception:
+    pref=""
+data=sorted(data,key=lambda c:(0 if pref and str(c.get("SHA256","")).lower()==pref else 1,int(c.get("Rank",9999) or 9999)))
 n=0
 for c in data:
     key=str(c.get("SHA256","")).lower() or f"{c.get('IP','')}:{c.get('Port','')}"
@@ -132,16 +137,16 @@ for c in data:
     leaf=os.path.basename(p)
     print("\t".join([
         str(c.get("Host","")),str(c.get("IP","")),str(c.get("Port","")),
-        leaf,str(c.get("SHA256","")),str(c.get("Protocol","unknown"))
+        leaf,str(c.get("SHA256","")),str(c.get("Protocol","unknown")),str(c.get("Country",""))
     ]))
     n+=1
-    if n>=10:
+    if n>=24:
         break
 PY
 }
 
 connect_one() {
-  local host="$1" ipaddr="$2" port="$3" leaf="$4" expected="$5" protocol="$6"
+  local host="$1" ipaddr="$2" port="$3" leaf="$4" expected="$5" protocol="$6" country="$7"
   local profile="$OIG_COMMON/runtime/udp-cache/$leaf"
   [[ -f "$profile" ]] || return 10
 
@@ -169,13 +174,20 @@ connect_one() {
   for _ in 1 2 3 4 5 6; do
     sleep 3
     if healthy; then
-      python3 - "$STATE/current-linux-profile.json" "$host" "$ipaddr" "$port" "$profile" "$expected" "$protocol" <<'PY'
+      local stat observed_country
+      stat="$(json_status)"
+      observed_country="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1]).get("country",""))' "$stat")"
+      if [[ -n "$country" && "$observed_country" != "$country" ]]; then
+        continue
+      fi
+      python3 - "$STATE/current-linux-profile.json" "$host" "$ipaddr" "$port" "$profile" "$expected" "$protocol" "$country" "$observed_country" <<'PY'
 import json,sys,datetime
-path,host,ip,port,profile,sha,protocol=sys.argv[1:]
+path,host,ip,port,profile,sha,protocol,configured_country,observed_country=sys.argv[1:]
 json.dump({
     "at":datetime.datetime.now().astimezone().isoformat(),
     "host":host,"serverIP":ip,"port":int(port),"profile":profile,
-    "sha256":sha,"protocol":protocol
+    "sha256":sha,"protocol":protocol,"configuredCountry":configured_country,
+    "country":observed_country
 },open(path,"w"),indent=2)
 PY
       touch "$KEEP"
@@ -225,10 +237,10 @@ connect_gateway() {
   local cycle rc reason stat
   for cycle in 0 1; do
     local had=0
-    while IFS=$'\t' read -r host ipaddr port leaf sha protocol; do
+    while IFS="$(printf '\t')" read -r host ipaddr port leaf sha protocol country; do
       [[ -n "$ipaddr" ]] || continue
       had=1
-      if connect_one "$host" "$ipaddr" "$port" "$leaf" "$sha" "$protocol"; then
+      if connect_one "$host" "$ipaddr" "$port" "$leaf" "$sha" "$protocol" "$country"; then
         stat="$(json_status)"
         printf '%s\n' "$stat" > "$EVIDENCE/connect-last-success.json"
         record_success "$sha" "$host" "$ipaddr" "$port" "$stat"

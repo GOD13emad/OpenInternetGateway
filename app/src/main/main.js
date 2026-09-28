@@ -108,6 +108,7 @@ function createTray() {
 
 function registerIpc() {
   ipcMain.handle('gateway:status', () => backend.status());
+  ipcMain.handle('gateway:profiles', () => backend.profiles());
   ipcMain.handle('gateway:action', (_e, action, options) => backend.action(action, options));
   ipcMain.handle('gateway:diagnostics', () => backend.diagnostics());
   ipcMain.handle('gateway:activity', () => backend.activity());

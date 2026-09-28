@@ -186,6 +186,191 @@ class Backend {
     return { ok: true, output: r.stdout || r.stderr };
   }
 
+  _profileIndexPath() {
+    return this.platform === 'win32'
+      ? path.join(this.backendRoot, 'runtime', 'udp-cache', 'index.json')
+      : path.join(this.backendRoot, 'common', 'runtime', 'udp-cache', 'index.json');
+  }
+
+  _profileStatePath() {
+    return this.platform === 'win32'
+      ? path.join(this.backendRoot, 'state', 'current-openvpn-profile.json')
+      : path.join(this.backendRoot, 'state', 'current-linux-profile.json');
+  }
+
+  _readJson(file, fallback = null) {
+    try { return JSON.parse(fs.readFileSync(file, 'utf8').replace(/^\uFEFF/, '')); }
+    catch { return fallback; }
+  }
+
+  _writeJson(file, value) {
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    const partial = file + '.partial';
+    fs.writeFileSync(partial, JSON.stringify(value, null, 2));
+    fs.renameSync(partial, file);
+  }
+
+  _factoryRoot() {
+    return this.platform === 'win32'
+      ? path.join(this.backendRoot, 'runtime', 'config-factory')
+      : path.join(this.backendRoot, 'common', 'runtime', 'config-factory');
+  }
+
+  async profiles() {
+    const items = this._readJson(this._profileIndexPath(), []);
+    const factory = this._factoryRoot();
+    const successes = this._readJson(path.join(factory, 'successes.json'), {}) || {};
+    const quarantine = this._readJson(path.join(factory, 'quarantine.json'), {}) || {};
+    const current = this._readJson(this._profileStatePath(), {}) || {};
+    const preferred = this._readJson(path.join(this.backendRoot, 'state', 'preferred-profile.json'), {}) || {};
+    const benchmarks = this._readJson(path.join(this.backendRoot, 'state', 'connection-benchmarks.json'), {}) || {};
+    const activeSha = String(current.sha256 || '').toLowerCase();
+    const preferredSha = String(preferred.sha256 || '').toLowerCase();
+    const profiles = (Array.isArray(items) ? items : []).map(item => {
+      const sha = String(item.SHA256 || '').toLowerCase();
+      const ping = Number.parseFloat(String(item.Ping ?? ''));
+      return {
+        rank: Number(item.Rank || 0),
+        host: String(item.Host || ''),
+        ip: String(item.IP || ''),
+        port: Number(item.Port || 0),
+        protocol: String(item.Protocol || '').toLowerCase(),
+        country: String(item.Country || current.configuredCountry || ''),
+        countryName: String(item.CountryName || ''),
+        sourcePingMs: Number.isFinite(ping) ? ping : null,
+        sourceScore: Number(item.Score || 0),
+        sourceSpeed: Number(item.Speed || 0),
+        sessions: Number(item.Sessions || 0),
+        sha256: sha,
+        source: String(item.Source || ''),
+        active: !!sha && sha === activeSha,
+        preferred: !!sha && sha === preferredSha,
+        validated: !!successes[sha],
+        quarantined: !!quarantine[sha],
+        benchmark: benchmarks[sha] || null
+      };
+    }).sort((a,b) => a.rank - b.rank);
+    const countries = [...new Set(profiles.map(p => p.country).filter(Boolean))];
+    return { profiles, countries, activeSha, preferredSha };
+  }
+
+  async connectProfile(sha256) {
+    const wanted = String(sha256 || '').toLowerCase();
+    if (!wanted) throw new Error('Profile SHA-256 is required.');
+    const list = await this.profiles();
+    const profile = list.profiles.find(p => p.sha256 === wanted);
+    if (!profile) throw new Error('Selected profile is no longer in the active config pool.');
+    if (profile.quarantined) throw new Error('Selected profile is quarantined after repeated failures.');
+    this._writeJson(path.join(this.backendRoot, 'state', 'preferred-profile.json'), {
+      sha256: wanted, country: profile.country, host: profile.host, at: new Date().toISOString()
+    });
+    if (profile.active) return { ok: true, profile, status: await this.status() };
+    if (this.platform === 'win32') {
+      await this._windows('disconnect');
+      await this._windows('connect');
+    } else {
+      await this._linux('disconnect');
+      await this._linux('connect');
+    }
+    const status = await this.status();
+    if (!status.connected) throw new Error('Selected profile did not produce a validated tunnel.');
+    if (profile.country && status.country && profile.country !== status.country) {
+      throw new Error('Selected relay exit country did not match its advertised country.');
+    }
+    return { ok: true, profile, status };
+  }
+
+  async _icmpPing(ip) {
+    if (!ip) return null;
+    try {
+      if (this.platform === 'win32') {
+        const r = await run('ping.exe', ['-n','2','-w','1500',ip], { timeout: 5000, allowFailure: true });
+        const m = r.stdout.match(/Average\s*=\s*(\d+)ms/i);
+        return m ? Number(m[1]) : null;
+      }
+      const r = await run('ping', ['-n','-c','2','-W','2',ip], { timeout: 6000, allowFailure: true });
+      const m = r.stdout.match(/=\s*[\d.]+\/([\d.]+)\/[\d.]+\/[\d.]+\s*ms/);
+      return m ? Number(m[1]) : null;
+    } catch {
+      return null;
+    }
+  }
+
+  async _httpsLatencyMs(sink) {
+    const samples = [];
+    for (let i = 0; i < 3; i++) {
+      const r = await run('curl', [
+        '-4','-L','--max-time','8','-sS','-o',sink,'-w','%{http_code}|%{time_starttransfer}',
+        'https://www.cloudflare.com/cdn-cgi/trace'
+      ], { timeout: 10000, allowFailure: true });
+      const [code, seconds] = String(r.stdout || '').trim().split('|');
+      const value = Number(seconds);
+      if (code === '200' && Number.isFinite(value) && value > 0) samples.push(value * 1000);
+    }
+    if (!samples.length) return null;
+    samples.sort((a,b) => a-b);
+    return Math.round(samples[Math.floor(samples.length / 2)] * 10) / 10;
+  }
+
+  async benchmarkActive() {
+    const status = await this.status();
+    if (!status.connected) throw new Error('Connect a relay before running a real throughput test.');
+    const inventory = await this.profiles();
+    const active = inventory.profiles.find(p => p.active);
+    if (!active) throw new Error('The active relay could not be mapped to the config inventory.');
+
+    const sink = this.platform === 'win32' ? 'NUL' : '/dev/null';
+    const latencyMs = await this._httpsLatencyMs(sink);
+    const icmpPingMs = await this._icmpPing(active.ip);
+
+    const downBytes = 4_000_000;
+    const down = await run('curl', [
+      '-4','-L','--max-time','25','-sS','-o',sink,'-w','%{http_code}|%{time_total}|%{speed_download}',
+      'https://speed.cloudflare.com/__down?bytes=' + String(downBytes)
+    ], { timeout: 30000, allowFailure: true });
+    const [downCode, downTime, downSpeed] = String(down.stdout || '').trim().split('|');
+    if (downCode !== '200' || !(Number(downSpeed) > 0)) throw new Error('Real download test did not complete successfully.');
+
+    const upBytes = 1_000_000;
+    const tempUpload = path.join(this.backendRoot, 'state', 'benchmark-upload.bin');
+    fs.mkdirSync(path.dirname(tempUpload), { recursive: true });
+    fs.writeFileSync(tempUpload, Buffer.alloc(upBytes));
+    let up;
+    try {
+      up = await run('curl', [
+        '-4','-L','--max-time','25','-sS','-o',sink,'-w','%{http_code}|%{time_total}|%{speed_upload}',
+        '-X','POST','--data-binary','@' + tempUpload,'https://speed.cloudflare.com/__up'
+      ], { timeout: 30000, allowFailure: true });
+    } finally {
+      try { fs.unlinkSync(tempUpload); } catch {}
+    }
+    const [upCode, upTime, upSpeed] = String(up.stdout || '').trim().split('|');
+    if (upCode !== '200' || !(Number(upSpeed) > 0)) throw new Error('Real upload test did not complete successfully.');
+
+    const result = {
+      at: new Date().toISOString(),
+      sha256: active.sha256,
+      host: active.host,
+      serverIP: active.ip,
+      country: status.country || active.country,
+      publicIP: status.ip || '',
+      icmpPingMs,
+      httpsLatencyMs: latencyMs,
+      downloadMbps: Math.round(Number(downSpeed) * 8 / 1_000_000 * 100) / 100,
+      uploadMbps: Math.round(Number(upSpeed) * 8 / 1_000_000 * 100) / 100,
+      downloadBytes: downBytes,
+      uploadBytes: upBytes,
+      downloadSeconds: Number(downTime) || null,
+      uploadSeconds: Number(upTime) || null,
+      endpoint: 'speed.cloudflare.com'
+    };
+    const file = path.join(this.backendRoot, 'state', 'connection-benchmarks.json');
+    const all = this._readJson(file, {}) || {};
+    all[active.sha256] = result;
+    this._writeJson(file, all);
+    return { ok: true, benchmark: result, status };
+  }
+
   _factoryStatusPath() {
     return this.platform === 'win32'
       ? path.join(this.backendRoot, 'runtime', 'config-factory', 'status.json')
@@ -231,8 +416,11 @@ class Backend {
   async action(action, options = {}) {
     this.emit({ type: 'busy', action, busy: true });
     try {
-      const result = await (this.platform === 'win32' ? this._windows(action) : this._linux(action));
-      const status = await this.status();
+      let result;
+      if (action === 'connect-profile') result = await this.connectProfile(options.sha256);
+      else if (action === 'benchmark-active') result = await this.benchmarkActive();
+      else result = await (this.platform === 'win32' ? this._windows(action) : this._linux(action));
+      const status = result?.status || await this.status();
       this.emit({ type: 'status', action, busy: false, status });
       return { ...result, status };
     } catch (error) {
