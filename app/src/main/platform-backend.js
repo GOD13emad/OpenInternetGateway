@@ -307,29 +307,81 @@ class Backend {
     const profile = list.profiles.find(p => p.sha256 === wanted);
     if (!profile) throw new Error('Selected profile is no longer in the active config pool.');
     if (profile.quarantined) throw new Error('Selected profile is quarantined after repeated failures.');
-    this._writeJson(path.join(this.backendRoot, 'state', 'preferred-profile.json'), {
+    const previousActive = list.profiles.find(p => p.active);
+    const previousSha = String(previousActive?.sha256 || '').toLowerCase();
+    const preferredPath = path.join(this.backendRoot, 'state', 'preferred-profile.json');
+    const savePreferred = () => this._writeJson(preferredPath, {
       sha256: wanted, country: profile.country, host: profile.host, at: new Date().toISOString()
     });
-    if (profile.active) return { ok: true, profile, status: await this.status() };
-    if (this.platform === 'win32') {
-      this._writeJson(path.join(this.backendRoot, 'state', 'exact-profile.request'), {
-        sha256: wanted, at: new Date().toISOString()
+    if (profile.active) {
+      savePreferred();
+      return { ok: true, profile, status: await this.status() };
+    }
+
+    const request = path.join(this.backendRoot, 'state', 'exact-profile.request');
+    const requestExact = async (sha, country, host) => {
+      try { fs.unlinkSync(request); } catch {}
+      this._writeJson(request, { sha256: sha, at: new Date().toISOString() });
+      this.emit({
+        type: 'progress',
+        action: 'connect-profile',
+        stage: 'switching',
+        message: 'Switching to ' + (country || 'selected') + ' relay ' + (host || '') + '…'
+      });
+      if (this.platform === 'win32') await this._windows('connect');
+      else await this._linux('connect-profile', [sha]);
+    };
+    const restorePrevious = async () => {
+      if (!previousSha || previousSha === wanted) return false;
+      this.emit({
+        type: 'progress',
+        action: 'connect-profile',
+        stage: 'restoring',
+        message: 'Selected relay failed. Restoring the previous working relay…'
       });
       try {
-        await this._windows('disconnect');
-        await this._windows('connect');
-      } catch (error) {
-        try { fs.unlinkSync(path.join(this.backendRoot, 'state', 'exact-profile.request')); } catch {}
-        throw error;
+        await requestExact(previousSha, previousActive?.country || '', previousActive?.host || previousActive?.ip || '');
+        const restored = this._readJson(this._profileStatePath(), {}) || {};
+        const restoredSha = String(restored.sha256 || '').toLowerCase();
+        return restoredSha === previousSha;
+      } catch {
+        try { fs.unlinkSync(request); } catch {}
+        return false;
       }
-    } else {
-      await this._linux('connect-profile', [wanted]);
+    };
+
+    try {
+      await requestExact(wanted, profile.country, profile.host || profile.ip);
+    } catch (error) {
+      try { fs.unlinkSync(request); } catch {}
+      const restored = await restorePrevious();
+      throw new Error((error?.message || 'Selected relay failed.') + (restored
+        ? ' Previous working relay was restored.'
+        : ' Previous relay could not be restored automatically.'));
     }
+
+    this.emit({
+      type: 'progress',
+      action: 'connect-profile',
+      stage: 'validating',
+      message: 'Validating the selected relay and exit country…'
+    });
     const status = await this.status();
-    if (!status.connected) throw new Error('Selected profile did not produce a validated tunnel.');
-    if (profile.country && status.country && profile.country !== status.country) {
-      throw new Error('Selected relay exit country did not match its advertised country.');
+    const current = this._readJson(this._profileStatePath(), {}) || {};
+    const actualSha = String(current.sha256 || '').toLowerCase();
+    if (!status.connected || !actualSha || actualSha !== wanted) {
+      const restored = await restorePrevious();
+      throw new Error('Selected relay was not the tunnel that became active.' + (restored
+        ? ' Previous working relay was restored.'
+        : ' The connection was stopped rather than accepting a fallback relay.'));
     }
+    if (profile.country && status.country && profile.country !== status.country) {
+      const restored = await restorePrevious();
+      throw new Error('Selected relay exit country did not match its advertised country.' + (restored
+        ? ' Previous working relay was restored.'
+        : ' No fallback relay was accepted.'));
+    }
+    savePreferred();
     return { ok: true, profile, status };
   }
 

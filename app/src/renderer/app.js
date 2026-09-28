@@ -12,12 +12,17 @@ function showToast(message, error = false) {
   showToast.timer = setTimeout(() => toast.className = 'toast', 3600);
 }
 
-function setBusy(on, action = '') {
+function setBusy(on, action = '', detail = '') {
   state.busy = on;
   $('busyOverlay').classList.toggle('show', on);
   if (on) {
     const names = { connect:'Connecting', disconnect:'Disconnecting', refresh:'Refreshing config pool', ensure:'Repairing connection', 'connect-profile':'Switching relay', 'benchmark-active':'Measuring real tunnel speed', 'benchmark-all-fast':'Testing all relays from direct Internet', 'benchmark-direct-internet':'Measuring direct ISP speed', 'update-check':'Checking GitHub release', 'update-download':'Downloading verified update', 'factory-refresh':'Refreshing config pool', 'auto-install':'Installing recovery', 'auto-remove':'Removing recovery', 'console-enable':'Enabling console gateway', 'console-disable':'Disabling console gateway', 'console-status':'Checking console gateway' };
     setText('busyTitle', names[action] || 'Working…');
+    setText('busyDetail', detail || (action === 'connect-profile'
+      ? 'The selected relay is being switched and validated. This can take several seconds.'
+      : action === 'benchmark-active'
+        ? 'Measuring ping, download and upload through the active relay.'
+        : 'Validating the network path.'));
   }
 }
 
@@ -312,10 +317,16 @@ async function loadConnections() {
 }
 
 async function connectOrTestProfile(sha256, testAfter = false) {
-  if (state.busy) return;
-  setBusy(true, 'connect-profile');
+  if (state.busy) {
+    showToast('Another gateway operation is still finishing. Please wait for it to complete.', true);
+    return;
+  }
+  const selected = state.profiles.find(p => p.sha256 === sha256);
+  const target = selected ? ((selected.country || '—') + ' · ' + (selected.host || selected.ip || 'relay')) : 'selected relay';
+  setBusy(true, 'connect-profile', testAfter
+    ? ('Connecting ' + target + ' first; speed is measured only after that exact tunnel is validated.')
+    : ('Connecting ' + target + ' and verifying that the exact relay became active.'));
   try {
-    const selected = state.profiles.find(p => p.sha256 === sha256);
     if (!selected?.active) {
       const connected = await window.gateway.action('connect-profile', { sha256 });
       if (connected?.status) renderStatus(connected.status);
@@ -535,6 +546,7 @@ async function init() {
 
   window.gateway.onBackendEvent(payload => {
     if (payload.type === 'busy') setBusy(payload.busy, payload.action);
+    if (payload.type === 'progress') setBusy(true, payload.action, payload.message || 'Working…');
     if (payload.type === 'status' && payload.status) renderStatus(payload.status);
     if (payload.type === 'error') showToast(payload.message, true);
   });

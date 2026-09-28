@@ -184,6 +184,50 @@ test('Linux connection watchdog does not inherit operation lock',()=>{
   assert.match(linux,/start_watchdog\(\)[\s\S]*exec 9>&-/);
 });
 
+test('Windows exact relay switch is atomic, bounded and SHA verified',()=>{
+  const backend=fs.readFileSync(path.join(root,'src/main/platform-backend.js'),'utf8');
+  const connect=fs.readFileSync(path.join(root,'backend/windows/scripts/Connect-OpenInternet.ps1'),'utf8');
+  const renderer=fs.readFileSync(path.join(root,'src/renderer/app.js'),'utf8');
+  const block=backend.slice(backend.indexOf('async connectProfile'),backend.indexOf('async _directInternetPath'));
+  assert.doesNotMatch(block,/this\._windows\('disconnect'\)[\s\S]*this\._windows\('connect'\)/);
+  assert.match(block,/exact-profile\.request[\s\S]*this\._windows\('connect'\)/);
+  assert.match(block,/actualSha[\s\S]*actualSha !== wanted/);
+  assert.match(block,/type: 'progress'[\s\S]*stage: 'switching'/);
+  assert.match(connect,/\$expectedSha/);
+  assert.match(connect,/\$waitSeconds=\$\(if\(\$expectedSha\)\{60\}else\{150\}\)/);
+  assert.match(connect,/CONNECTED EXACT/);
+  assert.match(connect,/Selected relay failed validation; no fallback relay was accepted/);
+  assert.match(renderer,/payload\.type === 'progress'/);
+  assert.match(block,/restorePrevious/);
+  assert.match(block,/Previous working relay was restored/);
+  assert.match(block,/const savePreferred = \(\) => this\._writeJson\(preferredPath/);
+  assert.match(block,/if \(profile\.active\)[\s\S]*savePreferred\(\)/);
+  assert.match(block,/No fallback relay was accepted[\s\S]*savePreferred\(\);[\s\S]*return \{ ok: true/);
+  assert.match(block,/catch \{[\s\S]*fs\.unlinkSync\(request\)[\s\S]*return false/);
+  assert.match(renderer,/Connecting .* speed is measured only after that exact tunnel is validated/);
+});
+
+test('failed exact relay attempt preserves preferred metadata and clears stale request',async()=>{
+  const os=require('os');
+  const Backend=require(path.join(root,'src/main/platform-backend.js'));
+  const tmp=fs.mkdtempSync(path.join(os.tmpdir(),'oig-exact-fail-'));
+  const stateDir=path.join(tmp,'state');
+  fs.mkdirSync(stateDir,{recursive:true});
+  const previous={sha256:'a'.repeat(64),country:'TH',host:'working',at:'before'};
+  const target={sha256:'b'.repeat(64),country:'HK',host:'dead',ip:'198.51.100.7',active:false,quarantined:false};
+  fs.writeFileSync(path.join(stateDir,'preferred-profile.json'),JSON.stringify(previous));
+  const backend=new Backend({version:'test',resourcesPath:tmp,appPath:tmp,userData:tmp,emit:()=>{}});
+  backend.platform='win32';
+  backend.backendRoot=tmp;
+  backend.profiles=async()=>({profiles:[{...previous,active:true,quarantined:false},target]});
+  backend._windows=async()=>{throw new Error('SIMULATED_EXACT_FAIL')};
+  await assert.rejects(backend.connectProfile(target.sha256),/Previous relay could not be restored automatically/);
+  const after=JSON.parse(fs.readFileSync(path.join(stateDir,'preferred-profile.json'),'utf8'));
+  assert.equal(after.sha256,previous.sha256);
+  assert.equal(fs.existsSync(path.join(stateDir,'exact-profile.request')),false);
+  fs.rmSync(tmp,{recursive:true,force:true});
+});
+
 test('selected relay connection is exact rather than fallback',()=>{
   const linux=fs.readFileSync(path.join(root,'backend/linux/oig-linux.sh'),'utf8');
   const windows=fs.readFileSync(path.join(root,'backend/windows/scripts/Headless-Control.ps1'),'utf8');
@@ -199,7 +243,7 @@ test('selected relay connection is exact rather than fallback',()=>{
   assert.match(ensure,/exact-profile\.request/);
   assert.match(ensure,/-ProfileSha \$sha/);
   assert.match(backend,/exact-profile\.request/);
-  assert.match(backend,/_linux\('connect-profile', \[wanted\]\)/);
+  assert.match(backend,/_linux\('connect-profile', \[sha\]\)/);
 });
 
 test('connection inventory exposes honest source-vs-live metrics and selectable profiles',()=>{
