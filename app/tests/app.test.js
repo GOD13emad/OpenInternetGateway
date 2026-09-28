@@ -145,6 +145,11 @@ test('multi-country config factories retain country metadata and no JP-only gate
   assert.match(platform,/\$loc -ne 'IR'/);
 });
 
+test('Linux connection watchdog does not inherit operation lock',()=>{
+  const linux=fs.readFileSync(path.join(root,'backend/linux/oig-linux.sh'),'utf8');
+  assert.match(linux,/start_watchdog\(\)[\s\S]*exec 9>&-/);
+});
+
 test('selected relay connection is exact rather than fallback',()=>{
   const linux=fs.readFileSync(path.join(root,'backend/linux/oig-linux.sh'),'utf8');
   const windows=fs.readFileSync(path.join(root,'backend/windows/scripts/Headless-Control.ps1'),'utf8');

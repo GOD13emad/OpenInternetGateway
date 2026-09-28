@@ -107,6 +107,7 @@ start_watchdog() {
   stop_watchdog
   rm -f "$KEEP"
   (
+    exec 9>&-
     sleep 180
     if [[ ! -f "$KEEP" ]]; then
       delete_named_connections
