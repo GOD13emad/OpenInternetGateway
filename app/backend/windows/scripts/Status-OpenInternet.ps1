@@ -22,8 +22,8 @@ try{$pool=& (Join-Path $PSScriptRoot 'Config-Factory.ps1') -Action Status|Conver
  Connected=($routes.Count -ge 2 -and $loc -and $loc -ne 'IR' -and -not $poison -and $svc -and $svc.Status -eq 'Running')
  IP=$ip;Country=$loc;Dns=($dns -join ',');Poison=$poison;FullRoutes=$routes.Count
  Relay=$relay;Protocol=$protocol;Engine=$engine;DesiredState=$desired
- AutoRecovery=$(if($task){'Installed'}else{'NotInstalled'})
- AutoRecoveryTask=$(if($task){[string]$task.State}else{'Missing'})
+ AutoRecovery=$(if(-not $task){'NotInstalled'}elseif(-not [bool]$task.Settings.Enabled){'Disabled'}else{'Installed'})
+ AutoRecoveryTask=$(if(-not $task){'Missing'}elseif(-not [bool]$task.Settings.Enabled){'Disabled'}else{[string]$task.State})
  ConfigPool=$(if($pool){[int]$pool.pool}else{0})
  ConfigValidated=$(if($pool){[int]$pool.validated}else{0})
  ConfigStandby=$(if($pool){[int]$pool.standby}else{0})

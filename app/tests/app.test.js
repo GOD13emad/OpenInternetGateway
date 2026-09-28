@@ -80,6 +80,18 @@ test('Windows backend is fully headless, self-healing, and independent from Open
 });
 
 
+test('Windows disconnect cancels queued reconnect requests before Auto-Recovery',()=>{
+  const disconnect=fs.readFileSync(path.join(root,'backend/windows/scripts/Disconnect-OpenInternet.ps1'),'utf8');
+  const desired=disconnect.indexOf("desired='off'");
+  const exact=disconnect.indexOf('exact-profile.request');
+  const known=disconnect.indexOf('headless-known-recover.request');
+  const pool=disconnect.indexOf('headless-pool-probe.request');
+  const probe=disconnect.indexOf('connector-probe.request');
+  const run=disconnect.indexOf('schtasks.exe /Run');
+  assert.ok(desired >= 0 && exact > desired && known > desired && pool > desired && probe > desired);
+  assert.ok(run > exact && run > known && run > pool && run > probe);
+});
+
 test('desktop app owns a dynamic OIG tray and background startup',()=>{
   const main=fs.readFileSync(path.join(root,'src/main/main.js'),'utf8');
   assert.match(main,/function renderTray/);
@@ -273,6 +285,18 @@ test('selected relay connection is exact rather than fallback',()=>{
   assert.match(ensure,/-ProfileSha \$sha/);
   assert.match(backend,/exact-profile\.request/);
   assert.match(backend,/_linux\('connect-profile', \[sha\]\)/);
+});
+
+test('disabled Windows Auto-Recovery task is reported unhealthy and self-reenabled by Repair',()=>{
+  const ensure=fs.readFileSync(path.join(root,'backend/windows/scripts/Ensure-OpenInternet.ps1'),'utf8');
+  const status=fs.readFileSync(path.join(root,'backend/windows/scripts/Status-OpenInternet.ps1'),'utf8');
+  const backend=fs.readFileSync(path.join(root,'src/main/platform-backend.js'),'utf8');
+  const renderer=fs.readFileSync(path.join(root,'src/renderer/app.js'),'utf8');
+  assert.match(ensure,/Enable-ScheduledTask -TaskName \$taskName/);
+  assert.match(ensure,/task is disabled and could not be re-enabled/);
+  assert.match(status,/AutoRecovery=.*Disabled/);
+  assert.match(backend,/autoRecoveryState=.*Disabled/);
+  assert.match(renderer,/\['inactive','failed','missing','disabled'\]/);
 });
 
 test('Windows non-admin Ensure delegates to the elevated recovery task and startup reconciles desired-on state',()=>{

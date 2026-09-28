@@ -16,6 +16,10 @@ if(-not(Test-Admin)){
  $taskName='OpenInternetGateway-AutoRecovery'
  $task=Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
  if(-not $task){throw 'Open Internet Gateway Auto-Recovery task is not installed.'}
+ if(-not [bool]$task.Settings.Enabled){
+   try{Enable-ScheduledTask -TaskName $taskName -ErrorAction Stop|Out-Null}catch{throw ('Auto-Recovery task is disabled and could not be re-enabled: '+$_.Exception.Message)}
+   $task=Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+ }
  if([string]$task.State -ne 'Running'){
    schtasks.exe /Run /TN $taskName | Out-Null
    if($LASTEXITCODE -ne 0){throw 'Could not start the elevated Open Internet Gateway recovery task.'}

@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.5.5
+
+- Hardened Windows Auto-Recovery against an externally disabled Scheduled Task: Repair/Ensure now re-enables the existing user-owned task without a UAC prompt before running recovery.
+- Windows status now reports a disabled recovery task explicitly as `Disabled`, and the UI treats that state as unhealthy instead of presenting it as a healthy installed recovery service.
+- Preserves all v2.5.4 startup reconciliation, exact Connect/Speed serialization, honest Live Ping labels, native system typography, Linux physical-ISP binding, and stale-request cleanup.
+
 ## 2.5.4
 
 - Made **Test all relays** literally cover the entire current relay pool, including quarantined rows, as a read-only direct-path probe; quarantine still blocks Connect/Speed and is not cleared by the test.

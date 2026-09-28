@@ -71,7 +71,7 @@ function renderStatus(s) {
   const routeOk = Number(s.fullRoutes || 0) >= 2;
   const dnsOk = s.poison === false;
   const recoveryState = String(s.autoRecoveryState || '').toLowerCase();
-  const recoveryOk = !!s.autoRecovery && !['inactive','failed','missing'].includes(recoveryState);
+  const recoveryOk = !!s.autoRecovery && !['inactive','failed','missing','disabled'].includes(recoveryState);
   const pool = s.configPool || {};
   const factoryOk = !!pool.healthy && Number(pool.pool || 0) >= 3;
   markHealth('routeIcon', 'routeHealth', routeOk, routeOk ? 'All IPv4 traffic protected' : 'Full-route not active');
