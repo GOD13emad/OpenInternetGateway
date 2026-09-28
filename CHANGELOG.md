@@ -1,5 +1,10 @@
 # Changelog
 
+## 2.3.1
+
+- Fixed stale ACTIVE relay presentation after the managed tunnel had already disconnected; a relay is now active only when live tunnel health is connected and its SHA matches the current profile state.
+- Preserves all 2.3.0 Linux Dock/Quit, multi-country, exact-relay, Connections inventory and real benchmark behavior.
+
 ## 2.3.0
 
 - Changed Linux window close behavior: X now hides the dashboard while keeping the application and managed connection alive; explicit “Quit and disconnect” fully exits and disconnects.
