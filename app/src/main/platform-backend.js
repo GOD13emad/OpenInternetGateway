@@ -271,6 +271,30 @@ class Backend {
         benchmark: benchmarks[sha] || null
       };
     }).sort((a,b) => a.rank - b.rank);
+
+    if (liveStatus.connected && activeSha && !profiles.some(p => p.active)) {
+      profiles.unshift({
+        rank: 0,
+        host: String(current.host || 'Active managed relay'),
+        ip: String(current.serverIP || liveStatus.ip || ''),
+        port: Number(current.port || 0),
+        protocol: String(current.protocol || '').toLowerCase(),
+        country: String(current.configuredCountry || current.country || liveStatus.country || ''),
+        countryName: '',
+        sourcePingMs: null,
+        sourceScore: 0,
+        sourceSpeed: 0,
+        sessions: 0,
+        sha256: activeSha,
+        source: 'Active tunnel state',
+        active: true,
+        preferred: activeSha === preferredSha,
+        validated: true,
+        quarantined: false,
+        benchmark: benchmarks[activeSha] || null,
+        syntheticActive: true
+      });
+    }
     const countries = [...new Set(profiles.map(p => p.country).filter(Boolean))];
     const directBenchmark = this._readJson(path.join(this.backendRoot, 'state', 'direct-internet-benchmark.json'), null);
     return { profiles, countries, activeSha, preferredSha, directBenchmark };
@@ -830,7 +854,9 @@ class Backend {
     try {
       const base = await (this.platform === 'win32' ? this._windows('status') : this._linux('status'));
       const configPool = await this._factoryStatus();
-      return { ...base, configPool };
+      const current = this._readJson(this._profileStatePath(), {}) || {};
+      const activeSha = base?.connected ? String(current.sha256 || '').toLowerCase() : '';
+      return { ...base, activeSha, configPool };
     } catch (error) {
       return {
         connected: false,

@@ -21,9 +21,35 @@ function setBusy(on, action = '') {
   }
 }
 
+function syncConnectionInventoryToStatus(s) {
+  if (!state.profiles.length) return;
+  const connected = !!s?.connected;
+  const activeSha = String(s?.activeSha || '').toLowerCase();
+  const relay = String(s?.relay || '');
+  const relayMatch = relay.match(/^(.+):(\d+)$/);
+  const relayIP = relayMatch?.[1] || '';
+  const relayPort = Number(relayMatch?.[2] || 0);
+  let matched = false;
+  state.profiles = state.profiles.map(profile => {
+    const bySha = !!activeSha && String(profile.sha256 || '').toLowerCase() === activeSha;
+    const byEndpoint = !activeSha && !!relayIP && profile.ip === relayIP && Number(profile.port || 0) === relayPort;
+    const active = connected && (bySha || byEndpoint);
+    if (active) matched = true;
+    return profile.active === active ? profile : { ...profile, active };
+  });
+  if (state.page === 'connections') {
+    if (connected && !matched) {
+      loadConnections();
+      return;
+    }
+    renderConnections();
+  }
+}
+
 function renderStatus(s) {
   state.status = s || {};
   const connected = !!s.connected;
+  syncConnectionInventoryToStatus(s);
   $('powerButton').classList.toggle('connected', connected);
   $('sidebarDot').classList.toggle('online', connected);
   setText('sidebarStatus', connected ? 'Protected' : 'Direct connection');

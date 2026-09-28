@@ -2,6 +2,7 @@
 
 ## 2.5.0
 
+- Fixed Connections/backend desynchronization after Auto-Recovery or external headless relay changes: live status now carries the active profile SHA, the relay table re-marks ACTIVE on every status refresh, and a synthetic ACTIVE row is shown if the live tunnel profile is no longer present in the current pool.
 - Windows upgrade/process shutdown is now distinguished from explicit user Quit: installer-driven dashboard replacement preserves the desired tunnel state, while tray/desktop explicit Quit still disconnects before exit.
 - Added **Direct Internet / ISP Baseline** on the Connections page: real ping, download, upload, direct public IP and country measured from the physical Internet adapter rather than the active OIG VPN route.
 - Direct measurements explicitly bypass HTTP/SOCKS proxy settings and bind the physical path: Windows uses the physical adapter IPv4 address; Linux binds the physical interface.

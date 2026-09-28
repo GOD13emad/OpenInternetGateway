@@ -238,6 +238,19 @@ test('Linux packaged payload stays readable to desktop user',()=>{
   assert.match(afterInstall,/find "\$APPDIR" -type f -exec chmod a\+r/);
 });
 
+test('Connections stays synchronized with externally recovered active tunnel',()=>{
+  const backend=fs.readFileSync(path.join(root,'src/main/platform-backend.js'),'utf8');
+  const renderer=fs.readFileSync(path.join(root,'src/renderer/app.js'),'utf8');
+  assert.match(backend,/const activeSha = base\?\.connected \? String\(current\.sha256/);
+  assert.match(backend,/syntheticActive: true/);
+  assert.match(backend,/!profiles\.some\(p => p\.active\)/);
+  assert.match(renderer,/function syncConnectionInventoryToStatus/);
+  assert.match(renderer,/String\(s\?\.activeSha/);
+  assert.match(renderer,/if \(state\.page === 'connections'\)/);
+  assert.match(renderer,/if \(connected && !matched\)[\s\S]*loadConnections\(\)/);
+  assert.match(renderer,/syncConnectionInventoryToStatus\(s\)/);
+});
+
 test('connection inventory active state requires live tunnel',()=>{
   const backend=fs.readFileSync(path.join(root,'src/main/platform-backend.js'),'utf8');
   assert.match(backend,/const liveStatus = await this\.status\(\)/);
