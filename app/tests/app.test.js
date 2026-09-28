@@ -269,6 +269,25 @@ test('GitHub updater checks latest release and verifies published SHA-256',()=>{
   assert.match(html,/Download verified update/);
 });
 
+test('GitHub workflows use current hosted-runner actions and Node LTS',()=>{
+  const build=fs.readFileSync(path.resolve(root,'..','.github','workflows','build.yml'),'utf8');
+  const release=fs.readFileSync(path.resolve(root,'..','.github','workflows','release.yml'),'utf8');
+  for(const wf of [build,release]) {
+    assert.doesNotMatch(wf,/actions\/checkout@v4/);
+    assert.doesNotMatch(wf,/actions\/setup-node@v4/);
+    assert.doesNotMatch(wf,/node-version:\s*['"]22['"]/);
+    assert.match(wf,/actions\/checkout@v7/);
+  }
+  assert.match(build,/actions\/setup-node@v7/);
+  assert.match(build,/actions\/upload-artifact@v7/);
+  assert.match(build,/permissions:\s*\n\s*contents:\s*read/);
+  assert.match(release,/actions\/setup-node@v7/);
+  assert.match(release,/actions\/upload-artifact@v7/);
+  assert.match(release,/actions\/download-artifact@v8/);
+  assert.match(build,/node-version:\s*['"]24['"]/);
+  assert.match(release,/node-version:\s*['"]24['"]/);
+});
+
 test('Linux Debian package path is sandbox-safe',()=>{
   const afterPack=fs.readFileSync(path.join(root,'tools/afterPack.js'),'utf8');
   const afterInstall=fs.readFileSync(path.join(root,'build/linux-after-install.sh'),'utf8');
