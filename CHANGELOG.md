@@ -1,5 +1,16 @@
 # Changelog
 
+## 2.3.0
+
+- Changed Linux window close behavior: X now hides the dashboard while keeping the application and managed connection alive; explicit “Quit and disconnect” fully exits and disconnects.
+- Added a dedicated Connections page with country filtering, relay inventory, protocol, source ping, live measured latency, actual download/upload throughput, and per-relay Connect/Test actions.
+- Added honest source-vs-live measurement separation: VPN Gate metadata is never presented as a device measurement.
+- Added bounded active-tunnel throughput tests with persisted per-profile results and ICMP/HTTPS latency handling.
+- Expanded Config Factory from JP-only discovery to a JP-first diversified multi-country pool, retaining LastKnownGood profiles and country metadata.
+- Added explicit preferred-relay selection on Windows and Linux with fallback candidates and exit-country validation.
+- Added schema-v2 migration so legacy countryless JP pools self-refresh to the multi-country format.
+- Preserved headless Windows OpenVPN runtime, Linux NetworkManager runtime, Auto-Recovery, Console Gateway, failure quarantine, and independent Linux exit watchdog.
+
 ## 2.2.4
 
 - Added an independent Linux parent-exit watchdog so closing, terminating, or crashing the desktop process cannot leave the OIG-managed tunnel running.
