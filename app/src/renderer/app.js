@@ -1,5 +1,5 @@
 const $ = (id) => document.getElementById(id);
-const state = { status: null, busy: false, platform: null, page: 'overview', profiles: [], countries: [], countryFilter: '' };
+const state = { status: null, busy: false, platform: null, page: 'overview', profiles: [], countries: [], countryFilter: '', sortKey: 'rank', sortDir: 'asc' };
 
 function setText(id, value) { const el = $(id); if (el) el.textContent = value ?? '—'; }
 function safeArray(v) { return Array.isArray(v) ? v : v ? [v] : []; }
@@ -16,7 +16,7 @@ function setBusy(on, action = '') {
   state.busy = on;
   $('busyOverlay').classList.toggle('show', on);
   if (on) {
-    const names = { connect:'Connecting', disconnect:'Disconnecting', refresh:'Refreshing config pool', ensure:'Repairing connection', 'connect-profile':'Switching relay', 'benchmark-active':'Measuring real tunnel speed', 'factory-refresh':'Refreshing config pool', 'auto-install':'Installing recovery', 'auto-remove':'Removing recovery', 'console-enable':'Enabling console gateway', 'console-disable':'Disabling console gateway', 'console-status':'Checking console gateway' };
+    const names = { connect:'Connecting', disconnect:'Disconnecting', refresh:'Refreshing config pool', ensure:'Repairing connection', 'connect-profile':'Switching relay', 'benchmark-active':'Measuring real tunnel speed', 'benchmark-all-fast':'Testing all relays in parallel', 'factory-refresh':'Refreshing config pool', 'auto-install':'Installing recovery', 'auto-remove':'Removing recovery', 'console-enable':'Enabling console gateway', 'console-disable':'Disabling console gateway', 'console-status':'Checking console gateway' };
     setText('busyTitle', names[action] || 'Working…');
   }
 }
@@ -107,7 +107,7 @@ function renderBenchmarkSummary() {
   const box = $('benchmarkSummary');
   if (!box) return;
   const values = [
-    b?.icmpPingMs == null ? 'Blocked / —' : metric(b.icmpPingMs, ' ms'),
+    (b?.icmpPingMs ?? b?.fastPingMs) == null ? 'Blocked / —' : metric(b.icmpPingMs ?? b.fastPingMs, ' ms'),
     b?.httpsLatencyMs == null ? '—' : metric(b.httpsLatencyMs, ' ms'),
     b?.downloadMbps == null ? '—' : metric(b.downloadMbps, ' Mbps'),
     b?.uploadMbps == null ? '—' : metric(b.uploadMbps, ' Mbps')
@@ -115,12 +115,56 @@ function renderBenchmarkSummary() {
   box.querySelectorAll('b').forEach((el,i) => { el.textContent = values[i] || '—'; });
 }
 
+function connectionStatusRank(p) {
+  if (p.active) return 0;
+  if (p.preferred) return 1;
+  if (p.validated) return 2;
+  if (p.quarantined) return 9;
+  return 3;
+}
+
+function connectionSortValue(p, key) {
+  if (key === 'country') return (p.country || '').toUpperCase();
+  if (key === 'relay') return (p.host || p.ip || '').toLowerCase();
+  if (key === 'protocol') return p.protocol || '';
+  if (key === 'sourcePing') return p.sourcePingMs;
+  if (key === 'livePing') return p.benchmark?.fastPingMs ?? p.benchmark?.icmpPingMs ?? p.benchmark?.httpsLatencyMs;
+  if (key === 'download') return p.benchmark?.downloadMbps;
+  if (key === 'upload') return p.benchmark?.uploadMbps;
+  if (key === 'status') return connectionStatusRank(p);
+  return p.rank;
+}
+
+function compareConnections(a, b) {
+  const av = connectionSortValue(a, state.sortKey);
+  const bv = connectionSortValue(b, state.sortKey);
+  const aMissing = av == null || av === '';
+  const bMissing = bv == null || bv === '';
+  if (aMissing !== bMissing) return aMissing ? 1 : -1;
+  let cmp = 0;
+  if (typeof av === 'number' && typeof bv === 'number') cmp = av - bv;
+  else cmp = String(av ?? '').localeCompare(String(bv ?? ''), undefined, { numeric: true, sensitivity: 'base' });
+  if (!cmp) cmp = Number(a.rank || 0) - Number(b.rank || 0);
+  return state.sortDir === 'desc' ? -cmp : cmp;
+}
+
+function updateSortHeaders() {
+  document.querySelectorAll('.connection-table th[data-sort]').forEach(th => {
+    const active = th.dataset.sort === state.sortKey;
+    th.classList.toggle('active-sort', active);
+    th.setAttribute('aria-sort', active ? (state.sortDir === 'asc' ? 'ascending' : 'descending') : 'none');
+    const mark = th.querySelector('span');
+    if (mark) mark.textContent = active ? (state.sortDir === 'asc' ? '↑' : '↓') : '↕';
+  });
+}
+
 function renderConnections() {
   const body = $('connectionRows');
   if (!body) return;
   body.innerHTML = '';
   const filter = state.countryFilter || '';
-  const rows = state.profiles.filter(p => !filter || p.country === filter);
+  const rows = state.profiles.filter(p => !filter || p.country === filter).slice().sort(compareConnections);
+  updateSortHeaders();
   if (!rows.length) {
     const tr = document.createElement('tr');
     const td = document.createElement('td'); td.colSpan = 9; td.className = 'empty'; td.textContent = 'No relays match this country filter.';
@@ -146,7 +190,12 @@ function renderConnections() {
     sourcePing.textContent = p.sourcePingMs == null ? '—' : (p.sourcePingMs + ' ms');
 
     const livePing = document.createElement('td'); livePing.className = 'metric-real';
-    livePing.textContent = p.benchmark?.icmpPingMs != null ? (p.benchmark.icmpPingMs + ' ms ICMP') : (p.benchmark?.httpsLatencyMs != null ? (p.benchmark.httpsLatencyMs + ' ms HTTPS') : '—');
+    const fastPing = p.benchmark?.fastPingMs;
+    livePing.textContent = fastPing != null
+      ? (fastPing + ' ms ' + String(p.benchmark?.fastMethod || 'live').toUpperCase())
+      : (p.benchmark?.icmpPingMs != null
+          ? (p.benchmark.icmpPingMs + ' ms ICMP')
+          : (p.benchmark?.httpsLatencyMs != null ? (p.benchmark.httpsLatencyMs + ' ms HTTPS') : '—'));
 
     const down = document.createElement('td'); down.className = 'metric-real';
     down.textContent = p.benchmark?.downloadMbps == null ? 'Not tested' : (p.benchmark.downloadMbps + ' Mbps');
@@ -164,7 +213,7 @@ function renderConnections() {
     const connect = document.createElement('button'); connect.className = 'btn secondary'; connect.textContent = p.active ? 'Active' : 'Connect';
     connect.disabled = p.active || p.quarantined;
     connect.dataset.action = 'connect-profile'; connect.dataset.sha = p.sha256;
-    const test = document.createElement('button'); test.className = 'btn'; test.textContent = 'Test';
+    const test = document.createElement('button'); test.className = 'btn'; test.textContent = 'Speed';
     test.disabled = p.quarantined; test.dataset.action = 'test-profile'; test.dataset.sha = p.sha256;
     actions.append(connect, test);
 
@@ -224,15 +273,15 @@ async function connectOrTestProfile(sha256, testAfter = false) {
 
 async function benchmarkCurrent() {
   if (state.busy) return;
-  setBusy(true, 'benchmark-active');
+  setBusy(true, 'benchmark-all-fast');
   try {
-    const result = await window.gateway.action('benchmark-active');
+    const result = await window.gateway.action('benchmark-all-fast');
     if (result?.status) renderStatus(result.status);
-    const b = result?.benchmark;
-    showToast(b ? ('Actual speed: ' + b.downloadMbps + ' Mbps down · ' + b.uploadMbps + ' Mbps up') : 'Measurement completed.');
+    const seconds = Math.max(0.1, Number(result?.elapsedMs || 0) / 1000).toFixed(1);
+    showToast('Tested ' + String(result?.tested || 0) + ' relays in ' + seconds + 's · ' + String(result?.reachable || 0) + ' replied.');
     await loadConnections();
   } catch (e) {
-    showToast(e.message || 'Real speed test failed.', true);
+    showToast(e.message || 'Fast relay test failed.', true);
   } finally {
     setBusy(false);
   }
@@ -306,6 +355,12 @@ async function init() {
   $('reloadConnections').addEventListener('click', loadConnections);
   $('benchmarkCurrent').addEventListener('click', benchmarkCurrent);
   $('countryFilter').addEventListener('change', e => { state.countryFilter = e.target.value; renderConnections(); });
+  document.querySelectorAll('.connection-table th[data-sort]').forEach(th => th.addEventListener('click', () => {
+    const key = th.dataset.sort;
+    if (state.sortKey === key) state.sortDir = state.sortDir === 'asc' ? 'desc' : 'asc';
+    else { state.sortKey = key; state.sortDir = 'asc'; }
+    renderConnections();
+  }));
   $('connectionRows').addEventListener('click', e => {
     const button = e.target.closest('button[data-action]');
     if (!button || button.disabled) return;

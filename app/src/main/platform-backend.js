@@ -2,6 +2,7 @@ const { spawn } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const net = require('net');
 
 function run(file, args, options = {}) {
   return new Promise((resolve, reject) => {
@@ -306,29 +307,104 @@ class Backend {
     return { ok: true, profile, status };
   }
 
-  async _icmpPing(ip) {
+  async _icmpPing(ip, fast = false) {
     if (!ip) return null;
     try {
       if (this.platform === 'win32') {
-        const r = await run('ping.exe', ['-n','2','-w','1500',ip], { timeout: 5000, allowFailure: true });
-        const m = r.stdout.match(/Average\s*=\s*(\d+)ms/i);
-        return m ? Number(m[1]) : null;
+        const r = await run('ping.exe', fast ? ['-n','1','-w','900',ip] : ['-n','2','-w','1500',ip], {
+          timeout: fast ? 2200 : 5000, allowFailure: true
+        });
+        const one = r.stdout.match(/time[=<]\s*(\d+)ms/i);
+        if (one) return Number(one[1]);
+        const avg = r.stdout.match(/Average\s*=\s*(\d+)ms/i);
+        return avg ? Number(avg[1]) : null;
       }
-      const r = await run('ping', ['-n','-c','2','-W','2',ip], { timeout: 6000, allowFailure: true });
-      const m = r.stdout.match(/=\s*[\d.]+\/([\d.]+)\/[\d.]+\/[\d.]+\s*ms/);
-      return m ? Number(m[1]) : null;
+      const r = await run('ping', fast ? ['-n','-c','1','-W','1',ip] : ['-n','-c','2','-W','2',ip], {
+        timeout: fast ? 2500 : 6000, allowFailure: true
+      });
+      const one = r.stdout.match(/time[=<]([\d.]+)\s*ms/i);
+      if (one) return Math.round(Number(one[1]) * 10) / 10;
+      const avg = r.stdout.match(/=\s*[\d.]+\/([\d.]+)\/[\d.]+\/[\d.]+\s*ms/);
+      return avg ? Number(avg[1]) : null;
     } catch {
       return null;
     }
   }
 
+  _tcpConnectMs(ip, port, timeoutMs = 1100) {
+    if (!ip || !port) return Promise.resolve(null);
+    return new Promise(resolve => {
+      const started = Date.now();
+      const socket = net.createConnection({ host: ip, port: Number(port) });
+      let done = false;
+      const finish = value => {
+        if (done) return;
+        done = true;
+        try { socket.destroy(); } catch {}
+        resolve(value);
+      };
+      socket.setTimeout(timeoutMs, () => finish(null));
+      socket.once('connect', () => finish(Date.now() - started));
+      socket.once('error', () => finish(null));
+    });
+  }
+
+  async _quickProbeProfile(profile) {
+    const started = Date.now();
+    const pingPromise = this._icmpPing(profile.ip, true);
+    const tcpPromise = profile.protocol === 'tcp'
+      ? this._tcpConnectMs(profile.ip, profile.port)
+      : Promise.resolve(null);
+    const [icmpPingMs, tcpConnectMs] = await Promise.all([pingPromise, tcpPromise]);
+    const candidates = [icmpPingMs, tcpConnectMs].filter(v => Number.isFinite(v));
+    const fastPingMs = candidates.length ? Math.min(...candidates) : null;
+    return {
+      fastAt: new Date().toISOString(),
+      fastPingMs,
+      tcpConnectMs,
+      fastReachable: fastPingMs != null,
+      fastMethod: tcpConnectMs != null && (icmpPingMs == null || tcpConnectMs <= icmpPingMs) ? 'tcp' : (icmpPingMs != null ? 'icmp' : 'none'),
+      fastElapsedMs: Date.now() - started
+    };
+  }
+
+  async benchmarkAllFast() {
+    const started = Date.now();
+    const inventory = await this.profiles();
+    const targets = inventory.profiles.filter(p => !p.quarantined && p.ip);
+    const file = path.join(this.backendRoot, 'state', 'connection-benchmarks.json');
+    const all = this._readJson(file, {}) || {};
+    const results = new Array(targets.length);
+    let cursor = 0;
+    const worker = async () => {
+      while (true) {
+        const index = cursor++;
+        if (index >= targets.length) return;
+        const profile = targets[index];
+        const quick = await this._quickProbeProfile(profile);
+        all[profile.sha256] = { ...(all[profile.sha256] || {}), ...quick };
+        results[index] = { sha256: profile.sha256, ...quick };
+      }
+    };
+    const concurrency = Math.min(12, Math.max(1, targets.length));
+    await Promise.all(Array.from({ length: concurrency }, () => worker()));
+    this._writeJson(file, all);
+    return {
+      ok: true,
+      tested: results.length,
+      reachable: results.filter(x => x?.fastReachable).length,
+      elapsedMs: Date.now() - started,
+      results
+    };
+  }
+
   async _httpsLatencyMs(sink) {
     const samples = [];
-    for (let i = 0; i < 3; i++) {
+    for (let i = 0; i < 2; i++) {
       const r = await run('curl', [
-        '-4','-L','--max-time','8','-sS','-o',sink,'-w','%{http_code}|%{time_starttransfer}',
+        '-4','-L','--max-time','5','-sS','-o',sink,'-w','%{http_code}|%{time_starttransfer}',
         'https://www.cloudflare.com/cdn-cgi/trace'
-      ], { timeout: 10000, allowFailure: true });
+      ], { timeout: 7000, allowFailure: true });
       const [code, seconds] = String(r.stdout || '').trim().split('|');
       const value = Number(seconds);
       if (code === '200' && Number.isFinite(value) && value > 0) samples.push(value * 1000);
@@ -346,34 +422,38 @@ class Backend {
     if (!active) throw new Error('The active relay could not be mapped to the config inventory.');
 
     const sink = this.platform === 'win32' ? 'NUL' : '/dev/null';
-    const latencyMs = await this._httpsLatencyMs(sink);
-    const icmpPingMs = await this._icmpPing(active.ip);
+    const [latencyMs, icmpPingMs] = await Promise.all([
+      this._httpsLatencyMs(sink),
+      this._icmpPing(active.ip)
+    ]);
 
-    const downBytes = 4_000_000;
+    const downBytes = 2_000_000;
     const down = await run('curl', [
-      '-4','-L','--max-time','25','-sS','-o',sink,'-w','%{http_code}|%{time_total}|%{speed_download}',
+      '-4','-L','--max-time','12','-sS','-o',sink,'-w','%{http_code}|%{time_total}|%{speed_download}',
       'https://speed.cloudflare.com/__down?bytes=' + String(downBytes)
-    ], { timeout: 30000, allowFailure: true });
+    ], { timeout: 15000, allowFailure: true });
     const [downCode, downTime, downSpeed] = String(down.stdout || '').trim().split('|');
     if (downCode !== '200' || !(Number(downSpeed) > 0)) throw new Error('Real download test did not complete successfully.');
 
-    const upBytes = 1_000_000;
+    const upBytes = 512_000;
     const tempUpload = path.join(this.backendRoot, 'state', 'benchmark-upload.bin');
     fs.mkdirSync(path.dirname(tempUpload), { recursive: true });
     fs.writeFileSync(tempUpload, Buffer.alloc(upBytes));
     let up;
     try {
       up = await run('curl', [
-        '-4','-L','--max-time','25','-sS','-o',sink,'-w','%{http_code}|%{time_total}|%{speed_upload}',
+        '-4','-L','--max-time','12','-sS','-o',sink,'-w','%{http_code}|%{time_total}|%{speed_upload}',
         '-X','POST','--data-binary','@' + tempUpload,'https://speed.cloudflare.com/__up'
-      ], { timeout: 30000, allowFailure: true });
+      ], { timeout: 15000, allowFailure: true });
     } finally {
       try { fs.unlinkSync(tempUpload); } catch {}
     }
     const [upCode, upTime, upSpeed] = String(up.stdout || '').trim().split('|');
     if (upCode !== '200' || !(Number(upSpeed) > 0)) throw new Error('Real upload test did not complete successfully.');
 
+    const previous = active.benchmark || {};
     const result = {
+      ...previous,
       at: new Date().toISOString(),
       sha256: active.sha256,
       host: active.host,
@@ -445,6 +525,7 @@ class Backend {
       let result;
       if (action === 'connect-profile') result = await this.connectProfile(options.sha256);
       else if (action === 'benchmark-active') result = await this.benchmarkActive();
+      else if (action === 'benchmark-all-fast') result = await this.benchmarkAllFast();
       else result = await (this.platform === 'win32' ? this._windows(action) : this._linux(action));
       const status = result?.status || await this.status();
       this.emit({ type: 'status', action, busy: false, status });

@@ -140,7 +140,7 @@
             <div class="connection-controls">
               <select id="countryFilter" class="select-control" aria-label="Country filter"><option value="">All countries</option></select>
               <button class="btn secondary compact" id="reloadConnections">Reload</button>
-              <button class="btn compact" id="benchmarkCurrent">Test current</button>
+              <button class="btn compact" id="benchmarkCurrent">Test all</button>
             </div>
           </div>
           <div class="benchmark-summary" id="benchmarkSummary">
@@ -151,11 +151,11 @@
           </div>
           <div class="connection-table-wrap">
             <table class="connection-table">
-              <thead><tr><th>Country</th><th>Relay</th><th>Protocol</th><th>Source ping</th><th>Live ping</th><th>Actual ↓</th><th>Actual ↑</th><th>Status</th><th></th></tr></thead>
+              <thead><tr><th class="sortable" data-sort="country">Country <span>↕</span></th><th class="sortable" data-sort="relay">Relay <span>↕</span></th><th class="sortable" data-sort="protocol">Protocol <span>↕</span></th><th class="sortable" data-sort="sourcePing">Source ping <span>↕</span></th><th class="sortable" data-sort="livePing">Live ping <span>↕</span></th><th class="sortable" data-sort="download">Actual ↓ <span>↕</span></th><th class="sortable" data-sort="upload">Actual ↑ <span>↕</span></th><th class="sortable" data-sort="status">Status <span>↕</span></th><th></th></tr></thead>
               <tbody id="connectionRows"><tr><td colspan="9" class="empty">Loading connection inventory…</td></tr></tbody>
             </table>
           </div>
-          <p class="measurement-note">“Source ping” comes from VPN Gate metadata. “Live ping” and actual throughput are measured by this computer. Some relays block ICMP, so live ping may be unavailable even when the tunnel works.</p>
+          <p class="measurement-note">“Test all” probes every relay in parallel without switching the tunnel. “Source ping” is VPN Gate metadata; “Live ping” is measured by this computer. Use Speed on a row for real tunnel download/upload. Some relays block ICMP.</p>
         </article>
       </section>
 

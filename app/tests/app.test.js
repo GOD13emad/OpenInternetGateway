@@ -229,6 +229,22 @@ test('connection inventory active state requires live tunnel',()=>{
   assert.match(backend,/active: !!liveStatus\.connected && !!sha && sha === activeSha/);
 });
 
+test('fast Test all probes relays in parallel and table sorting is explicit',()=>{
+  const backend=fs.readFileSync(path.join(root,'src/main/platform-backend.js'),'utf8');
+  const renderer=fs.readFileSync(path.join(root,'src/renderer/app.js'),'utf8');
+  const html=fs.readFileSync(path.join(root,'src/renderer/index.html'),'utf8');
+  assert.match(backend,/async benchmarkAllFast\(\)/);
+  assert.match(backend,/Math\.min\(12/);
+  assert.match(backend,/benchmark-all-fast/);
+  assert.match(backend,/fastPingMs/);
+  assert.match(renderer,/connectionSortValue/);
+  assert.match(renderer,/compareConnections/);
+  assert.match(renderer,/benchmark-all-fast/);
+  assert.match(renderer,/test\.textContent = 'Speed'/);
+  assert.match(html,/>Test all</);
+  for(const key of ['country','relay','protocol','sourcePing','livePing','download','upload','status']) assert.match(html,new RegExp('data-sort="'+key+'"'));
+});
+
 test('Linux Debian package path is sandbox-safe',()=>{
   const afterPack=fs.readFileSync(path.join(root,'tools/afterPack.js'),'utf8');
   const afterInstall=fs.readFileSync(path.join(root,'build/linux-after-install.sh'),'utf8');
