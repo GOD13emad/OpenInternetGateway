@@ -104,6 +104,7 @@ test('version is runtime-derived and quit disconnects the managed tunnel',()=>{
 
 test('Linux close-to-dock and desktop Quit lifecycle are explicit',()=>{
   const main=fs.readFileSync(path.join(root,'src/main/main.js'),'utf8');
+  const backend=fs.readFileSync(path.join(root,'src/main/platform-backend.js'),'utf8');
   const afterInstall=fs.readFileSync(path.join(root,'build/linux-after-install.sh'),'utf8');
   assert.match(main,/mainWindow\.on\('close'/);
   assert.match(main,/mainWindow\.hide\(\)/);
@@ -113,6 +114,9 @@ test('Linux close-to-dock and desktop Quit lifecycle are explicit',()=>{
   assert.match(afterInstall,/Actions=Quit/);
   assert.match(afterInstall,/Desktop Action Quit/);
   assert.match(afterInstall,/--quit/);
+  assert.match(backend,/OpenInternetGateway\.desktop/);
+  assert.match(backend,/Desktop Action Quit/);
+  assert.match(backend,/copyFileSync\(systemDesktop, userDesktop\)/);
 });
 
 test('Linux independent exit watchdog enforces disconnect safely',()=>{

@@ -101,6 +101,24 @@ class Backend {
       for (const file of ['oig-linux.sh', 'watch-parent.sh']) {
         try { fs.chmodSync(path.join(stable, 'linux', file), 0o755); } catch {}
       }
+
+      // Repair legacy per-user desktop overrides that shadow the packaged system
+      // desktop entry. Older OIG builds created such an override without the
+      // desktop Quit action, so GNOME Dock would never expose Quit+disconnect.
+      const systemDesktop = '/usr/share/applications/OpenInternetGateway.desktop';
+      const userDesktop = path.join(os.homedir(), '.local', 'share', 'applications', 'OpenInternetGateway.desktop');
+      try {
+        if (fs.existsSync(systemDesktop) && fs.existsSync(userDesktop)) {
+          const current = fs.readFileSync(userDesktop, 'utf8');
+          const legacyOig = /Name=Open Internet Gateway/.test(current)
+            && /Exec=.*(?:open-internet-gateway|OpenInternetGateway)/i.test(current);
+          const lacksQuitAction = !/\[Desktop Action Quit\]/.test(current);
+          if (legacyOig && lacksQuitAction) {
+            fs.copyFileSync(systemDesktop, userDesktop);
+            fs.chmodSync(userDesktop, 0o644);
+          }
+        }
+      } catch {}
     }
   }
 
