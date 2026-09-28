@@ -585,55 +585,31 @@ class Backend {
     return info;
   }
 
-  _downloadWithSha256(url, destination, redirects = 5) {
-    return new Promise((resolve, reject) => {
-      fs.mkdirSync(path.dirname(destination), { recursive: true });
-      const partial = destination + '.partial';
+  async _curlText(url, maxSeconds = 20) {
+    const r = await run('curl', [
+      '-4','-L','--fail','--connect-timeout','8','--max-time',String(maxSeconds),
+      '--retry','2','--retry-delay','1','-sS',url
+    ], { timeout: (maxSeconds + 8) * 1000 });
+    return String(r.stdout || '');
+  }
+
+  async _downloadWithSha256(url, destination) {
+    fs.mkdirSync(path.dirname(destination), { recursive: true });
+    const partial = destination + '.partial';
+    try { fs.unlinkSync(partial); } catch {}
+    try {
+      await run('curl', [
+        '-4','-L','--fail','--connect-timeout','8','--max-time','300',
+        '--retry','2','--retry-delay','1','-sS','-o',partial,url
+      ], { timeout: 310000 });
+      const bytes = fs.statSync(partial).size;
+      const sha256 = crypto.createHash('sha256').update(fs.readFileSync(partial)).digest('hex').toLowerCase();
+      fs.renameSync(partial, destination);
+      return { sha256, bytes };
+    } catch (error) {
       try { fs.unlinkSync(partial); } catch {}
-      const request = currentUrl => {
-        const req = https.get(currentUrl, { headers: this._githubHeaders() }, res => {
-          const code = Number(res.statusCode || 0);
-          if ([301,302,303,307,308].includes(code) && res.headers.location && redirects > 0) {
-            res.resume();
-            redirects -= 1;
-            request(new URL(res.headers.location, currentUrl).toString());
-            return;
-          }
-          if (code < 200 || code >= 300) {
-            res.resume();
-            reject(new Error('Update download failed with HTTP ' + code + '.'));
-            return;
-          }
-          const hash = crypto.createHash('sha256');
-          const out = fs.createWriteStream(partial, { flags: 'w' });
-          let bytes = 0;
-          res.on('data', chunk => { hash.update(chunk); bytes += chunk.length; });
-          res.pipe(out);
-          out.on('error', err => {
-            try { res.destroy(); } catch {}
-            try { fs.unlinkSync(partial); } catch {}
-            reject(err);
-          });
-          out.on('finish', () => {
-            out.close(() => {
-              try {
-                fs.renameSync(partial, destination);
-                resolve({ sha256: hash.digest('hex').toLowerCase(), bytes });
-              } catch (error) {
-                try { fs.unlinkSync(partial); } catch {}
-                reject(error);
-              }
-            });
-          });
-        });
-        req.setTimeout(30000, () => req.destroy(new Error('Update download stalled.')));
-        req.on('error', error => {
-          try { fs.unlinkSync(partial); } catch {}
-          reject(error);
-        });
-      };
-      request(url);
-    });
+      throw error;
+    }
   }
 
   async downloadUpdate() {
@@ -645,7 +621,7 @@ class Backend {
     if (!info.asset.sha256) throw new Error('GitHub release asset has no SHA-256 digest; refusing an unverifiable update.');
 
     if (info.checksumsUrl) {
-      const sums = await this._httpsText(info.checksumsUrl);
+      const sums = await this._curlText(info.checksumsUrl, 20);
       const line = sums.split(/\r?\n/).find(x => x.trim().endsWith('  ' + info.asset.name));
       if (!line) throw new Error('Published SHA256SUMS does not include the selected update asset.');
       const checksum = line.trim().split(/\s+/)[0].toLowerCase();

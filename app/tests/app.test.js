@@ -258,6 +258,9 @@ test('GitHub updater checks latest release and verifies published SHA-256',()=>{
   assert.match(backend,/SHA256SUMS/);
   assert.match(backend,/GitHub digest and SHA256SUMS disagree/);
   assert.match(backend,/Downloaded update SHA-256 does not match/);
+  assert.match(backend,/async _curlText/);
+  assert.match(backend,/--max-time','300/);
+  assert.match(backend,/--retry','2/);
   assert.match(backend,/async updateInfo\(force = false\)/);
   assert.match(backend,/async downloadUpdate\(\)/);
   assert.match(main,/gateway:updateInfo/);
