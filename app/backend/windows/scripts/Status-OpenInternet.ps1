@@ -15,10 +15,11 @@ if(Test-Path $desiredFile){try{$desired=[string](Get-Content -Raw $desiredFile|C
 $relay='';$protocol='';$engine='OVPNConnectorService'
 $stateFile=Join-Path $Root 'state\current-openvpn-profile.json'
 if(Test-Path $stateFile){try{$s=Get-Content -Raw $stateFile|ConvertFrom-Json;$relay=([string]$s.serverIP)+':'+([string]$s.port);$protocol=[string]$s.protocol;if($s.engine){$engine=[string]$s.engine}}catch{}}
+$svc=Get-Service OVPNConnectorService -ErrorAction SilentlyContinue
 $pool=$null
 try{$pool=& (Join-Path $PSScriptRoot 'Config-Factory.ps1') -Action Status|ConvertFrom-Json}catch{}
 [pscustomobject]@{
- Connected=($routes.Count -ge 2 -and $loc -eq 'JP' -and -not $poison)
+ Connected=($routes.Count -ge 2 -and $loc -and $loc -ne 'IR' -and -not $poison -and $svc -and $svc.Status -eq 'Running')
  IP=$ip;Country=$loc;Dns=($dns -join ',');Poison=$poison;FullRoutes=$routes.Count
  Relay=$relay;Protocol=$protocol;Engine=$engine;DesiredState=$desired
  AutoRecovery=$(if($task){'Installed'}else{'NotInstalled'})

@@ -166,6 +166,7 @@ test('multi-country config factories retain country metadata and no JP-only gate
   const linuxBackend=fs.readFileSync(path.join(root,'backend/linux/oig-linux.sh'),'utf8');
   const winFactory=fs.readFileSync(path.join(root,'backend/windows/scripts/Build-VpnGateUdpCache.ps1'),'utf8');
   const winControl=fs.readFileSync(path.join(root,'backend/windows/scripts/Headless-Control.ps1'),'utf8');
+  const winStatus=fs.readFileSync(path.join(root,'backend/windows/scripts/Status-OpenInternet.ps1'),'utf8');
   const platform=fs.readFileSync(path.join(root,'src/main/platform-backend.js'),'utf8');
   assert.match(linuxFactory,/COUNTRY_PRIORITY/);
   assert.match(linuxFactory,/CountryName/);
@@ -176,6 +177,10 @@ test('multi-country config factories retain country metadata and no JP-only gate
   assert.doesNotMatch(winFactory,/\$p\[6\] -ne 'JP'/);
   assert.match(winControl,/ExpectedCountry/);
   assert.doesNotMatch(winControl,/\$loc -eq 'JP'/);
+  assert.doesNotMatch(winStatus,/\$loc -eq 'JP'/);
+  assert.match(winStatus,/\$loc -ne 'IR'/);
+  assert.match(winStatus,/Get-Service OVPNConnectorService/);
+  assert.match(winStatus,/\$svc\.Status -eq 'Running'/);
   assert.match(platform,/\$loc -ne 'IR'/);
 });
 
