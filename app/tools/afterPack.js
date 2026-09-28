@@ -1,11 +1,18 @@
 const fs = require('fs');
 const path = require('path');
 
-function chmodDirs(root) {
+function normalizeLinuxPayload(root) {
   fs.chmodSync(root, 0o755);
   for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
-    if (!entry.isDirectory()) continue;
-    chmodDirs(path.join(root, entry.name));
+    const full = path.join(root, entry.name);
+    if (entry.isDirectory()) {
+      normalizeLinuxPayload(full);
+      continue;
+    }
+    if (entry.isFile()) {
+      const mode = fs.statSync(full).mode & 0o7777;
+      fs.chmodSync(full, mode | 0o044);
+    }
   }
 }
 
@@ -19,7 +26,7 @@ module.exports = async function afterPack(context) {
 
   // electron-builder can inherit a restrictive umask into /opt payload directories.
   // Keep application directories traversable by normal desktop users.
-  chmodDirs(context.appOutDir);
+  normalizeLinuxPayload(context.appOutDir);
 
   const mainExe = path.join(context.appOutDir, 'open-internet-gateway');
   const crashpad = path.join(context.appOutDir, 'chrome_crashpad_handler');

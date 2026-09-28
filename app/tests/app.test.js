@@ -173,6 +173,14 @@ test('connection inventory exposes honest source-vs-live metrics and selectable 
   assert.match(win,/Preferred/);
 });
 
+test('Linux packaged payload stays readable to desktop user',()=>{
+  const afterPack=fs.readFileSync(path.join(root,'tools/afterPack.js'),'utf8');
+  const afterInstall=fs.readFileSync(path.join(root,'build/linux-after-install.sh'),'utf8');
+  assert.match(afterPack,/mode \| 0o044/);
+  assert.match(afterPack,/normalizeLinuxPayload/);
+  assert.match(afterInstall,/find "\$APPDIR" -type f -exec chmod a\+r/);
+});
+
 test('Linux Debian package path is sandbox-safe',()=>{
   const afterPack=fs.readFileSync(path.join(root,'tools/afterPack.js'),'utf8');
   const afterInstall=fs.readFileSync(path.join(root,'build/linux-after-install.sh'),'utf8');
