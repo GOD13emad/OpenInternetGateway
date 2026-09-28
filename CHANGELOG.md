@@ -1,5 +1,15 @@
 # Changelog
 
+## 2.4.0
+
+- Replaced slow Test current with parallel Test all: relay reachability/ping probes run concurrently without changing the active tunnel; live Linux validation tested 27 usable relays in 3.821 seconds while preserving the active JP tunnel.
+- Made the Connections table sortable by country, relay, protocol, source ping, live ping, actual download, actual upload and status; missing measurements sort after measured values.
+- Kept per-row Speed as the explicit real-tunnel throughput measurement and reduced bounded test payload/time while preserving locally measured download/upload semantics.
+- Added an in-app GitHub Updates center for GOD13emad/OpenInternetGateway with current/latest version, release asset and published SHA-256.
+- Added fail-closed update verification across the GitHub release asset digest, SHA256SUMS and downloaded bytes before opening an installer/package.
+- Updated GitHub Actions to current hosted-runner action generations and Node 24 LTS; npm dependencies report no outdated packages and npm audit reports zero vulnerabilities.
+- Preserved all v2.3.1 lifecycle, multi-country, exact-relay, headless OpenVPN, Auto-Recovery and Console Gateway behavior.
+
 ## 2.3.1
 
 - Fixed stale ACTIVE relay presentation after the managed tunnel had already disconnected; a relay is now active only when live tunnel health is connected and its SHA matches the current profile state.
