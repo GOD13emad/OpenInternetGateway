@@ -1,5 +1,12 @@
 # Changelog
 
+## 2.4.1
+
+- Fixed GitHub release-asset downloads stalling on some networks by reusing OIG's proven cross-platform curl transport with IPv4, redirects, bounded connect/transfer timeouts and retries.
+- Preserved fail-closed update verification: GitHub asset digest, published SHA256SUMS and downloaded bytes must all agree before an installer/package is opened.
+- Live updater regression downloaded the published v2.4.0 Linux DEB (99,192,580 bytes) in 6.349 seconds and verified SHA-256 exactly.
+- Includes all v2.4.0 features: fast parallel Test all, sortable Connections, per-row real Speed, GitHub Updates center, Node 24 LTS CI and current GitHub Action generations.
+
 ## 2.4.0
 
 - Replaced slow Test current with parallel Test all: relay reachability/ping probes run concurrently without changing the active tunnel; live Linux validation tested 27 usable relays in 3.821 seconds while preserving the active JP tunnel.
