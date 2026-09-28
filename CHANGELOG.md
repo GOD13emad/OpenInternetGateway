@@ -1,5 +1,16 @@
 # Changelog
 
+## 2.5.2
+
+- Fixed exact per-row relay switching on Windows so the selected relay request cannot be consumed during a redundant disconnect phase and silently replaced by another relay.
+- Exact relay success now requires the active profile SHA and observed exit country to match the selected relay; mismatches fail closed.
+- If a selected relay fails, OIG restores the previous validated relay when possible and reports the requested operation as failed rather than presenting a hidden fallback as success.
+- Improved the Connect/Speed busy overlay with explicit switching, validation, and throughput progress so a bounded relay transition no longer looks frozen.
+- Kept per-row Speed semantics strict: OIG connects and validates the selected relay first, then measures real ping/HTTPS latency, download, and upload through that tunnel.
+- Added regression coverage for atomic exact switching, stale-request cleanup, preferred-relay preservation, and recovery behavior.
+- Windows installed-product validation: failed exact selection rejected fallback, previous TH relay restored with exact SHA, and real Speed measured 4.39 Mbps download / 0.57 Mbps upload with 936 ms HTTPS latency.
+- Published Windows, Linux AppImage, Linux Debian, and SHA256SUMS assets from the same v2.5.2 release workflow.
+
 ## 2.5.1
 
 - Fixed Connections live-state desynchronization after Auto-Recovery or independent headless relay changes.
