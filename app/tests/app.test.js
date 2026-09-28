@@ -89,7 +89,6 @@ test('version is runtime-derived and quit disconnects the managed tunnel',()=>{
   const linux=fs.readFileSync(path.join(root,'backend/linux/oig-linux.sh'),'utf8');
   assert.match(main,/version:\s*app\.getVersion\(\)/);
   assert.match(main,/backend\.action\('disconnect'\)/);
-  assert.match(main,/process\.platform === 'linux'/);
   assert.match(main,/SIGTERM/);
   assert.match(main,/watch-parent\.sh/);
   assert.match(main,/app-process\.lease/);
@@ -101,6 +100,19 @@ test('version is runtime-derived and quit disconnects the managed tunnel',()=>{
   assert.match(linux,/DESIRED=.*desired-state/);
   assert.match(linux,/set_desired off/);
   assert.match(linux,/DESIRED OFF/);
+});
+
+test('Linux close-to-dock and desktop Quit lifecycle are explicit',()=>{
+  const main=fs.readFileSync(path.join(root,'src/main/main.js'),'utf8');
+  const afterInstall=fs.readFileSync(path.join(root,'build/linux-after-install.sh'),'utf8');
+  assert.match(main,/mainWindow\.on\('close'/);
+  assert.match(main,/mainWindow\.hide\(\)/);
+  assert.match(main,/argv\.includes\('--quit'\)/);
+  assert.match(main,/quitRequestedAtLaunch/);
+  assert.doesNotMatch(main,/process\.platform === 'linux'\) requestQuit/);
+  assert.match(afterInstall,/Actions=Quit/);
+  assert.match(afterInstall,/Desktop Action Quit/);
+  assert.match(afterInstall,/--quit/);
 });
 
 test('Linux independent exit watchdog enforces disconnect safely',()=>{

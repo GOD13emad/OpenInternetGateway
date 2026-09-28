@@ -13,6 +13,17 @@ if [ -d "$APPDIR" ]; then
 fi
 DESKTOP="/usr/share/applications/OpenInternetGateway.desktop"
 if [ -f "$DESKTOP" ]; then
+  if ! grep -q '^Actions=.*Quit' "$DESKTOP"; then
+    sed -i '/^Categories=/a Actions=Quit;' "$DESKTOP"
+  fi
+  if ! grep -q '^\[Desktop Action Quit\]' "$DESKTOP"; then
+    cat >> "$DESKTOP" <<'EOF'
+
+[Desktop Action Quit]
+Name=Quit and disconnect
+Exec=/opt/open-internet-gateway/open-internet-gateway --quit
+EOF
+  fi
   chown root:root "$DESKTOP" 2>/dev/null || true
   chmod 0644 "$DESKTOP"
 fi

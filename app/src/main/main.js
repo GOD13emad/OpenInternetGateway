@@ -13,6 +13,7 @@ let lastStatus = null;
 let quitInProgress = false;
 let allowQuit = false;
 const startInBackground = process.argv.includes('--background');
+const quitRequestedAtLaunch = process.argv.includes('--quit');
 
 const gotSingleInstanceLock = app.requestSingleInstanceLock();
 if (!gotSingleInstanceLock) app.quit();
@@ -59,8 +60,9 @@ function createWindow() {
   mainWindow.on('close', (event) => {
     if (app.isQuitting) return;
     event.preventDefault();
-    if (process.platform === 'linux') requestQuit();
-    else mainWindow.hide();
+    // Keep the app represented by its desktop/dock icon. Wayland does not
+    // reliably support programmatic minimize, while hiding keeps it live.
+    mainWindow.hide();
   });
 }
 
@@ -173,7 +175,8 @@ async function requestQuit() {
   }
 }
 
-app.on('second-instance', () => {
+app.on('second-instance', (_event, argv) => {
+  if (argv.includes('--quit')) { requestQuit(); return; }
   if (!mainWindow) return;
   if (mainWindow.isMinimized()) mainWindow.restore();
   mainWindow.show();
@@ -193,6 +196,7 @@ app.whenReady().then(async () => {
   });
   await backend.initialize();
   startLinuxExitWatchdog();
+  if (quitRequestedAtLaunch) { requestQuit(); return; }
   if (process.platform === 'win32' && app.isPackaged) {
     app.setLoginItemSettings({ openAtLogin: true, path: process.execPath, args: ['--background'] });
   }
