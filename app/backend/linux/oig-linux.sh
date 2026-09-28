@@ -116,7 +116,8 @@ start_watchdog() {
 }
 
 profile_lines() {
-  python3 - "$OIG_COMMON/runtime/udp-cache/index.json" "$OIG_COMMON/runtime/config-factory/quarantine.json" "$STATE/preferred-profile.json" <<'PY'
+  local only_sha="${1:-}"
+  python3 - "$OIG_COMMON/runtime/udp-cache/index.json" "$OIG_COMMON/runtime/config-factory/quarantine.json" "$STATE/preferred-profile.json" "$only_sha" <<'PY'
 import json,sys,os
 data=json.load(open(sys.argv[1],encoding="utf-8-sig"))
 try:
@@ -127,7 +128,11 @@ try:
     pref=json.load(open(sys.argv[3],encoding="utf-8-sig")).get("sha256","").lower()
 except Exception:
     pref=""
-data=sorted(data,key=lambda c:(0 if pref and str(c.get("SHA256","")).lower()==pref else 1,int(c.get("Rank",9999) or 9999)))
+only_sha=(sys.argv[4] if len(sys.argv)>4 else "").lower()
+if only_sha:
+    data=[c for c in data if str(c.get("SHA256","")).lower()==only_sha]
+else:
+    data=sorted(data,key=lambda c:(0 if pref and str(c.get("SHA256","")).lower()==pref else 1,int(c.get("Rank",9999) or 9999)))
 n=0
 for c in data:
     key=str(c.get("SHA256","")).lower() or f"{c.get('IP','')}:{c.get('Port','')}"
@@ -140,7 +145,7 @@ for c in data:
         leaf,str(c.get("SHA256","")),str(c.get("Protocol","unknown")),str(c.get("Country",""))
     ]))
     n+=1
-    if n>=24:
+    if n >= (1 if only_sha else 24):
         break
 PY
 }
@@ -216,7 +221,8 @@ record_failure() {
 }
 
 connect_gateway() {
-  if healthy; then
+  local exact_sha="${1:-}"
+  if [[ -z "$exact_sha" ]] && healthy; then
     touch "$KEEP"
     python3 "$FACTORY_PY" status --common "$OIG_COMMON" >/dev/null 2>&1 || true
     echo "ALREADY CONNECTED"
@@ -234,8 +240,10 @@ connect_gateway() {
   local attempts="$EVIDENCE/connect-linux-attempts.jsonl"
   : > "$attempts"
 
-  local cycle rc reason stat
-  for cycle in 0 1; do
+  local cycle rc reason stat max_cycle
+  max_cycle=1
+  [[ -n "$exact_sha" ]] && max_cycle=0
+  for ((cycle=0; cycle<=max_cycle; cycle++)); do
     local had=0
     while IFS="$(printf '\t')" read -r host ipaddr port leaf sha protocol country; do
       [[ -n "$ipaddr" ]] || continue
@@ -252,9 +260,11 @@ connect_gateway() {
         printf '{"host":"%s","ip":"%s","port":"%s","protocol":"%s","result":"FAIL","code":%s,"cycle":%s}\n' "$host" "$ipaddr" "$port" "$protocol" "$rc" "$cycle" >> "$attempts"
         record_failure "$sha" "$host" "$ipaddr" "$port" "$reason"
       fi
-    done < <(profile_lines)
+    done < <(profile_lines "$exact_sha")
 
-    if [[ "$cycle" -eq 0 ]]; then
+    if [[ -n "$exact_sha" ]]; then
+      break
+    elif [[ "$cycle" -eq 0 ]]; then
       python3 "$FACTORY_PY" refresh --common "$OIG_COMMON" >/dev/null || true
     elif [[ "$had" -eq 0 ]]; then
       break
@@ -265,7 +275,11 @@ connect_gateway() {
   stop_watchdog
   delete_named_connections
   python3 "$FACTORY_PY" status --common "$OIG_COMMON" >/dev/null 2>&1 || true
-  echo "No generated relay configuration passed validation." >&2
+  if [[ -n "$exact_sha" ]]; then
+    echo "Selected relay failed validation." >&2
+  else
+    echo "No generated relay configuration passed validation." >&2
+  fi
   return 21
 }
 
@@ -387,7 +401,7 @@ console_disable() {
 }
 
 action="${1:-status}"
-if [[ "$action" == "connect" || "$action" == "refresh" || "$action" == "ensure" || "$action" == "factory-refresh" ]]; then
+if [[ "$action" == "connect" || "$action" == "connect-profile" || "$action" == "refresh" || "$action" == "ensure" || "$action" == "factory-refresh" ]]; then
   exec 9>"$LOCK"
   if ! flock -n 9; then
     echo "Another gateway operation is active."
@@ -398,6 +412,12 @@ fi
 case "$action" in
   status) json_status ;;
   connect) set_desired on; connect_gateway ;;
+  connect-profile)
+    [[ -n "${2:-}" ]] || { echo "Profile SHA-256 is required." >&2; exit 64; }
+    disconnect_gateway >/dev/null 2>&1 || true
+    set_desired on
+    connect_gateway "$2"
+    ;;
   disconnect) disconnect_gateway ;;
   refresh) set_desired on; refresh_cache; connect_gateway ;;
   ensure) ensure_gateway ;;

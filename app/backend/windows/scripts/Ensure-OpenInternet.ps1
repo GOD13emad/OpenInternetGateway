@@ -22,6 +22,19 @@ try{
    & (Join-Path $PSScriptRoot 'Probe-HeadlessConnector.ps1')
    exit 0
  }
+ $exactRequest=Join-Path $Root 'state\exact-profile.request'
+ if(Test-Path $exactRequest){
+   $req=$null
+   try{$req=Get-Content -Raw $exactRequest|ConvertFrom-Json}catch{}
+   $sha=if($req){[string]$req.sha256}else{''}
+   if([string]::IsNullOrWhiteSpace($sha)){Remove-Item $exactRequest -Force -ErrorAction SilentlyContinue;throw 'Exact profile request is invalid.'}
+   $svc=Get-Service OVPNConnectorService -ErrorAction SilentlyContinue
+   $ready=Test-Path (Join-Path $Root 'state\headless-bootstrap.ready')
+   if(-not $svc -or -not $ready){& (Join-Path $PSScriptRoot 'Bootstrap-HeadlessConnector.ps1')}
+   Remove-Item $exactRequest -Force -ErrorAction SilentlyContinue
+   & (Join-Path $PSScriptRoot 'Headless-Control.ps1') -Action Connect -ProfileSha $sha
+   exit 0
+ }
  $svc=Get-Service OVPNConnectorService -ErrorAction SilentlyContinue
  $ready=Test-Path (Join-Path $Root 'state\headless-bootstrap.ready')
  if(-not $svc -or -not $ready){

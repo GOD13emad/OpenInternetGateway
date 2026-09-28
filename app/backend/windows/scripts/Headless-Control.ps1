@@ -1,5 +1,5 @@
 [CmdletBinding()]
-param([ValidateSet('Ensure','Connect','Disconnect','Status')][string]$Action='Ensure')
+param([ValidateSet('Ensure','Connect','Disconnect','Status')][string]$Action='Ensure',[string]$ProfileSha='')
 $ErrorActionPreference='Stop'
 $Root=Split-Path -Parent $PSScriptRoot
 $connector='C:\Program Files\OpenVPN Connect\ovpnconnector.exe'
@@ -114,7 +114,7 @@ function Record-Success($c,$h){
  if($quar.ContainsKey($key)){$quar.Remove($key)}
  Write-Map $success $successFile;Write-Map $fail $failureFile;Write-Map $quar $quarantineFile
 }
-function Get-Candidates {
+function Get-Candidates([string]$OnlySha='') {
  $idx=Join-Path $Root 'runtime\udp-cache\index.json'
  if(-not(Test-Path $idx)){return @()}
  $success=Read-Map $successFile;$quar=Read-Map $quarantineFile
@@ -124,6 +124,7 @@ function Get-Candidates {
  $rows=@()
  foreach($c in @(Get-Content -Raw $idx|ConvertFrom-Json)){
    $key=Config-Key $c
+   if($OnlySha -and $key -ne $OnlySha.ToLowerInvariant()){continue}
    if($quar.ContainsKey($key)){continue}
    $validated=0;$headless=0;$lastSuccess=0L
    if($success.ContainsKey($key)){
@@ -227,7 +228,7 @@ try{
  $pre=Get-Health
  $currentEngine=''
  if(Test-Path $stateFile){try{$currentEngine=[string](Get-Content -Raw $stateFile|ConvertFrom-Json).engine}catch{}}
- if($pre.Healthy -and $currentEngine -eq 'OVPNConnectorService'){
+ if($pre.Healthy -and $currentEngine -eq 'OVPNConnectorService' -and [string]::IsNullOrWhiteSpace($ProfileSha)){
     Schedule-ManualServiceMode
    Write-Host ('HEALTHY HEADLESS '+$pre.IP+' '+$pre.Country)
    exit 0
@@ -237,16 +238,20 @@ try{
  Set-Service -Name $service -StartupType Automatic
 
  $connected=$null
- for($cycle=0;$cycle -lt 2 -and -not $connected;$cycle++){
-   foreach($c in @(Get-Candidates)){
+ $maxCycles=$(if([string]::IsNullOrWhiteSpace($ProfileSha)){2}else{1})
+ for($cycle=0;$cycle -lt $maxCycles -and -not $connected;$cycle++){
+   foreach($c in @(Get-Candidates $ProfileSha)){
      $connected=Try-Candidate $c
      if($connected){break}
    }
-   if(-not $connected -and $cycle -eq 0){
+   if(-not $connected -and $cycle -eq 0 -and [string]::IsNullOrWhiteSpace($ProfileSha)){
      try{& (Join-Path $PSScriptRoot 'Config-Factory.ps1') -Action Refresh|Out-Null}catch{}
    }
  }
- if(-not $connected){throw 'No Config Factory profile passed headless connector validation.'}
+ if(-not $connected){
+   if($ProfileSha){throw 'Selected relay failed headless connector validation.'}
+   throw 'No Config Factory profile passed headless connector validation.'
+ }
  & (Join-Path $PSScriptRoot 'Config-Factory.ps1') -Action Status|Out-Null
  [ordered]@{at=(Get-Date).ToString('o');action='connect';result='PASS';health=$connected;engine='OVPNConnectorService'}|ConvertTo-Json -Depth 6|Set-Content -Encoding UTF8 $resultFile
  Write-Host ('CONNECTED HEADLESS '+$connected.IP+' '+$connected.Country)

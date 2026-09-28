@@ -189,13 +189,13 @@ class Backend {
     return { ok: true, output: r.stdout || r.stderr };
   }
 
-  async _linux(action) {
+  async _linux(action, extraArgs = []) {
     const script = path.join(this.backendRoot, 'linux', 'oig-linux.sh');
     const env = {
       OIG_HOME: this.backendRoot,
       OIG_COMMON: path.join(this.backendRoot, 'common')
     };
-    const r = await run('/bin/bash', [script, action], {
+    const r = await run('/bin/bash', [script, action, ...extraArgs], {
       cwd: this.backendRoot,
       env,
       timeout: action === 'status' ? 12000 : 240000
@@ -284,11 +284,18 @@ class Backend {
     });
     if (profile.active) return { ok: true, profile, status: await this.status() };
     if (this.platform === 'win32') {
-      await this._windows('disconnect');
-      await this._windows('connect');
+      this._writeJson(path.join(this.backendRoot, 'state', 'exact-profile.request'), {
+        sha256: wanted, at: new Date().toISOString()
+      });
+      try {
+        await this._windows('disconnect');
+        await this._windows('connect');
+      } catch (error) {
+        try { fs.unlinkSync(path.join(this.backendRoot, 'state', 'exact-profile.request')); } catch {}
+        throw error;
+      }
     } else {
-      await this._linux('disconnect');
-      await this._linux('connect');
+      await this._linux('connect-profile', [wanted]);
     }
     const status = await this.status();
     if (!status.connected) throw new Error('Selected profile did not produce a validated tunnel.');

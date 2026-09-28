@@ -145,6 +145,22 @@ test('multi-country config factories retain country metadata and no JP-only gate
   assert.match(platform,/\$loc -ne 'IR'/);
 });
 
+test('selected relay connection is exact rather than fallback',()=>{
+  const linux=fs.readFileSync(path.join(root,'backend/linux/oig-linux.sh'),'utf8');
+  const windows=fs.readFileSync(path.join(root,'backend/windows/scripts/Headless-Control.ps1'),'utf8');
+  const ensure=fs.readFileSync(path.join(root,'backend/windows/scripts/Ensure-OpenInternet.ps1'),'utf8');
+  const backend=fs.readFileSync(path.join(root,'src/main/platform-backend.js'),'utf8');
+  assert.match(linux,/connect-profile\)/);
+  assert.match(linux,/connect_gateway "\$2"/);
+  assert.match(linux,/profile_lines "\$exact_sha"/);
+  assert.match(windows,/\$ProfileSha/);
+  assert.match(windows,/Get-Candidates \$ProfileSha/);
+  assert.match(ensure,/exact-profile\.request/);
+  assert.match(ensure,/-ProfileSha \$sha/);
+  assert.match(backend,/exact-profile\.request/);
+  assert.match(backend,/_linux\('connect-profile', \[wanted\]\)/);
+});
+
 test('connection inventory exposes honest source-vs-live metrics and selectable profiles',()=>{
   const html=fs.readFileSync(path.join(root,'src/renderer/index.html'),'utf8');
   const renderer=fs.readFileSync(path.join(root,'src/renderer/app.js'),'utf8');
