@@ -236,6 +236,7 @@ class Backend {
 
   async profiles() {
     const items = this._readJson(this._profileIndexPath(), []);
+    const liveStatus = await this.status();
     const factory = this._factoryRoot();
     const successes = this._readJson(path.join(factory, 'successes.json'), {}) || {};
     const quarantine = this._readJson(path.join(factory, 'quarantine.json'), {}) || {};
@@ -261,7 +262,7 @@ class Backend {
         sessions: Number(item.Sessions || 0),
         sha256: sha,
         source: String(item.Source || ''),
-        active: !!sha && sha === activeSha,
+        active: !!liveStatus.connected && !!sha && sha === activeSha,
         preferred: !!sha && sha === preferredSha,
         validated: !!successes[sha],
         quarantined: !!quarantine[sha],

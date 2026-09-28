@@ -215,6 +215,12 @@ test('Linux packaged payload stays readable to desktop user',()=>{
   assert.match(afterInstall,/find "\$APPDIR" -type f -exec chmod a\+r/);
 });
 
+test('connection inventory active state requires live tunnel',()=>{
+  const backend=fs.readFileSync(path.join(root,'src/main/platform-backend.js'),'utf8');
+  assert.match(backend,/const liveStatus = await this\.status\(\)/);
+  assert.match(backend,/active: !!liveStatus\.connected && !!sha && sha === activeSha/);
+});
+
 test('Linux Debian package path is sandbox-safe',()=>{
   const afterPack=fs.readFileSync(path.join(root,'tools/afterPack.js'),'utf8');
   const afterInstall=fs.readFileSync(path.join(root,'build/linux-after-install.sh'),'utf8');
