@@ -273,6 +273,20 @@ test('selected relay connection is exact rather than fallback',()=>{
   assert.match(backend,/_linux\('connect-profile', \[sha\]\)/);
 });
 
+test('all-relay probe covers the full pool and UI explains missing live replies',()=>{
+  const backend=fs.readFileSync(path.join(root,'src/main/platform-backend.js'),'utf8');
+  const renderer=fs.readFileSync(path.join(root,'src/renderer/app.js'),'utf8');
+  const css=fs.readFileSync(path.join(root,'src/renderer/styles.css'),'utf8');
+  const block=backend.slice(backend.indexOf('async benchmarkAllFast()'),backend.indexOf('async _httpsLatencyMs'));
+  assert.match(block,/\.filter\(p => p\.sha256 && p\.ip\)/);
+  assert.doesNotMatch(block,/!quarantine\[p\.sha256\]/);
+  assert.match(block,/noReply: results\.filter/);
+  assert.match(renderer,/wasFastTested \? 'No reply' : 'Not tested'/);
+  assert.match(renderer,/result\?\.noReply/);
+  assert.match(css,/font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif/);
+  assert.match(css,/ui-monospace,"Cascadia Mono"/);
+});
+
 test('connection inventory exposes honest source-vs-live metrics and selectable profiles',()=>{
   const html=fs.readFileSync(path.join(root,'src/renderer/index.html'),'utf8');
   const renderer=fs.readFileSync(path.join(root,'src/renderer/app.js'),'utf8');

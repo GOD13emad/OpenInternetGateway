@@ -604,13 +604,14 @@ class Backend {
     const started = Date.now();
     const directPath = await this._directInternetPath();
     const items = this._readJson(this._profileIndexPath(), []);
-    const quarantine = this._readJson(path.join(this._factoryRoot(), 'quarantine.json'), {}) || {};
+    // Read-only direct-path probe: cover the entire current pool, including
+    // quarantined rows, without connecting, promoting, or unquarantining them.
     const targets = (Array.isArray(items) ? items : []).map(item => ({
       sha256: String(item.SHA256 || '').toLowerCase(),
       ip: String(item.IP || ''),
       port: Number(item.Port || 0),
       protocol: String(item.Protocol || '').toLowerCase()
-    })).filter(p => p.sha256 && p.ip && !quarantine[p.sha256]);
+    })).filter(p => p.sha256 && p.ip);
     const file = path.join(this.backendRoot, 'state', 'connection-benchmarks.json');
     const all = this._readJson(file, {}) || {};
     const results = new Array(targets.length);
@@ -632,6 +633,7 @@ class Backend {
       ok: true,
       tested: results.length,
       reachable: results.filter(x => x?.fastReachable).length,
+      noReply: results.filter(x => x && x.fastAt && !x.fastReachable).length,
       elapsedMs: Date.now() - started,
       directPath: { interface: directPath.interface, localIP: directPath.localIP, gateway: directPath.gateway, proxyBypassed: true },
       results

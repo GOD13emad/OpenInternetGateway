@@ -1,5 +1,15 @@
 # Changelog
 
+## 2.5.4
+
+- Made **Test all relays** literally cover the entire current relay pool, including quarantined rows, as a read-only direct-path probe; quarantine still blocks Connect/Speed and is not cleared by the test.
+- Clarified live latency truth in the Connections table: a completed direct probe with no ICMP/TCP response now shows **No reply**, while **Not tested** is reserved for rows that have not been probed. Source Ping remains separate and is never substituted as a fake live measurement.
+- Added explicit tested / replied / no-reply result counts for the fast all-relay probe.
+- Standardized the dashboard on the platform-native `system-ui` font stack and `ui-monospace` code stack rather than assuming Inter/Cascadia Code are installed.
+- Increased Connections table typography to a more conventional desktop UI size while preserving the compact layout.
+- Live Windows validation: the revised fast probe covered all 28 current relays in 4.549 seconds; 4 returned a direct live probe and 24 explicitly returned no reply, with no ambiguous untested rows.
+- The same renderer and backend probe semantics are shared with Linux and are validated again in the v2.5.4 Linux release artifact.
+
 ## 2.5.3
 
 - Fixed Windows per-relay **Connect** and **Speed** foreground operations racing the elevated Auto-Recovery task.

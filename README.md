@@ -4,13 +4,13 @@ Open Internet Gateway (OIG) is a cross-platform desktop application for maintain
 
 The Windows and Linux backends are different, but both sit behind the same Electron dashboard, lifecycle model, health gates, multi-country relay inventory, Self-Healing Config Factory, and verified GitHub update workflow.
 
-## Current release: 2.5.3
+## Current release: 2.5.4
 
 ### Connections
 
 The Connections page exposes the current relay inventory with country, endpoint, protocol, source metadata, locally measured latency, real tunnel throughput results, and relay status. Connections active state follows the authoritative live tunnel on every status refresh, including Auto-Recovery changes; if the active tunnel profile is absent from the latest pool, OIG still shows it as an ACTIVE managed relay.
 
-- **Test all relays** performs bounded parallel reachability/latency probes from the physical Internet adapter, bypassing the active OIG VPN route and HTTP/SOCKS proxy settings without switching or disconnecting the tunnel.
+- **Test all relays** performs bounded parallel reachability/latency probes for every row in the current pool from the physical Internet adapter, bypassing the active OIG VPN route and HTTP/SOCKS proxy settings without switching or disconnecting the tunnel. **No reply** means the direct ICMP/TCP probe completed but the relay did not answer it; **Not tested** is reserved for rows that have not yet been probed.
 - **Test direct Internet** measures the user's own ISP baseline: ping, real download, real upload, direct public IP and country. Windows binds the physical adapter IPv4 address; Linux binds the physical interface.
 - **Speed** on a relay performs a real throughput measurement through that selected VPN tunnel; app-level proxy settings are disabled so the measurement is the VPN path itself.
 - Columns are sortable by country, relay, protocol, source ping, live ping, measured download, measured upload, and status.
@@ -157,7 +157,7 @@ See [SECURITY.md](SECURITY.md).
 
 Every published release includes `SHA256SUMS.txt`. The in-app updater verifies the selected release asset before opening it.
 
-No Authenticode signing certificate is configured in the repository build configuration as of v2.5.3, so Windows users should verify the published checksum when installing manually.
+No Authenticode signing certificate is configured in the repository build configuration as of v2.5.4, so Windows users should verify the published checksum when installing manually.
 
 ## Scope
 

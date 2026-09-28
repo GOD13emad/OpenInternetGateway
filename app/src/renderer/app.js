@@ -260,11 +260,18 @@ function renderConnections() {
 
     const livePing = document.createElement('td'); livePing.className = 'metric-real';
     const fastPing = p.benchmark?.fastPingMs;
+    const wasFastTested = !!p.benchmark?.fastAt;
     livePing.textContent = fastPing != null
       ? (fastPing + ' ms ' + String(p.benchmark?.fastMethod || 'live').toUpperCase())
       : (p.benchmark?.icmpPingMs != null
           ? (p.benchmark.icmpPingMs + ' ms ICMP')
-          : (p.benchmark?.httpsLatencyMs != null ? (p.benchmark.httpsLatencyMs + ' ms HTTPS') : '—'));
+          : (p.benchmark?.httpsLatencyMs != null
+              ? (p.benchmark.httpsLatencyMs + ' ms HTTPS')
+              : (wasFastTested ? 'No reply' : 'Not tested')));
+    livePing.classList.toggle('metric-unavailable', fastPing == null && p.benchmark?.icmpPingMs == null && p.benchmark?.httpsLatencyMs == null);
+    livePing.title = wasFastTested && fastPing == null
+      ? 'Direct probe completed, but this relay did not answer the ICMP/TCP reachability probe. Source ping is shown separately.'
+      : (!wasFastTested ? 'Run Test all relays for a direct reachability probe, or Speed for a real tunnel measurement.' : '');
 
     const down = document.createElement('td'); down.className = 'metric-real';
     down.textContent = p.benchmark?.downloadMbps == null ? 'Not tested' : (p.benchmark.downloadMbps + ' Mbps');
@@ -361,7 +368,7 @@ async function benchmarkCurrent() {
     renderConnections();
     const seconds = Math.max(0.1, Number(result?.elapsedMs || 0) / 1000).toFixed(1);
     const via = result?.directPath?.interface ? (' via ' + result.directPath.interface) : '';
-    showToast('Tested ' + String(result?.tested || 0) + ' relays in ' + seconds + 's · ' + String(result?.reachable || 0) + ' replied' + via + ' · direct Internet / proxy bypass.');
+    showToast('Tested ' + String(result?.tested || 0) + ' relays in ' + seconds + 's • ' + String(result?.reachable || 0) + ' replied • ' + String(result?.noReply || 0) + ' no reply' + via + ' • direct Internet / proxy bypass.');
   } catch (e) {
     showToast(e.message || 'Fast relay test failed.', true);
   } finally {
