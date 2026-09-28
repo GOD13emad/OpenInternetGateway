@@ -2,7 +2,6 @@ const { spawn } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const net = require('net');
 const https = require('https');
 const crypto = require('crypto');
 
@@ -273,7 +272,8 @@ class Backend {
       };
     }).sort((a,b) => a.rank - b.rank);
     const countries = [...new Set(profiles.map(p => p.country).filter(Boolean))];
-    return { profiles, countries, activeSha, preferredSha };
+    const directBenchmark = this._readJson(path.join(this.backendRoot, 'state', 'direct-internet-benchmark.json'), null);
+    return { profiles, countries, activeSha, preferredSha, directBenchmark };
   }
 
   async connectProfile(sha256) {
@@ -309,21 +309,98 @@ class Backend {
     return { ok: true, profile, status };
   }
 
-  async _icmpPing(ip, fast = false) {
+  async _directInternetPath() {
+    if (this.platform === 'win32') {
+      const script = [
+        "$routes=@(Get-NetRoute -AddressFamily IPv4 -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue|Where-Object{$_.InterfaceAlias -notmatch 'OpenVPN|TAP|Wintun|OIG|WireGuard|Cloudflare|vEthernet|Loopback'}|Sort-Object RouteMetric,InterfaceMetric)",
+        "$r=$routes|Where-Object{(Get-NetAdapter -InterfaceIndex $_.InterfaceIndex -ErrorAction SilentlyContinue).HardwareInterface}|Select-Object -First 1",
+        "if(-not $r){$r=$routes|Select-Object -First 1}",
+        "if(-not $r){throw 'No physical IPv4 Internet route was found.'}",
+        "$a=Get-NetAdapter -InterfaceIndex $r.InterfaceIndex -ErrorAction SilentlyContinue",
+        "$ip=Get-NetIPAddress -AddressFamily IPv4 -InterfaceIndex $r.InterfaceIndex -ErrorAction SilentlyContinue|Where-Object{$_.IPAddress -notlike '169.254*'}|Select-Object -First 1",
+        "if(-not $ip){throw 'Physical Internet adapter has no IPv4 address.'}",
+        "[ordered]@{interface=[string]$a.Name;index=[int]$r.InterfaceIndex;ip=[string]$ip.IPAddress;gateway=[string]$r.NextHop}|ConvertTo-Json -Compress"
+      ].join(';');
+      const r = await run('pwsh.exe', ['-NoProfile','-Command',script], { timeout: 5000 });
+      const info = JSON.parse(r.stdout || '{}');
+      return {
+        interface: String(info.interface || ''),
+        index: Number(info.index || 0),
+        localIP: String(info.ip || ''),
+        gateway: String(info.gateway || ''),
+        curlInterface: 'host!' + String(info.ip || ''),
+        bindMode: 'physical-ip'
+      };
+    }
+
+    if (this.platform === 'linux') {
+      const route = await run('/bin/bash', ['-lc', "ip -4 route show default | head -n1"], { timeout: 5000 });
+      const line = String(route.stdout || '').trim();
+      const iface = (line.match(/\bdev\s+(\S+)/) || [])[1] || '';
+      const gateway = (line.match(/\bvia\s+(\S+)/) || [])[1] || '';
+      if (!iface) throw new Error('No physical IPv4 default interface was found.');
+      const addr = await run('/bin/bash', ['-lc', "ip -4 -o addr show dev " + JSON.stringify(iface) + " | awk '{print $4}' | cut -d/ -f1 | head -n1"], { timeout: 5000 });
+      const localIP = String(addr.stdout || '').trim();
+      if (!localIP) throw new Error('Physical Internet interface has no IPv4 address.');
+      return {
+        interface: iface,
+        index: 0,
+        localIP,
+        gateway,
+        curlInterface: 'if!' + iface,
+        bindMode: 'physical-interface'
+      };
+    }
+
+    throw new Error('Direct Internet test is supported only on Windows and Linux.');
+  }
+
+  _directCurlArgs(pathInfo) {
+    return ['-4','--noproxy','*','--interface',pathInfo.curlInterface];
+  }
+
+  async _directTrace(pathInfo) {
+    const marker = '__OIG_DIRECT_META__';
+    const r = await run('curl', [
+      ...this._directCurlArgs(pathInfo),'-L','--fail','--connect-timeout','5','--max-time','8',
+      '-sS','-w','\\n' + marker + '%{http_code}|%{time_starttransfer}',
+      'https://www.cloudflare.com/cdn-cgi/trace'
+    ], { timeout: 11000, allowFailure: true });
+    const raw = String(r.stdout || '');
+    const pos = raw.lastIndexOf(marker);
+    if (pos < 0) throw new Error('Direct physical-interface egress validation did not return metadata.');
+    const body = raw.slice(0, pos);
+    const meta = raw.slice(pos + marker.length).trim().split('|');
+    if (meta[0] !== '200') throw new Error('Direct physical-interface egress validation failed.');
+    const ip = (body.match(/^ip=(.+)$/m) || [])[1]?.trim() || '';
+    const country = (body.match(/^loc=(.+)$/m) || [])[1]?.trim() || '';
+    const colo = (body.match(/^colo=(.+)$/m) || [])[1]?.trim() || '';
+    const seconds = Number(meta[1]);
+    return {
+      publicIP: ip,
+      country,
+      colo,
+      httpsLatencyMs: Number.isFinite(seconds) ? Math.round(seconds * 1000 * 10) / 10 : null
+    };
+  }
+
+  async _icmpPing(ip, fast = false, pathInfo = null) {
     if (!ip) return null;
     try {
       if (this.platform === 'win32') {
-        const r = await run('ping.exe', fast ? ['-n','1','-w','900',ip] : ['-n','2','-w','1500',ip], {
-          timeout: fast ? 2200 : 5000, allowFailure: true
-        });
+        const args = fast ? ['-n','1','-w','650'] : ['-n','2','-w','1500'];
+        if (pathInfo?.localIP) args.push('-S',pathInfo.localIP);
+        args.push(ip);
+        const r = await run('ping.exe', args, { timeout: fast ? 1400 : 5000, allowFailure: true });
         const one = r.stdout.match(/time[=<]\s*(\d+)ms/i);
         if (one) return Number(one[1]);
         const avg = r.stdout.match(/Average\s*=\s*(\d+)ms/i);
         return avg ? Number(avg[1]) : null;
       }
-      const r = await run('ping', fast ? ['-n','-c','1','-W','1',ip] : ['-n','-c','2','-W','2',ip], {
-        timeout: fast ? 2500 : 6000, allowFailure: true
-      });
+      const args = ['-n'];
+      if (pathInfo?.interface) args.push('-I',pathInfo.interface);
+      args.push(...(fast ? ['-c','1','-W','1',ip] : ['-c','2','-W','2',ip]));
+      const r = await run('ping', args, { timeout: fast ? 2500 : 6000, allowFailure: true });
       const one = r.stdout.match(/time[=<]([\d.]+)\s*ms/i);
       if (one) return Math.round(Number(one[1]) * 10) / 10;
       const avg = r.stdout.match(/=\s*[\d.]+\/([\d.]+)\/[\d.]+\/[\d.]+\s*ms/);
@@ -333,29 +410,28 @@ class Backend {
     }
   }
 
-  _tcpConnectMs(ip, port, timeoutMs = 1100) {
-    if (!ip || !port) return Promise.resolve(null);
-    return new Promise(resolve => {
-      const started = Date.now();
-      const socket = net.createConnection({ host: ip, port: Number(port) });
-      let done = false;
-      const finish = value => {
-        if (done) return;
-        done = true;
-        try { socket.destroy(); } catch {}
-        resolve(value);
-      };
-      socket.setTimeout(timeoutMs, () => finish(null));
-      socket.once('connect', () => finish(Date.now() - started));
-      socket.once('error', () => finish(null));
-    });
+  async _directTcpConnectMs(ip, port, pathInfo, timeoutSeconds = 0.8) {
+    if (!ip || !port || !pathInfo) return null;
+    const sink = this.platform === 'win32' ? 'NUL' : '/dev/null';
+    try {
+      const r = await run('curl', [
+        ...this._directCurlArgs(pathInfo),
+        '--connect-timeout',String(timeoutSeconds),'--max-time',String(timeoutSeconds),
+        '-sS','-o',sink,'-w','%{time_connect}',
+        'telnet://' + ip + ':' + String(port)
+      ], { timeout: Math.ceil((timeoutSeconds + 1) * 1000), allowFailure: true });
+      const seconds = Number(String(r.stdout || '').trim());
+      return Number.isFinite(seconds) && seconds > 0 ? Math.round(seconds * 1000 * 10) / 10 : null;
+    } catch {
+      return null;
+    }
   }
 
-  async _quickProbeProfile(profile) {
+  async _quickProbeProfile(profile, pathInfo) {
     const started = Date.now();
-    const pingPromise = this._icmpPing(profile.ip, true);
+    const pingPromise = this._icmpPing(profile.ip, true, pathInfo);
     const tcpPromise = profile.protocol === 'tcp'
-      ? this._tcpConnectMs(profile.ip, profile.port)
+      ? this._directTcpConnectMs(profile.ip, profile.port, pathInfo)
       : Promise.resolve(null);
     const [icmpPingMs, tcpConnectMs] = await Promise.all([pingPromise, tcpPromise]);
     const candidates = [icmpPingMs, tcpConnectMs].filter(v => Number.isFinite(v));
@@ -365,15 +441,98 @@ class Backend {
       fastPingMs,
       tcpConnectMs,
       fastReachable: fastPingMs != null,
-      fastMethod: tcpConnectMs != null && (icmpPingMs == null || tcpConnectMs <= icmpPingMs) ? 'tcp' : (icmpPingMs != null ? 'icmp' : 'none'),
-      fastElapsedMs: Date.now() - started
+      fastMethod: tcpConnectMs != null && (icmpPingMs == null || tcpConnectMs <= icmpPingMs) ? 'tcp-direct' : (icmpPingMs != null ? 'icmp-direct' : 'none'),
+      fastElapsedMs: Date.now() - started,
+      directInterface: pathInfo.interface,
+      directLocalIP: pathInfo.localIP
     };
+  }
+
+  async benchmarkDirectInternet() {
+    const started = Date.now();
+    const pathInfo = await this._directInternetPath();
+    const sink = this.platform === 'win32' ? 'NUL' : '/dev/null';
+    const [trace, pingMs] = await Promise.all([
+      this._directTrace(pathInfo),
+      this._icmpPing('1.1.1.1', false, pathInfo)
+    ]);
+
+    const downBytes = 5_000_000;
+    const down = await run('curl', [
+      ...this._directCurlArgs(pathInfo),'-L','--fail','--connect-timeout','6','--max-time','20',
+      '-sS','-o',sink,'-w','%{http_code}|%{time_total}|%{speed_download}',
+      'https://speed.cloudflare.com/__down?bytes=' + String(downBytes)
+    ], { timeout: 24000, allowFailure: true });
+    const [downCode, downTime, downSpeed] = String(down.stdout || '').trim().split('|');
+    if (downCode !== '200' || !(Number(downSpeed) > 0)) throw new Error('Direct ISP download test did not complete successfully.');
+
+    const upBytes = 1_000_000;
+    const tempUpload = path.join(this.backendRoot, 'state', 'direct-benchmark-upload.bin');
+    fs.mkdirSync(path.dirname(tempUpload), { recursive: true });
+    fs.writeFileSync(tempUpload, Buffer.alloc(upBytes));
+    let up;
+    try {
+      up = await run('curl', [
+        ...this._directCurlArgs(pathInfo),'-L','--fail','--connect-timeout','6','--max-time','20',
+        '-sS','-o',sink,'-w','%{http_code}|%{time_total}|%{speed_upload}',
+        '-X','POST','--data-binary','@' + tempUpload,'https://speed.cloudflare.com/__up'
+      ], { timeout: 24000, allowFailure: true });
+    } finally {
+      try { fs.unlinkSync(tempUpload); } catch {}
+    }
+    const [upCode, upTime, upSpeed] = String(up.stdout || '').trim().split('|');
+    if (upCode !== '200' || !(Number(upSpeed) > 0)) throw new Error('Direct ISP upload test did not complete successfully.');
+
+    let normalEgress = { ip: '', country: '' };
+    try {
+      const n = await run('curl', ['-4','--noproxy','*','--max-time','6','-sS','https://www.cloudflare.com/cdn-cgi/trace'], { timeout: 8000, allowFailure: true });
+      const body = String(n.stdout || '');
+      normalEgress = {
+        ip: (body.match(/^ip=(.+)$/m) || [])[1]?.trim() || '',
+        country: (body.match(/^loc=(.+)$/m) || [])[1]?.trim() || ''
+      };
+    } catch {}
+
+    const result = {
+      at: new Date().toISOString(),
+      mode: 'direct-physical-internet',
+      interface: pathInfo.interface,
+      localIP: pathInfo.localIP,
+      gateway: pathInfo.gateway,
+      bindMode: pathInfo.bindMode,
+      proxyBypassed: true,
+      publicIP: trace.publicIP,
+      country: trace.country,
+      colo: trace.colo,
+      pingMs,
+      httpsLatencyMs: trace.httpsLatencyMs,
+      downloadMbps: Math.round(Number(downSpeed) * 8 / 1_000_000 * 100) / 100,
+      uploadMbps: Math.round(Number(upSpeed) * 8 / 1_000_000 * 100) / 100,
+      downloadBytes: downBytes,
+      uploadBytes: upBytes,
+      downloadSeconds: Number(downTime) || null,
+      uploadSeconds: Number(upTime) || null,
+      endpoint: 'speed.cloudflare.com',
+      normalEgressIP: normalEgress.ip,
+      normalEgressCountry: normalEgress.country,
+      bypassObserved: !!trace.publicIP && !!normalEgress.ip && trace.publicIP !== normalEgress.ip,
+      elapsedMs: Date.now() - started
+    };
+    this._writeJson(path.join(this.backendRoot, 'state', 'direct-internet-benchmark.json'), result);
+    return { ok: true, benchmark: result };
   }
 
   async benchmarkAllFast() {
     const started = Date.now();
-    const inventory = await this.profiles();
-    const targets = inventory.profiles.filter(p => !p.quarantined && p.ip);
+    const directPath = await this._directInternetPath();
+    const items = this._readJson(this._profileIndexPath(), []);
+    const quarantine = this._readJson(path.join(this._factoryRoot(), 'quarantine.json'), {}) || {};
+    const targets = (Array.isArray(items) ? items : []).map(item => ({
+      sha256: String(item.SHA256 || '').toLowerCase(),
+      ip: String(item.IP || ''),
+      port: Number(item.Port || 0),
+      protocol: String(item.Protocol || '').toLowerCase()
+    })).filter(p => p.sha256 && p.ip && !quarantine[p.sha256]);
     const file = path.join(this.backendRoot, 'state', 'connection-benchmarks.json');
     const all = this._readJson(file, {}) || {};
     const results = new Array(targets.length);
@@ -383,12 +542,12 @@ class Backend {
         const index = cursor++;
         if (index >= targets.length) return;
         const profile = targets[index];
-        const quick = await this._quickProbeProfile(profile);
+        const quick = await this._quickProbeProfile(profile, directPath);
         all[profile.sha256] = { ...(all[profile.sha256] || {}), ...quick };
         results[index] = { sha256: profile.sha256, ...quick };
       }
     };
-    const concurrency = Math.min(12, Math.max(1, targets.length));
+    const concurrency = Math.min(16, Math.max(1, targets.length));
     await Promise.all(Array.from({ length: concurrency }, () => worker()));
     this._writeJson(file, all);
     return {
@@ -396,6 +555,7 @@ class Backend {
       tested: results.length,
       reachable: results.filter(x => x?.fastReachable).length,
       elapsedMs: Date.now() - started,
+      directPath: { interface: directPath.interface, localIP: directPath.localIP, gateway: directPath.gateway, proxyBypassed: true },
       results
     };
   }
@@ -404,7 +564,7 @@ class Backend {
     const samples = [];
     for (let i = 0; i < 2; i++) {
       const r = await run('curl', [
-        '-4','-L','--max-time','5','-sS','-o',sink,'-w','%{http_code}|%{time_starttransfer}',
+        '-4','--noproxy','*','-L','--max-time','5','-sS','-o',sink,'-w','%{http_code}|%{time_starttransfer}',
         'https://www.cloudflare.com/cdn-cgi/trace'
       ], { timeout: 7000, allowFailure: true });
       const [code, seconds] = String(r.stdout || '').trim().split('|');
@@ -431,7 +591,7 @@ class Backend {
 
     const downBytes = 2_000_000;
     const down = await run('curl', [
-      '-4','-L','--max-time','12','-sS','-o',sink,'-w','%{http_code}|%{time_total}|%{speed_download}',
+      '-4','--noproxy','*','-L','--max-time','12','-sS','-o',sink,'-w','%{http_code}|%{time_total}|%{speed_download}',
       'https://speed.cloudflare.com/__down?bytes=' + String(downBytes)
     ], { timeout: 15000, allowFailure: true });
     const [downCode, downTime, downSpeed] = String(down.stdout || '').trim().split('|');
@@ -444,7 +604,7 @@ class Backend {
     let up;
     try {
       up = await run('curl', [
-        '-4','-L','--max-time','12','-sS','-o',sink,'-w','%{http_code}|%{time_total}|%{speed_upload}',
+        '-4','--noproxy','*','-L','--max-time','12','-sS','-o',sink,'-w','%{http_code}|%{time_total}|%{speed_upload}',
         '-X','POST','--data-binary','@' + tempUpload,'https://speed.cloudflare.com/__up'
       ], { timeout: 15000, allowFailure: true });
     } finally {
@@ -694,9 +854,10 @@ class Backend {
       let result;
       if (action === 'connect-profile') result = await this.connectProfile(options.sha256);
       else if (action === 'benchmark-active') result = await this.benchmarkActive();
+      else if (action === 'benchmark-direct-internet') result = await this.benchmarkDirectInternet();
       else if (action === 'benchmark-all-fast') result = await this.benchmarkAllFast();
       else result = await (this.platform === 'win32' ? this._windows(action) : this._linux(action));
-      if (action === 'benchmark-all-fast') {
+      if (action === 'benchmark-all-fast' || action === 'benchmark-direct-internet') {
         this.emit({ type: 'busy', action, busy: false });
         return result;
       }

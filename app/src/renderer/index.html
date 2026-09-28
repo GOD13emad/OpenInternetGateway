@@ -143,9 +143,28 @@
             <div class="connection-controls">
               <select id="countryFilter" class="select-control" aria-label="Country filter"><option value="">All countries</option></select>
               <button class="btn secondary compact" id="reloadConnections">Reload</button>
-              <button class="btn compact" id="benchmarkCurrent">Test all</button>
+              <button class="btn compact" id="benchmarkCurrent">Test all relays</button>
             </div>
           </div>
+          <div class="direct-internet-card">
+            <div class="direct-internet-head">
+              <div>
+                <span class="eyebrow">DIRECT INTERNET / ISP BASELINE</span>
+                <h4>Your physical Internet</h4>
+                <p id="directPath">Not tested yet · VPN/proxy bypass is enforced by binding the physical adapter.</p>
+              </div>
+              <button class="btn compact" id="benchmarkDirect">Test direct Internet</button>
+            </div>
+            <div class="direct-internet-metrics">
+              <span><small>Ping</small><b id="directPing">—</b></span>
+              <span><small>Download</small><b id="directDownload">—</b></span>
+              <span><small>Upload</small><b id="directUpload">—</b></span>
+              <span><small>Direct public IP</small><b id="directIP">—</b></span>
+              <span><small>Direct country</small><b id="directCountry">—</b></span>
+            </div>
+            <p class="direct-verification" id="directVerification">No direct-path measurement recorded yet.</p>
+          </div>
+          <div class="speed-section-label">ACTIVE VPN / SELECTED RELAY</div>
           <div class="benchmark-summary" id="benchmarkSummary">
             <span><small>Live ping</small><b>—</b></span>
             <span><small>HTTPS latency</small><b>—</b></span>
@@ -158,7 +177,7 @@
               <tbody id="connectionRows"><tr><td colspan="9" class="empty">Loading connection inventory…</td></tr></tbody>
             </table>
           </div>
-          <p class="measurement-note">“Test all” probes every relay in parallel without switching the tunnel. “Source ping” is VPN Gate metadata; “Live ping” is measured by this computer. Use Speed on a row for real tunnel download/upload. Some relays block ICMP.</p>
+          <p class="measurement-note">“Test all relays” measures relay reachability from your physical Internet adapter and bypasses HTTP/SOCKS proxy settings; it does not switch the VPN. “Test direct Internet” measures your own ISP ping/download/upload on that same direct physical path. “Speed” on a relay measures real throughput through the selected VPN tunnel, with app-level proxy variables disabled. Some relays block ICMP.</p>
         </article>
       </section>
 

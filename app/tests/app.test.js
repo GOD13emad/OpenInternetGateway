@@ -238,7 +238,7 @@ test('fast Test all probes relays in parallel and table sorting is explicit',()=
   const renderer=fs.readFileSync(path.join(root,'src/renderer/app.js'),'utf8');
   const html=fs.readFileSync(path.join(root,'src/renderer/index.html'),'utf8');
   assert.match(backend,/async benchmarkAllFast\(\)/);
-  assert.match(backend,/Math\.min\(12/);
+  assert.match(backend,/Math\.min\(16/);
   assert.match(backend,/benchmark-all-fast/);
   assert.match(backend,/fastPingMs/);
   assert.match(backend,/action === 'benchmark-all-fast'[\s\S]*type: 'busy'[\s\S]*return result/);
@@ -248,8 +248,33 @@ test('fast Test all probes relays in parallel and table sorting is explicit',()=
   assert.match(renderer,/new Map\(\(result\?\.results \|\| \[\]\)/);
   assert.doesNotMatch(renderer.slice(renderer.indexOf('async function benchmarkCurrent'),renderer.indexOf('async function loadDiagnostics')),/loadConnections\(\)/);
   assert.match(renderer,/test\.textContent = 'Speed'/);
-  assert.match(html,/>Test all</);
+  assert.match(html,/>Test all relays</);
   for(const key of ['country','relay','protocol','sourcePing','livePing','download','upload','status']) assert.match(html,new RegExp('data-sort="'+key+'"'));
+});
+
+test('direct ISP benchmark binds physical Internet and bypasses proxies',()=>{
+  const backend=fs.readFileSync(path.join(root,'src/main/platform-backend.js'),'utf8');
+  const renderer=fs.readFileSync(path.join(root,'src/renderer/app.js'),'utf8');
+  const html=fs.readFileSync(path.join(root,'src/renderer/index.html'),'utf8');
+  assert.match(backend,/async _directInternetPath\(\)/);
+  assert.match(backend,/--noproxy','\*','--interface/);
+  assert.match(backend,/host!' \+ String\(info\.ip/);
+  assert.match(backend,/curlInterface: 'if!' \+ iface/);
+  assert.match(backend,/async benchmarkDirectInternet\(\)/);
+  assert.match(backend,/mode: 'direct-physical-internet'/);
+  assert.match(backend,/downloadMbps/);
+  assert.match(backend,/uploadMbps/);
+  assert.match(backend,/bypassObserved/);
+  assert.match(backend,/icmp-direct/);
+  assert.match(backend,/tcp-direct/);
+  assert.match(backend,/benchmark-direct-internet/);
+  assert.match(renderer,/benchmarkDirectInternet/);
+  assert.match(renderer,/renderDirectInternet/);
+  assert.match(html,/id="benchmarkDirect"/);
+  assert.match(html,/DIRECT INTERNET \/ ISP BASELINE/);
+  assert.match(html,/id="directDownload"/);
+  assert.match(html,/id="directUpload"/);
+  assert.match(html,/Test all relays/);
 });
 
 test('GitHub updater checks latest release and verifies published SHA-256',()=>{

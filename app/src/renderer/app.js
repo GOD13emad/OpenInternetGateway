@@ -1,5 +1,5 @@
 const $ = (id) => document.getElementById(id);
-const state = { status: null, busy: false, platform: null, page: 'overview', profiles: [], countries: [], countryFilter: '', sortKey: 'rank', sortDir: 'asc', updateInfo: null };
+const state = { status: null, busy: false, platform: null, page: 'overview', profiles: [], countries: [], countryFilter: '', sortKey: 'rank', sortDir: 'asc', updateInfo: null, directBenchmark: null };
 
 function setText(id, value) { const el = $(id); if (el) el.textContent = value ?? '—'; }
 function safeArray(v) { return Array.isArray(v) ? v : v ? [v] : []; }
@@ -16,7 +16,7 @@ function setBusy(on, action = '') {
   state.busy = on;
   $('busyOverlay').classList.toggle('show', on);
   if (on) {
-    const names = { connect:'Connecting', disconnect:'Disconnecting', refresh:'Refreshing config pool', ensure:'Repairing connection', 'connect-profile':'Switching relay', 'benchmark-active':'Measuring real tunnel speed', 'benchmark-all-fast':'Testing all relays in parallel', 'update-check':'Checking GitHub release', 'update-download':'Downloading verified update', 'factory-refresh':'Refreshing config pool', 'auto-install':'Installing recovery', 'auto-remove':'Removing recovery', 'console-enable':'Enabling console gateway', 'console-disable':'Disabling console gateway', 'console-status':'Checking console gateway' };
+    const names = { connect:'Connecting', disconnect:'Disconnecting', refresh:'Refreshing config pool', ensure:'Repairing connection', 'connect-profile':'Switching relay', 'benchmark-active':'Measuring real tunnel speed', 'benchmark-all-fast':'Testing all relays from direct Internet', 'benchmark-direct-internet':'Measuring direct ISP speed', 'update-check':'Checking GitHub release', 'update-download':'Downloading verified update', 'factory-refresh':'Refreshing config pool', 'auto-install':'Installing recovery', 'auto-remove':'Removing recovery', 'console-enable':'Enabling console gateway', 'console-disable':'Disabling console gateway', 'console-status':'Checking console gateway' };
     setText('busyTitle', names[action] || 'Working…');
   }
 }
@@ -99,6 +99,44 @@ async function runAction(action, message, options = {}) {
 
 function metric(value, suffix = '') {
   return value == null || Number.isNaN(Number(value)) ? '—' : (String(value) + suffix);
+}
+
+function renderDirectInternet() {
+  const b = state.directBenchmark;
+  setText('directPing', b?.pingMs == null ? (b?.httpsLatencyMs == null ? '—' : (b.httpsLatencyMs + ' ms HTTPS')) : (b.pingMs + ' ms'));
+  setText('directDownload', b?.downloadMbps == null ? '—' : (b.downloadMbps + ' Mbps'));
+  setText('directUpload', b?.uploadMbps == null ? '—' : (b.uploadMbps + ' Mbps'));
+  setText('directIP', b?.publicIP || '—');
+  setText('directCountry', b?.country || '—');
+  const pathText = b
+    ? ((b.interface || 'Physical adapter') + ' · ' + (b.localIP || 'local IP unavailable') + (b.gateway ? (' · gateway ' + b.gateway) : '') + ' · proxy bypass ON')
+    : 'Not tested yet · VPN/proxy bypass is enforced by binding the physical adapter.';
+  setText('directPath', pathText);
+  const proof = $('directVerification');
+  if (proof) {
+    proof.classList.toggle('verified', !!b?.bypassObserved);
+    proof.textContent = !b
+      ? 'No direct-path measurement recorded yet.'
+      : (b.bypassObserved
+          ? ('Bypass verified: normal routed egress ' + (b.normalEgressCountry || '—') + ' / ' + (b.normalEgressIP || '—') + ' differs from direct ISP ' + (b.country || '—') + ' / ' + (b.publicIP || '—') + '.')
+          : ('Physical adapter binding verified. Current normal route has ' + (b.normalEgressIP === b.publicIP ? 'the same' : 'an unavailable comparison') + ' public egress; proxy bypass remains enforced.'));
+  }
+}
+
+async function benchmarkDirectInternet() {
+  if (state.busy) return;
+  setBusy(true, 'benchmark-direct-internet');
+  try {
+    const result = await window.gateway.action('benchmark-direct-internet');
+    state.directBenchmark = result?.benchmark || null;
+    renderDirectInternet();
+    const b = state.directBenchmark;
+    showToast(b ? ('Direct ISP: ' + b.downloadMbps + ' Mbps down · ' + b.uploadMbps + ' Mbps up · ' + (b.pingMs ?? b.httpsLatencyMs ?? '—') + ' ms') : 'Direct Internet test completed.');
+  } catch (e) {
+    showToast(e.message || 'Direct Internet speed test failed.', true);
+  } finally {
+    setBusy(false);
+  }
 }
 
 function renderBenchmarkSummary() {
@@ -230,6 +268,8 @@ async function loadConnections() {
     const result = await window.gateway.profiles();
     state.profiles = result?.profiles || [];
     state.countries = result?.countries || [];
+    state.directBenchmark = result?.directBenchmark || state.directBenchmark;
+    renderDirectInternet();
     const select = $('countryFilter');
     const previous = state.countryFilter;
     select.innerHTML = '<option value="">All countries</option>';
@@ -283,7 +323,8 @@ async function benchmarkCurrent() {
     });
     renderConnections();
     const seconds = Math.max(0.1, Number(result?.elapsedMs || 0) / 1000).toFixed(1);
-    showToast('Tested ' + String(result?.tested || 0) + ' relays in ' + seconds + 's · ' + String(result?.reachable || 0) + ' replied.');
+    const via = result?.directPath?.interface ? (' via ' + result.directPath.interface) : '';
+    showToast('Tested ' + String(result?.tested || 0) + ' relays in ' + seconds + 's · ' + String(result?.reachable || 0) + ' replied' + via + ' · direct Internet / proxy bypass.');
   } catch (e) {
     showToast(e.message || 'Fast relay test failed.', true);
   } finally {
@@ -425,6 +466,7 @@ async function init() {
   $('powerButton').addEventListener('click', () => runAction(state.status?.connected ? 'disconnect' : 'connect', state.status?.connected ? 'Disconnected.' : 'Connected and validated.'));
   $('reloadConnections').addEventListener('click', loadConnections);
   $('benchmarkCurrent').addEventListener('click', benchmarkCurrent);
+  $('benchmarkDirect').addEventListener('click', benchmarkDirectInternet);
   $('countryFilter').addEventListener('change', e => { state.countryFilter = e.target.value; renderConnections(); });
   document.querySelectorAll('.connection-table th[data-sort]').forEach(th => th.addEventListener('click', () => {
     const key = th.dataset.sort;
