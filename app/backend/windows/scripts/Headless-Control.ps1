@@ -146,6 +146,24 @@ function Resolve-ProfilePath($c){
  if([IO.Path]::IsPathRooted($p)){return $p}
  return (Join-Path $Root $p)
 }
+function Stop-ServiceForConfig {
+ $svc=Get-Service $service -ErrorAction SilentlyContinue
+ if(-not $svc){return}
+ try{[void](Invoke-Connector @('stop') 12000 -IgnoreExit)}catch{}
+ $svc=Get-Service $service -ErrorAction SilentlyContinue
+ if($svc -and $svc.Status -ne [ServiceProcess.ServiceControllerStatus]::Stopped){
+   try{Stop-Service -Name $service -Force -ErrorAction Stop}catch{}
+   $svc=Get-Service $service -ErrorAction SilentlyContinue
+   if($svc){
+     try{$svc.WaitForStatus([ServiceProcess.ServiceControllerStatus]::Stopped,[TimeSpan]::FromSeconds(8))}catch{}
+   }
+ }
+ $svc=Get-Service $service -ErrorAction SilentlyContinue
+ if($svc -and $svc.Status -ne [ServiceProcess.ServiceControllerStatus]::Stopped){
+   throw 'Connector service must be stopped before configuration changes.'
+ }
+}
+
 function Ensure-ServiceInstalled {
  $svc=Get-Service $service -ErrorAction SilentlyContinue
  if(-not $svc){
@@ -154,6 +172,7 @@ function Ensure-ServiceInstalled {
    $svc=Get-Service $service -ErrorAction SilentlyContinue
    if(-not $svc){throw 'Connector service installation did not create OVPNConnectorService.'}
  }
+ Stop-ServiceForConfig
  [void](Invoke-Connector @('set-config','profile',$serviceProfile) 12000)
  [void](Invoke-Connector @('set-config','log',$serviceLog) 12000)
  [void](Invoke-Connector @('set-config','dco','false') 12000)

@@ -4,7 +4,7 @@ Open Internet Gateway (OIG) is a cross-platform desktop application for maintain
 
 The Windows and Linux backends are different, but both sit behind the same Electron dashboard, lifecycle model, health gates, multi-country relay inventory, Self-Healing Config Factory, and verified GitHub update workflow.
 
-## Current release: 2.4.1
+## Current release: 2.4.2
 
 ### Connections
 
@@ -151,7 +151,7 @@ See [SECURITY.md](SECURITY.md).
 
 Every published release includes `SHA256SUMS.txt`. The in-app updater verifies the selected release asset before opening it.
 
-No Authenticode signing certificate is configured in the repository build configuration as of v2.4.1, so Windows users should verify the published checksum when installing manually.
+No Authenticode signing certificate is configured in the repository build configuration as of v2.4.2, so Windows users should verify the published checksum when installing manually.
 
 ## Scope
 

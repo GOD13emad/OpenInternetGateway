@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.4.2
+
+- Hardened Windows Auto-Recovery against an observed connector configuration race: when OVPNConnectorService exists but is running while the tunnel is unhealthy, OIG now stops the connector service and verifies the Stopped state before any set-config operation.
+- Added a fail-closed guard if the service cannot be stopped within the bounded wait instead of attempting an unsafe configuration mutation.
+- Preserved the successful 2.4.1 fast Test all, sortable Connections, verified GitHub updater, Linux lifecycle and multi-country behavior.
+
 ## 2.4.1
 
 - Fixed GitHub release-asset downloads stalling on some networks by reusing OIG's proven cross-platform curl transport with IPv4, redirects, bounded connect/transfer timeouts and retries.

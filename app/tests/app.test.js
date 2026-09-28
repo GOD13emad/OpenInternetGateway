@@ -66,6 +66,10 @@ test('Windows backend is fully headless, self-healing, and independent from Open
   assert.match(headless,/ovpnconnector\.exe/i);
   assert.match(headless,/OVPNConnectorService/i);
   assert.match(headless,/ProgramData\\OpenInternetGateway/i);
+  assert.match(headless,/function Stop-ServiceForConfig/);
+  assert.match(headless,/Connector service must be stopped before configuration changes/);
+  const serviceConfigBlock=headless.slice(headless.indexOf('function Ensure-ServiceInstalled'),headless.indexOf('function Stop-Connector'));
+  assert.match(serviceConfigBlock,/Stop-ServiceForConfig[\s\S]*set-config','profile'/);
   assert.match(factory,/successes\.json/i);
   assert.match(factory,/quarantine\.json/i);
   assert.match(auto,/OpenInternetGateway-AutoRecovery/i);
