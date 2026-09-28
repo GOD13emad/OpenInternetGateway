@@ -103,6 +103,9 @@ class Backend {
       for (const file of ['oig-linux.sh', 'watch-parent.sh']) {
         try { fs.chmodSync(path.join(stable, 'linux', file), 0o755); } catch {}
       }
+      // v2.5.3 and older could leave this Windows-era coordination file behind
+      // on Linux even though oig-linux.sh receives the SHA as an argument.
+      try { fs.unlinkSync(path.join(stable, 'state', 'exact-profile.request')); } catch {}
 
       // Repair legacy per-user desktop overrides that shadow the packaged system
       // desktop entry. Older OIG builds created such an override without the
@@ -320,10 +323,10 @@ class Backend {
 
     const request = path.join(this.backendRoot, 'state', 'exact-profile.request');
     const requestExact = async (sha, country, host) => {
-      if (this.platform !== 'win32') {
-        try { fs.unlinkSync(request); } catch {}
-        this._writeJson(request, { sha256: sha, at: new Date().toISOString() });
-      }
+      // Both Windows and Linux receive the selected SHA explicitly. Legacy
+      // request files are removed so an old/stale exact request can never
+      // affect a later app session.
+      try { fs.unlinkSync(request); } catch {}
       this.emit({
         type: 'progress',
         action: 'connect-profile',
@@ -412,11 +415,19 @@ class Backend {
     }
 
     if (this.platform === 'linux') {
-      const route = await run('/bin/bash', ['-lc', "ip -4 route show default | head -n1"], { timeout: 5000 });
+      // A connected VPN often installs the lowest-metric default route on tun0.
+      // Direct-ISP tests must instead bind a real connected Ethernet/Wi-Fi NIC.
+      const routeScript = [
+        "iface=$(nmcli -t -f DEVICE,TYPE,STATE device status 2>/dev/null | awk -F: '$3==\"connected\" && ($2==\"ethernet\" || $2==\"wifi\"){print $1;exit}')",
+        "if [ -n \"$iface\" ]; then ip -4 route show default | grep -F \" dev $iface \" | head -n1; else ip -4 route show default | grep -Ev ' dev (tun|tap|wg|tailscale|ppp|zt|vpn)[^ ]*' | head -n1; fi"
+      ].join('; ');
+      const route = await run('/bin/bash', ['-lc', routeScript], { timeout: 5000 });
       const line = String(route.stdout || '').trim();
       const iface = (line.match(/\bdev\s+(\S+)/) || [])[1] || '';
       const gateway = (line.match(/\bvia\s+(\S+)/) || [])[1] || '';
-      if (!iface) throw new Error('No physical IPv4 default interface was found.');
+      if (!iface || /^(tun|tap|wg|tailscale|ppp|zt|vpn)/i.test(iface)) {
+        throw new Error('No physical IPv4 Internet route was found.');
+      }
       const addr = await run('/bin/bash', ['-lc', "ip -4 -o addr show dev " + JSON.stringify(iface) + " | awk '{print $4}' | cut -d/ -f1 | head -n1"], { timeout: 5000 });
       const localIP = String(addr.stdout || '').trim();
       if (!localIP) throw new Error('Physical Internet interface has no IPv4 address.');

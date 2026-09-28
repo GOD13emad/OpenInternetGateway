@@ -195,7 +195,9 @@ test('Windows exact relay switch is atomic, bounded and SHA verified',()=>{
   const renderer=fs.readFileSync(path.join(root,'src/renderer/app.js'),'utf8');
   const block=backend.slice(backend.indexOf('async connectProfile'),backend.indexOf('async _directInternetPath'));
   assert.doesNotMatch(block,/this\._windows\('disconnect'\)[\s\S]*this\._windows\('connect'\)/);
-  assert.match(block,/this\.platform !== 'win32'[\s\S]*exact-profile\.request|exact-profile\.request[\s\S]*this\.platform !== 'win32'/);
+  assert.match(block,/const request = path\.join\(this\.backendRoot, 'state', 'exact-profile\.request'\)/);
+  assert.match(block,/try \{ fs\.unlinkSync\(request\); \} catch \{\}/);
+  assert.doesNotMatch(block,/this\._writeJson\(request/);
   assert.match(block,/_windows\('connect', \['-ProfileSha', sha\]\)/);
   assert.match(block,/actualSha[\s\S]*actualSha !== wanted/);
   assert.match(block,/type: 'progress'[\s\S]*stage: 'switching'/);
@@ -271,6 +273,33 @@ test('selected relay connection is exact rather than fallback',()=>{
   assert.match(ensure,/-ProfileSha \$sha/);
   assert.match(backend,/exact-profile\.request/);
   assert.match(backend,/_linux\('connect-profile', \[sha\]\)/);
+});
+
+test('Windows non-admin Ensure delegates to the elevated recovery task and startup reconciles desired-on state',()=>{
+  const ensure=fs.readFileSync(path.join(root,'backend/windows/scripts/Ensure-OpenInternet.ps1'),'utf8');
+  const renderer=fs.readFileSync(path.join(root,'src/renderer/app.js'),'utf8');
+  assert.match(ensure,/if\(-not\(Test-Admin\)\)/);
+  assert.match(ensure,/schtasks\.exe \/Run \/TN \$taskName/);
+  assert.match(ensure,/ELEVATED ENSURE PASS/);
+  assert.match(ensure,/AddSeconds\(150\)/);
+  assert.match(renderer,/async function reconcileStartupTunnel/);
+  assert.match(renderer,/s\.desiredState !== 'on'/);
+  assert.match(renderer,/window\.gateway\.action\('ensure'\)/);
+  assert.match(renderer,/const startupStatus = await refreshStatus\(false\)/);
+  assert.match(renderer,/await reconcileStartupTunnel\(startupStatus\)/);
+});
+
+test('Linux direct ISP path rejects tunnel defaults and stale exact request files are removed',()=>{
+  const backend=fs.readFileSync(path.join(root,'src/main/platform-backend.js'),'utf8');
+  const block=backend.slice(backend.indexOf("if (this.platform === 'linux')",backend.indexOf('async _directInternetPath')),backend.indexOf("throw new Error('Direct Internet test is supported",backend.indexOf('async _directInternetPath')));
+  assert.match(block,/nmcli -t -f DEVICE,TYPE,STATE/);
+  assert.match(block,/ethernet/);
+  assert.match(block,/wifi/);
+  assert.match(block,/tun\|tap\|wg\|tailscale\|ppp\|zt\|vpn/);
+  assert.match(backend,/fs\.unlinkSync\(path\.join\(stable, 'state', 'exact-profile\.request'\)\)/);
+  const connect=backend.slice(backend.indexOf('async connectProfile'),backend.indexOf('async _directInternetPath'));
+  assert.doesNotMatch(connect,/this\._writeJson\(request/);
+  assert.match(connect,/fs\.unlinkSync\(request\)/);
 });
 
 test('all-relay probe covers the full pool and UI explains missing live replies',()=>{

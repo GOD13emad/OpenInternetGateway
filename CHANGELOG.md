@@ -9,6 +9,10 @@
 - Increased Connections table typography to a more conventional desktop UI size while preserving the compact layout.
 - Live Windows validation: the revised fast probe covered all 28 current relays in 4.549 seconds; 4 returned a direct live probe and 24 explicitly returned no reply, with no ambiguous untested rows.
 - The same renderer and backend probe semantics are shared with Linux and are validated again in the v2.5.4 Linux release artifact.
+- Fixed reopen/startup reconciliation: when the previous session requested protection but the service/routes are down, the UI now restores the protected tunnel through the elevated recovery task instead of showing a dead 0% state.
+- Fixed Windows Repair/Ensure from a normal user session by delegating privileged connector work to the existing Highest-runlevel Scheduled Task and waiting for the real service/routes outcome.
+- Fixed Linux direct-ISP measurements so an active VPN cannot make `tun0` masquerade as the physical Internet path; Ethernet/Wi-Fi is selected explicitly.
+- Removed stale Linux `exact-profile.request` coordination files; exact SHA selection is passed directly to the Linux backend.
 
 ## 2.5.3
 

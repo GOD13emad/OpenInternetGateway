@@ -107,8 +107,28 @@ async function refreshStatus(silent = true) {
     const s = await window.gateway.status();
     renderStatus(s);
     if (!silent && s.error) showToast(s.error, true);
+    return s;
   } catch (e) {
     if (!silent) showToast(e.message, true);
+    return null;
+  }
+}
+
+async function reconcileStartupTunnel(initialStatus) {
+  const s = initialStatus || {};
+  if (s.connected || s.desiredState !== 'on' || !s.autoRecovery) return s;
+  setBusy(true, 'ensure', 'Restoring the protected tunnel requested before the app was reopened…');
+  try {
+    const result = await window.gateway.action('ensure');
+    const finalStatus = result?.status || await window.gateway.status();
+    renderStatus(finalStatus);
+    if (finalStatus?.connected) showToast('Previous protected tunnel restored.');
+    return finalStatus;
+  } catch (e) {
+    showToast(e.message || 'Could not restore the previous protected tunnel.', true);
+    return await refreshStatus(true);
+  } finally {
+    setBusy(false);
   }
 }
 
@@ -574,7 +594,8 @@ async function init() {
     ['Backend', state.platform.backendRoot]
   ].map(([k,v]) => '<div class="sys-row"><small>'+escapeHtml(k)+'</small><b>'+escapeHtml(String(v || '—'))+'</b></div>').join('');
 
-  await refreshStatus(false);
+  const startupStatus = await refreshStatus(false);
+  await reconcileStartupTunnel(startupStatus);
   window.gateway.updateInfo(false).then(renderUpdateInfo).catch(() => {});
   setInterval(() => { if (!state.busy && document.visibilityState === 'visible') refreshStatus(true); }, 10000);
 }
