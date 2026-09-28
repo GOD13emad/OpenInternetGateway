@@ -5,7 +5,8 @@ OIG_HOME="${OIG_HOME:-$HOME/.local/share/OpenInternetGateway}"
 OIG_COMMON="${OIG_COMMON:-$OIG_HOME/common}"
 STATE="$OIG_HOME/state"
 EVIDENCE="$OIG_HOME/evidence"
-CONN="OIG-JP-UDP-LIVE"
+CONN="OIG-VPN-LIVE"
+LEGACY_CONN="OIG-JP-UDP-LIVE"
 CONSOLE_CONN="OIG-Console-Gateway"
 KEEP="$STATE/linux.keep"
 LOCK="$STATE/gateway.lock"
@@ -38,6 +39,7 @@ delete_connection_name() {
 
 delete_named_connections() {
   delete_connection_name "$CONN"
+  delete_connection_name "$LEGACY_CONN"
 }
 
 json_status() {

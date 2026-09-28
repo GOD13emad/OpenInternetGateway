@@ -123,6 +123,24 @@ test('Linux independent exit watchdog enforces disconnect safely',()=>{
   assert.match(watchdog,/oig-linux\.sh" disconnect/);
 });
 
+test('multi-country config factories retain country metadata and no JP-only gate',()=>{
+  const linuxFactory=fs.readFileSync(path.join(root,'backend/linux/config_factory.py'),'utf8');
+  const linuxBackend=fs.readFileSync(path.join(root,'backend/linux/oig-linux.sh'),'utf8');
+  const winFactory=fs.readFileSync(path.join(root,'backend/windows/scripts/Build-VpnGateUdpCache.ps1'),'utf8');
+  const winControl=fs.readFileSync(path.join(root,'backend/windows/scripts/Headless-Control.ps1'),'utf8');
+  const platform=fs.readFileSync(path.join(root,'src/main/platform-backend.js'),'utf8');
+  assert.match(linuxFactory,/COUNTRY_PRIORITY/);
+  assert.match(linuxFactory,/CountryName/);
+  assert.doesNotMatch(linuxFactory,/p\[6\] != "JP"/);
+  assert.match(linuxBackend,/OIG-VPN-LIVE/);
+  assert.match(winFactory,/PerCountry=4/);
+  assert.match(winFactory,/CountryName/);
+  assert.doesNotMatch(winFactory,/\$p\[6\] -ne 'JP'/);
+  assert.match(winControl,/ExpectedCountry/);
+  assert.doesNotMatch(winControl,/\$loc -eq 'JP'/);
+  assert.match(platform,/\$loc -ne 'IR'/);
+});
+
 test('Linux Debian package path is sandbox-safe',()=>{
   const afterPack=fs.readFileSync(path.join(root,'tools/afterPack.js'),'utf8');
   const afterInstall=fs.readFileSync(path.join(root,'build/linux-after-install.sh'),'utf8');

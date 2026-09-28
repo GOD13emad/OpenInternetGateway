@@ -62,23 +62,25 @@ function Invoke-Connector([string[]]$CommandArgs,[int]$TimeoutMs=20000,[switch]$
    foreach($f in @($outFile,$errFile)){if($f -and(Test-Path $f)){Remove-Item -LiteralPath $f -Force -ErrorAction SilentlyContinue}}
  }
 }
-function Get-Health {
+function Get-Health([string]$ExpectedCountry='') {
  $routes=@(Get-NetRoute -AddressFamily IPv4 -ErrorAction SilentlyContinue|Where-Object{$_.DestinationPrefix -in @('0.0.0.0/1','128.0.0.0/1')})
  $cf=@(curl.exe -4 --max-time 4 -s https://www.cloudflare.com/cdn-cgi/trace)
  $ip=[string]((($cf|Where-Object{$_ -like 'ip=*'}|Select-Object -First 1)-replace '^ip=',''));$ip=$ip.Trim()
  $loc=[string]((($cf|Where-Object{$_ -like 'loc=*'}|Select-Object -First 1)-replace '^loc=',''));$loc=$loc.Trim()
  $dns=@(Resolve-DnsName dns.google -Type A -DnsOnly -ErrorAction SilentlyContinue|Where-Object IPAddress|Select-Object -ExpandProperty IPAddress)
- [pscustomobject]@{Healthy=($routes.Count -ge 2 -and $loc -eq 'JP' -and -not($dns -contains '10.10.34.35'));IP=$ip;Country=$loc;DNS=$dns;Poison=($dns -contains '10.10.34.35');FullRoutes=$routes.Count}
+ $foreign=($loc -and $loc -ne 'IR')
+ $countryOk=([string]::IsNullOrWhiteSpace($ExpectedCountry) -or $loc -eq $ExpectedCountry)
+ [pscustomobject]@{Healthy=($routes.Count -ge 2 -and $foreign -and $countryOk -and -not($dns -contains '10.10.34.35'));IP=$ip;Country=$loc;DNS=$dns;Poison=($dns -contains '10.10.34.35');FullRoutes=$routes.Count}
 }
-function Wait-Health([bool]$Want,[int]$Seconds){
+function Wait-Health([bool]$Want,[int]$Seconds,[string]$ExpectedCountry=''){
  $until=(Get-Date).AddSeconds($Seconds)
  do{
-   $h=Get-Health
+   $h=Get-Health $ExpectedCountry
    if($Want -and $h.Healthy){return $h}
    if((-not $Want) -and $h.FullRoutes -eq 0){return $h}
    Start-Sleep -Seconds 2
  }while((Get-Date)-lt $until)
- return (Get-Health)
+ return (Get-Health $ExpectedCountry)
 }
 function Save-Desired([string]$Value){
  [ordered]@{desired=$Value;at=(Get-Date).ToString('o')}|ConvertTo-Json|Set-Content -Encoding UTF8 $desiredFile
@@ -176,11 +178,11 @@ function Try-Candidate($c){
  try{[void](Invoke-Connector @('start') 20000)}catch{
    Record-Failure $c 'START_FAIL';return $null
  }
- $h=Wait-Health $true 14
+ $h=Wait-Health $true 14 ([string]$c.Country)
  if(-not $h.Healthy){Record-Failure $c 'LIVE_FAIL';Stop-Connector;return $null}
  Record-Success $c $h
  Schedule-ManualServiceMode
- $state=[ordered]@{at=(Get-Date).ToString('o');engine='OVPNConnectorService';service=$service;host=$c.Host;serverIP=$c.IP;port=$c.Port;protocol=$c.Protocol;profile=$profile;serviceProfile=$serviceProfile;sha256=$sha;observedIP=$h.IP;country=$h.Country;dns=$h.DNS}
+ $state=[ordered]@{at=(Get-Date).ToString('o');engine='OVPNConnectorService';service=$service;host=$c.Host;serverIP=$c.IP;port=$c.Port;protocol=$c.Protocol;configuredCountry=[string]$c.Country;countryName=[string]$c.CountryName;profile=$profile;serviceProfile=$serviceProfile;sha256=$sha;observedIP=$h.IP;country=$h.Country;dns=$h.DNS}
  $state|ConvertTo-Json -Depth 7|Set-Content -Encoding UTF8 $stateFile
  $state|ConvertTo-Json -Depth 7|Set-Content -Encoding UTF8 (Join-Path $Root 'evidence\connect-last-success.json')
  return $h

@@ -10,6 +10,8 @@ SEEDS = [
     "http://150.40.105.24:38827",
 ]
 
+COUNTRY_PRIORITY = ["JP","KR","US","SG","TH","VN","FR","DE","NL","GB","CA","AU","PT","RU"]
+
 def now():
     return dt.datetime.now().astimezone().isoformat()
 
@@ -53,13 +55,17 @@ def refresh_snapshot(evidence):
     })
     return csv_path, used
 
-def parse_candidates(csv_path, count=12):
+def parse_candidates(csv_path, count=24, per_country=4):
     rows, seen = [], set()
     for line in csv_path.read_text(encoding="utf-8", errors="replace").splitlines():
         if not line or line.startswith("*") or line.startswith("#"):
             continue
         p = line.split(",")
-        if len(p) < 15 or p[6] != "JP":
+        if len(p) < 15:
+            continue
+        country = p[6].strip().upper()
+        country_name = p[5].strip()
+        if not country:
             continue
         try:
             text = base64.b64decode(p[-1].strip()).decode("utf-8", errors="replace")
@@ -93,10 +99,32 @@ def parse_candidates(csv_path, count=12):
         rows.append({
             "Host":p[0],"IP":ip,"Port":port,"Score":score,"Ping":p[3],
             "Speed":speed,"Sessions":sessions,"Text":text,"Source":"VPNGate",
-            "Protocol":protocol,"TransportRank":transport_rank
+            "Protocol":protocol,"TransportRank":transport_rank,
+            "Country":country,"CountryName":country_name
         })
-    rows.sort(key=lambda x: (x["TransportRank"], -x["Score"]))
-    return rows[:count]
+
+    groups = {}
+    for row in rows:
+        groups.setdefault(row["Country"], []).append(row)
+    for bucket in groups.values():
+        bucket.sort(key=lambda x: (x["TransportRank"], -x["Score"]))
+
+    remaining = [c for c in groups if c not in COUNTRY_PRIORITY]
+    remaining.sort(key=lambda c: -max(x["Score"] for x in groups[c]))
+    country_order = [c for c in COUNTRY_PRIORITY if c in groups] + remaining
+
+    selected = []
+    for country in country_order:
+        selected.extend(groups[country][:per_country])
+        if len(selected) >= count:
+            return selected[:count]
+
+    if len(selected) < count:
+        used = {f'{x["Protocol"]}:{x["IP"]}:{x["Port"]}' for x in selected}
+        rest = [x for x in rows if f'{x["Protocol"]}:{x["IP"]}:{x["Port"]}' not in used]
+        rest.sort(key=lambda x: (x["TransportRank"], -x["Score"]))
+        selected.extend(rest[:count-len(selected)])
+    return selected[:count]
 
 def preserve_old(active, stage, meta, success, limit=4):
     old = read_json(active/"index.json", [])
@@ -120,17 +148,19 @@ def preserve_old(active, stage, meta, success, limit=4):
         kept+=1
         name=f"LKG-{kept:02d}-{old_path.name}"
         shutil.copy2(old_path,stage/name)
+        prior = success.get(sha,{}) if isinstance(success,dict) else {}
+        country = c.get("Country","") or (prior.get("country","") if isinstance(prior,dict) else "") or "JP"  # legacy pools before 2.3 were JP-only
         meta.append({
             "Rank":len(meta)+1,"Host":c.get("Host",""),"IP":c.get("IP",""),"Port":c.get("Port",0),
-            "Protocol":protocol,"Score":c.get("Score",0),"Ping":c.get("Ping",""),
-            "Speed":c.get("Speed",0),"Sessions":c.get("Sessions",0),
+            "Protocol":protocol,"Country":country,"CountryName":c.get("CountryName",""),
+            "Score":c.get("Score",0),"Ping":c.get("Ping",""),"Speed":c.get("Speed",0),"Sessions":c.get("Sessions",0),
             "Profile":f"runtime/udp-cache/{name}","SHA256":sha,
             "Source":"LastKnownGood","GeneratedAt":now()
         })
         current_shas.add(sha)
     return kept
 
-def promote(common, evidence, count=12, keep_generations=4, preserve_count=4):
+def promote(common, evidence, count=24, keep_generations=4, preserve_count=4):
     active = common / "runtime" / "udp-cache"
     factory = common / "runtime" / "config-factory"
     generations = factory / "generations"
@@ -156,7 +186,7 @@ def promote(common, evidence, count=12, keep_generations=4, preserve_count=4):
         sha=hashlib.sha256(p.read_bytes()).hexdigest()
         meta.append({
             "Rank":i,"Host":r["Host"],"IP":r["IP"],"Port":r["Port"],"Protocol":r["Protocol"],
-            "Score":r["Score"],"Ping":r["Ping"],"Speed":r["Speed"],"Sessions":r["Sessions"],
+            "Country":r["Country"],"CountryName":r["CountryName"],"Score":r["Score"],"Ping":r["Ping"],"Speed":r["Speed"],"Sessions":r["Sessions"],
             "Profile":f"runtime/udp-cache/{name}","SHA256":sha,
             "Source":"VPNGate","GeneratedAt":generated
         })
@@ -209,14 +239,17 @@ def status(common, evidence, min_pool=6):
         except Exception: pass
     generations=len([p for p in (factory/"generations").glob("*") if p.is_dir()]) if (factory/"generations").exists() else 0
     protocols={}
+    countries={}
     for c in idx:
         pr=str(c.get("Protocol","unknown"))
         protocols[pr]=protocols.get(pr,0)+1
+        cc=str(c.get("Country","") or "??")
+        countries[cc]=countries.get(cc,0)+1
     obj={
         "at":now(),"pool":len(idx),"validated":validated,
         "standby":max(0,len(idx)-validated),"quarantined":len(quarantine),
         "generations":generations,"lastRefresh":last,"ageHours":age,
-        "source":source,"healthy":len(idx)>=min_pool,"protocols":protocols
+        "source":source,"healthy":len(idx)>=min_pool,"protocols":protocols,"countries":countries
     }
     write_json(factory/"status.json",obj)
     return obj

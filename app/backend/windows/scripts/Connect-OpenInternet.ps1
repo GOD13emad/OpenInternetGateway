@@ -13,9 +13,9 @@ do{
  $cf=@(curl.exe -4 --max-time 4 -s https://www.cloudflare.com/cdn-cgi/trace)
  $loc=[string]((($cf|Where-Object{$_ -like 'loc=*'}|Select-Object -First 1)-replace '^loc=',''));$loc=$loc.Trim()
  $svc=Get-Service OVPNConnectorService -ErrorAction SilentlyContinue
- if($routes.Count -ge 2 -and $loc -eq 'JP' -and $svc -and $svc.Status -eq 'Running'){
+ if($routes.Count -ge 2 -and $loc -and $loc -ne 'IR' -and $svc -and $svc.Status -eq 'Running'){
    Write-Host 'CONNECTED'
    exit 0
  }
 }while((Get-Date)-lt $until)
-throw 'Headless connect task did not reach a validated JP tunnel within 150 seconds.'
+throw 'Headless connect task did not reach a validated foreign tunnel within 150 seconds.'

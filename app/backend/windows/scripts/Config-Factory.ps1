@@ -42,9 +42,12 @@ function Write-Status {
  $standby=[Math]::Max(0,$items.Count-$validated)
  $gens=@(Get-ChildItem (Join-Path $factory 'generations') -Directory -ErrorAction SilentlyContinue)
  $protocols=@{}
+ $countries=@{}
  foreach($item in $items){
    $pr=if($item.Protocol){[string]$item.Protocol}else{'unknown'}
    if($protocols.ContainsKey($pr)){$protocols[$pr]=[int]$protocols[$pr]+1}else{$protocols[$pr]=1}
+   $cc=if($item.Country){[string]$item.Country}else{'??'}
+   if($countries.ContainsKey($cc)){$countries[$cc]=[int]$countries[$cc]+1}else{$countries[$cc]=1}
  }
  $source=''
  $mirror=Join-Path $Root 'evidence\mirror-refresh-last.json'
@@ -70,6 +73,7 @@ function Write-Status {
    source=$source
    healthy=($items.Count -ge $MinPool)
    protocols=$protocols
+   countries=$countries
  }
  $obj|ConvertTo-Json -Depth 5|Set-Content -Encoding UTF8 $statusFile
  return [pscustomobject]$obj

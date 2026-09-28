@@ -1,5 +1,5 @@
 [CmdletBinding()]
-param([int]$Count=12,[int]$PreserveOld=4,[int]$KeepGenerations=4)
+param([int]$Count=24,[int]$PerCountry=4,[int]$PreserveOld=4,[int]$KeepGenerations=4)
 $ErrorActionPreference='Stop'
 $Root=Split-Path -Parent $PSScriptRoot
 $csv=Join-Path $Root 'evidence\vpngate-mirror-api.csv'
@@ -27,7 +27,9 @@ $seen=@{}
 foreach($line in Get-Content -LiteralPath $csv){
  if(-not $line -or $line.StartsWith('*') -or $line.StartsWith('#')){continue}
  $p=$line -split ','
- if($p.Count -lt 15 -or $p[6] -ne 'JP'){continue}
+ if($p.Count -lt 15){continue}
+ $country=([string]$p[6]).Trim().ToUpperInvariant();$countryName=([string]$p[5]).Trim()
+ if([string]::IsNullOrWhiteSpace($country)){continue}
  try{$text=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($p[-1].Trim()))}catch{continue}
  $ls=$text -split '[\r\n]+'
  $proto=($ls|Where-Object {$_ -match '^proto\s+'}|Select-Object -First 1)
@@ -49,10 +51,24 @@ foreach($line in Get-Content -LiteralPath $csv){
  $rows += [pscustomobject]@{
    Host=$p[0];IP=$ip;Score=[int64]$p[2];Ping=$p[3];Speed=[int64]$p[4];
    Sessions=[int]$p[7];Port=$port;Text=$text;Source='VPNGate';
-   Protocol=$transport;TransportRank=$transportRank
+   Protocol=$transport;TransportRank=$transportRank;Country=$country;CountryName=$countryName
  }
 }
-$selected=@($rows|Sort-Object TransportRank,@{Expression='Score';Descending=$true}|Select-Object -First $Count)
+$countryPriority=@('JP','KR','US','SG','TH','VN','FR','DE','NL','GB','CA','AU','PT','RU')
+$available=@($rows|Select-Object -ExpandProperty Country -Unique)
+$order=@($countryPriority|Where-Object {$_ -in $available})
+$order+=@($available|Where-Object {$_ -notin $countryPriority}|Sort-Object)
+$selected=@()
+foreach($cc in $order){
+ if($selected.Count -ge $Count){break}
+ $selected+=@($rows|Where-Object Country -eq $cc|Sort-Object TransportRank,@{Expression='Score';Descending=$true}|Select-Object -First $PerCountry)
+}
+if($selected.Count -lt $Count){
+ $keys=@{};foreach($x in $selected){$keys[([string]$x.Protocol+':'+[string]$x.IP+':'+[string]$x.Port)]=$true}
+ $rest=@($rows|Where-Object {-not $keys.ContainsKey(([string]$_.Protocol+':'+[string]$_.IP+':'+[string]$_.Port))}|Sort-Object TransportRank,@{Expression='Score';Descending=$true})
+ $selected+=@($rest|Select-Object -First ($Count-$selected.Count))
+}
+$selected=@($selected|Select-Object -First $Count)
 if($selected.Count -lt 3){
  Remove-Item $stage -Recurse -Force -ErrorAction SilentlyContinue
  throw "Only $($selected.Count) structurally valid OpenVPN profiles found."
@@ -68,7 +84,7 @@ foreach($r in $selected){
  $sha=(Get-FileHash -Algorithm SHA256 $path).Hash.ToLowerInvariant()
  $relative='runtime\udp-cache\'+$file
  $meta += [pscustomobject]@{
-   Rank=$i;Host=$r.Host;IP=$r.IP;Port=$r.Port;Protocol=$r.Protocol;Score=$r.Score;Ping=$r.Ping;
+   Rank=$i;Host=$r.Host;IP=$r.IP;Port=$r.Port;Protocol=$r.Protocol;Country=$r.Country;CountryName=$r.CountryName;Score=$r.Score;Ping=$r.Ping;
    Speed=$r.Speed;Sessions=$r.Sessions;Profile=$relative;SHA256=$sha;Source=$r.Source;
    GeneratedAt=(Get-Date).ToString('o')
  }
@@ -93,8 +109,11 @@ foreach($wrap in $oldSorted){
  $i++;$kept++
  $file=('LKG-{0:D2}-{1}' -f $kept,(Split-Path $oldPath -Leaf))
  Copy-Item -LiteralPath $oldPath -Destination (Join-Path $stage $file) -Force
+ $country=[string]$o.Country
+ if([string]::IsNullOrWhiteSpace($country) -and $success.ContainsKey($sha)){try{$country=[string]$success[$sha].country}catch{}}
+ if([string]::IsNullOrWhiteSpace($country)){$country='JP'} # legacy pools before 2.3 were JP-only
  $meta += [pscustomobject]@{
-   Rank=$i;Host=$o.Host;IP=$o.IP;Port=$o.Port;Protocol=$protocol;Score=$o.Score;Ping=$o.Ping;
+   Rank=$i;Host=$o.Host;IP=$o.IP;Port=$o.Port;Protocol=$protocol;Country=$country;CountryName=$o.CountryName;Score=$o.Score;Ping=$o.Ping;
    Speed=$o.Speed;Sessions=$o.Sessions;Profile=('runtime\udp-cache\'+$file);SHA256=$sha;
    Source='LastKnownGood';GeneratedAt=(Get-Date).ToString('o')
  }
