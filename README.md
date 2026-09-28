@@ -4,18 +4,23 @@ Open Internet Gateway (OIG) is a cross-platform desktop application for maintain
 
 The Windows and Linux backends are different, but both sit behind the same Electron dashboard, lifecycle model, health gates, multi-country relay inventory, Self-Healing Config Factory, and verified GitHub update workflow.
 
-## Current release: 2.4.2
+## Current release: 2.5.0
 
 ### Connections
 
 The Connections page exposes the current relay inventory with country, endpoint, protocol, source metadata, locally measured latency, real tunnel throughput results, and relay status.
 
-- **Test all** performs bounded parallel reachability/latency probes across the usable relay pool without switching or disconnecting the active tunnel.
-- **Speed** on a relay performs a real throughput measurement while that relay is the active managed tunnel.
+- **Test all relays** performs bounded parallel reachability/latency probes from the physical Internet adapter, bypassing the active OIG VPN route and HTTP/SOCKS proxy settings without switching or disconnecting the tunnel.
+- **Test direct Internet** measures the user's own ISP baseline: ping, real download, real upload, direct public IP and country. Windows binds the physical adapter IPv4 address; Linux binds the physical interface.
+- **Speed** on a relay performs a real throughput measurement through that selected VPN tunnel; app-level proxy settings are disabled so the measurement is the VPN path itself.
 - Columns are sortable by country, relay, protocol, source ping, live ping, measured download, measured upload, and status.
 - Source metadata and device-measured results are kept separate; missing or blocked measurements are shown as unavailable rather than fabricated.
 
 The Config Factory keeps a diversified multi-country pool with last-known-good retention, validation history, failure quarantine, and refresh behavior.
+
+### Direct ISP truth boundary
+
+OIG's Direct Internet test binds the physical network path and disables ordinary HTTP/SOCKS proxy use. The UI records the physical adapter/local IP/gateway plus direct public egress. When the active routed egress differs from the direct public egress, the bypass is explicitly marked as observed. A third-party kernel/WFP/endpoint-security product that intercepts traffic below normal socket routing can still override OS routing; OIG surfaces the observed egress instead of assuming bypass succeeded.
 
 ### GitHub updates
 

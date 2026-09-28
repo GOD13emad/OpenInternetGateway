@@ -1,7 +1,19 @@
 # Changelog
 
-## 2.4.2
+## 2.5.0
 
+- Added **Direct Internet / ISP Baseline** on the Connections page: real ping, download, upload, direct public IP and country measured from the physical Internet adapter rather than the active OIG VPN route.
+- Direct measurements explicitly bypass HTTP/SOCKS proxy settings and bind the physical path: Windows uses the physical adapter IPv4 address; Linux binds the physical interface.
+- Added observable bypass proof by comparing normal routed egress with direct physical-adapter egress. On the validated Windows machine, OIG VPN remained TH / 27.130.95.200 while Direct Internet measured IR / 164.215.159.13.
+- Changed **Test all relays** to probe relay reachability from the direct physical Internet path, not through the active VPN/proxy route, while keeping the active tunnel unchanged.
+- Preserved per-row **Speed** as the honest real-throughput measurement through the selected VPN tunnel; application-level proxy settings are disabled for that measurement.
+- Optimized direct relay testing by avoiding the full live-status path and using up to 16 bounded concurrent probes.
+- Includes the unreleased 2.4.2 Windows Auto-Recovery race hardening: the connector service is stopped and verified Stopped before set-config; configuration fails closed if the service cannot stop.
+- Live verification: Windows Direct ISP ≈ 40.46 Mbps down / 5.70 Mbps up / 84 ms while OIG VPN remained connected; Linux Direct ISP ≈ 43.38 Mbps down / 11.11 Mbps up / 84.2 ms, with 27 relays probed in 2.055 seconds.
+
+## 2.4.2 — superseded before release
+
+- This intermediate baseline was not published; its recovery hardening is included in v2.5.0.
 - Hardened Windows Auto-Recovery against an observed connector configuration race: when OVPNConnectorService exists but is running while the tunnel is unhealthy, OIG now stops the connector service and verifies the Stopped state before any set-config operation.
 - Added a fail-closed guard if the service cannot be stopped within the bounded wait instead of attempting an unsafe configuration mutation.
 - Preserved the successful 2.4.1 fast Test all, sortable Connections, verified GitHub updater, Linux lifecycle and multi-country behavior.

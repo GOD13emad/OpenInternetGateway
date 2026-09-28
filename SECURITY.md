@@ -14,6 +14,10 @@ Open Internet Gateway treats discovered relay profiles and update artifacts as u
 - Explicit Quit disconnects the OIG-managed tunnel; Linux also has an independent parent-exit watchdog as a fail-safe for unexpected application termination.
 - Generated relay profiles, runtime state, machine evidence, local logs, and dependencies are excluded from source control.
 
+## Direct Internet measurements
+
+Direct Internet measurements use a physical adapter/interface bind plus `--noproxy "*"` so ordinary OIG VPN routing and HTTP/SOCKS proxy settings are bypassed. The application records the observed direct public egress and does not infer bypass success solely from configuration.
+
 ## Update integrity
 
 The in-app GitHub updater checks the official `GOD13emad/OpenInternetGateway` release feed and is fail-closed.
