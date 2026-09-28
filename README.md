@@ -1,10 +1,33 @@
 # Open Internet Gateway
 
-Open Internet Gateway (OIG) is a cross-platform desktop application that maintains a validated, full-device Internet egress path on restrictive or unreliable networks.
+Open Internet Gateway (OIG) is a cross-platform desktop application for maintaining a validated, full-device Internet egress path on restrictive or unreliable networks.
 
-The Windows and Linux backends are different, but both sit behind the same Electron dashboard, system-tray workflow, health model, and Self-Healing Config Factory.
+The Windows and Linux backends are different, but both sit behind the same Electron dashboard, lifecycle model, health gates, multi-country relay inventory, Self-Healing Config Factory, and verified GitHub update workflow.
 
-## Release 2.2.4
+## Current release: 2.4.1
+
+### Connections
+
+The Connections page exposes the current relay inventory with country, endpoint, protocol, source metadata, locally measured latency, real tunnel throughput results, and relay status.
+
+- **Test all** performs bounded parallel reachability/latency probes across the usable relay pool without switching or disconnecting the active tunnel.
+- **Speed** on a relay performs a real throughput measurement while that relay is the active managed tunnel.
+- Columns are sortable by country, relay, protocol, source ping, live ping, measured download, measured upload, and status.
+- Source metadata and device-measured results are kept separate; missing or blocked measurements are shown as unavailable rather than fabricated.
+
+The Config Factory keeps a diversified multi-country pool with last-known-good retention, validation history, failure quarantine, and refresh behavior.
+
+### GitHub updates
+
+The **Updates** page checks the official `GOD13emad/OpenInternetGateway` GitHub release feed.
+
+Before an update file is opened, OIG requires all three integrity checks to agree:
+
+1. the SHA-256 digest published by the GitHub release asset,
+2. the matching entry in the release `SHA256SUMS.txt`,
+3. the SHA-256 of the bytes downloaded by OIG.
+
+Windows selects the NSIS installer. Linux selects the amd64 Debian package with AppImage fallback. The application does not bypass OS privilege approval for installation.
 
 ### Windows
 
@@ -14,23 +37,22 @@ OIG does **not** use the OpenVPN Connect desktop UI as its runtime.
 - Connect/Disconnect run through OpenVPN Connect's headless `ovpnconnector.exe` / `OVPNConnectorService`.
 - `OpenVPNConnect.exe` is not launched by the OIG production backend.
 - Your normal OpenVPN Connect application remains independent for manual use.
-- Closing the OIG dashboard on Windows hides it to the OIG tray; explicit Quit disconnects the managed tunnel before the application exits.
-- OIG starts at login with `--background` so the tray can remain available without opening the dashboard.
+- Closing the OIG dashboard hides it to the OIG tray and keeps the application/tunnel alive.
+- Explicit Quit disconnects the OIG-managed tunnel before the application exits.
+- OIG can start at login with `--background`.
 - Auto-Recovery runs through one elevated scheduled task and a headless backend.
-
-Validated Windows 2.2.4 state includes JP egress, clean DNS, two protected IPv4 routes, Config Factory recovery, and a live headless connector with zero OpenVPN Connect GUI processes.
 
 ### Linux
 
-Linux uses NetworkManager's OpenVPN integration and systemd user recovery.
+Linux uses NetworkManager's OpenVPN integration and user-level recovery.
 
 - UUID-only connection lifecycle avoids duplicate-name races.
 - Effective routing is validated through the active tunnel interface.
-- Auto-Recovery uses a user-level systemd timer.
-- On Linux, closing/quitting the application disconnects the OIG-managed tunnel; an independent parent-exit watchdog enforces the same outcome if the Electron process is terminated unexpectedly. Auto-Recovery respects the persisted OFF state and does not reconnect until the user connects again.
+- Auto-Recovery respects the persisted desired state.
+- Closing the dashboard hides the window while the application and managed tunnel remain alive.
+- **Quit and disconnect** is the explicit full-exit path and disconnects the managed tunnel.
+- If the application process terminates unexpectedly, the independent parent-exit watchdog provides a disconnect fail-safe.
 - Release assets include Debian and AppImage builds.
-
-Validated Linux 2.2.4 state includes JP egress, `tun0`, clean DNS, full-route validation, cold-start Config Factory recovery, clean disconnect rollback, and persistent Auto-Recovery.
 
 ## Self-Healing Config Factory
 
@@ -65,7 +87,9 @@ The dashboard exposes:
 - active relay,
 - Auto-Recovery status,
 - Config Factory pool health,
-- diagnostics and activity evidence.
+- Connections inventory and live measurements,
+- diagnostics and activity evidence,
+- GitHub update status and release integrity information.
 
 ## Requirements
 
@@ -84,6 +108,7 @@ Validated on Ubuntu 24.04-class systems with:
 - NetworkManager OpenVPN plugin
 - OpenVPN 2.6+
 - systemd user services
+- `curl`
 
 The Debian package is the preferred Linux install. Linux Debian installs to `/opt/open-internet-gateway` so Chromium's setuid sandbox does not inherit a path containing spaces. AppImage is also provided for portable use; some distributions may require FUSE compatibility or an extracted AppImage workflow.
 
@@ -118,12 +143,15 @@ Generated relay profiles, local runtime state, machine evidence, dependencies, a
 - Repeated failures are quarantined.
 - Runtime state and generated credentials/profiles are excluded from source control.
 - Windows OIG uses a headless service backend rather than automating or hiding another application's UI.
+- GitHub update downloads are fail-closed on SHA-256 mismatch.
 
 See [SECURITY.md](SECURITY.md).
 
-## Release signing
+## Release verification
 
-The Windows 2.2.4 installer is reproducibly hashed but is **not Authenticode-signed by a trusted publisher**. Verify release checksums before installation.
+Every published release includes `SHA256SUMS.txt`. The in-app updater verifies the selected release asset before opening it.
+
+No Authenticode signing certificate is configured in the repository build configuration as of v2.4.1, so Windows users should verify the published checksum when installing manually.
 
 ## Scope
 
