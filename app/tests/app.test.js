@@ -107,6 +107,12 @@ test('version is runtime-derived and quit disconnects the managed tunnel',()=>{
   assert.match(linux,/DESIRED OFF/);
 });
 
+test('shutdown event emission tolerates destroyed renderer',()=>{
+  const main=fs.readFileSync(path.join(root,'src/main/main.js'),'utf8');
+  assert.match(main,/!mainWindow\.isDestroyed\(\)/);
+  assert.match(main,/!mainWindow\.webContents\.isDestroyed\(\)/);
+});
+
 test('Linux close-to-dock and desktop Quit lifecycle are explicit',()=>{
   const main=fs.readFileSync(path.join(root,'src/main/main.js'),'utf8');
   const backend=fs.readFileSync(path.join(root,'src/main/platform-backend.js'),'utf8');

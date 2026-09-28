@@ -197,7 +197,9 @@ app.on('second-instance', (_event, argv, _workingDirectory, additionalData) => {
       appPath: app.getAppPath(),
       userData: app.getPath('userData'),
       emit: (payload) => {
-        mainWindow?.webContents.send('gateway:event', payload);
+        if (mainWindow && !mainWindow.isDestroyed() && mainWindow.webContents && !mainWindow.webContents.isDestroyed()) {
+          mainWindow.webContents.send('gateway:event', payload);
+        }
         if (payload?.status) { lastStatus = payload.status; renderTray(lastStatus); }
       }
     });
