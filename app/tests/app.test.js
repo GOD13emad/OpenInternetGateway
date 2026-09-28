@@ -41,9 +41,14 @@ test('Config Factory is wired through platform and renderer',()=>{
 
 test('desktop app enforces single-instance tray UX',()=>{
   const main=fs.readFileSync(path.join(root,'src/main/main.js'),'utf8');
-  assert.match(main,/requestSingleInstanceLock/);
+  assert.match(main,/requestSingleInstanceLock\(\{ intent: launchIntent \}\)/);
+  assert.match(main,/if \(gotSingleInstanceLock\) \{/);
   assert.match(main,/second-instance/);
+  assert.match(main,/additionalData\?\.intent/);
   assert.match(main,/mainWindow\.show\(\)/);
+  const guarded=main.slice(main.indexOf('if (gotSingleInstanceLock) {'));
+  assert.match(guarded,/app\.whenReady\(\)/);
+  assert.match(guarded,/startLinuxExitWatchdog\(\)/);
 });
 
 

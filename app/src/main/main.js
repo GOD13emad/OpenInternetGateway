@@ -15,7 +15,8 @@ let allowQuit = false;
 const startInBackground = process.argv.includes('--background');
 const quitRequestedAtLaunch = process.argv.includes('--quit');
 
-const gotSingleInstanceLock = app.requestSingleInstanceLock();
+const launchIntent = quitRequestedAtLaunch ? 'quit' : 'show';
+const gotSingleInstanceLock = app.requestSingleInstanceLock({ intent: launchIntent });
 if (!gotSingleInstanceLock) app.quit();
 
 function asset(name) {
@@ -176,49 +177,56 @@ async function requestQuit() {
   }
 }
 
-app.on('second-instance', (_event, argv) => {
-  if (argv.includes('--quit')) { requestQuit(); return; }
-  if (!mainWindow) return;
-  if (mainWindow.isMinimized()) mainWindow.restore();
-  mainWindow.show();
-  mainWindow.focus();
-});
-
-app.whenReady().then(async () => {
-  backend = new Backend({
-    version: app.getVersion(),
-    resourcesPath: process.resourcesPath,
-    appPath: app.getAppPath(),
-    userData: app.getPath('userData'),
-    emit: (payload) => {
-      mainWindow?.webContents.send('gateway:event', payload);
-      if (payload?.status) { lastStatus = payload.status; renderTray(lastStatus); }
+if (gotSingleInstanceLock) {
+app.on('second-instance', (_event, argv, _workingDirectory, additionalData) => {
+    const intent = additionalData?.intent || (argv.includes('--quit') ? 'quit' : 'show');
+    if (intent === 'quit') { requestQuit(); return; }
+    if (!mainWindow || mainWindow.isDestroyed()) {
+      createWindow();
+      return;
     }
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    mainWindow.show();
+    mainWindow.focus();
   });
-  await backend.initialize();
-  startLinuxExitWatchdog();
-  if (quitRequestedAtLaunch) { requestQuit(); return; }
-  if (process.platform === 'win32' && app.isPackaged) {
-    app.setLoginItemSettings({ openAtLogin: true, path: process.execPath, args: ['--background'] });
-  }
-  registerIpc();
-  createWindow();
-  createTray();
-});
-
-app.on('activate', () => {
-  if (mainWindow) { mainWindow.show(); mainWindow.focus(); }
-  else createWindow();
-});
-
-process.on('SIGTERM', () => requestQuit());
-process.on('SIGINT', () => requestQuit());
-
-app.on('before-quit', (event) => {
-  if (allowQuit) {
-    if (trayPoll) clearInterval(trayPoll);
-    return;
-  }
-  event.preventDefault();
-  requestQuit();
-});
+  
+  app.whenReady().then(async () => {
+    backend = new Backend({
+      version: app.getVersion(),
+      resourcesPath: process.resourcesPath,
+      appPath: app.getAppPath(),
+      userData: app.getPath('userData'),
+      emit: (payload) => {
+        mainWindow?.webContents.send('gateway:event', payload);
+        if (payload?.status) { lastStatus = payload.status; renderTray(lastStatus); }
+      }
+    });
+    await backend.initialize();
+    startLinuxExitWatchdog();
+    if (quitRequestedAtLaunch) { requestQuit(); return; }
+    if (process.platform === 'win32' && app.isPackaged) {
+      app.setLoginItemSettings({ openAtLogin: true, path: process.execPath, args: ['--background'] });
+    }
+    registerIpc();
+    createWindow();
+    createTray();
+  });
+  
+  app.on('activate', () => {
+    if (mainWindow) { mainWindow.show(); mainWindow.focus(); }
+    else createWindow();
+  });
+  
+  process.on('SIGTERM', () => requestQuit());
+  process.on('SIGINT', () => requestQuit());
+  
+  app.on('before-quit', (event) => {
+    if (allowQuit) {
+      if (trayPoll) clearInterval(trayPoll);
+      return;
+    }
+    event.preventDefault();
+    requestQuit();
+  });
+  
+}
