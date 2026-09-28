@@ -276,10 +276,14 @@ async function benchmarkCurrent() {
   setBusy(true, 'benchmark-all-fast');
   try {
     const result = await window.gateway.action('benchmark-all-fast');
-    if (result?.status) renderStatus(result.status);
+    const measured = new Map((result?.results || []).map(item => [item.sha256, item]));
+    state.profiles = state.profiles.map(profile => {
+      const quick = measured.get(profile.sha256);
+      return quick ? { ...profile, benchmark: { ...(profile.benchmark || {}), ...quick } } : profile;
+    });
+    renderConnections();
     const seconds = Math.max(0.1, Number(result?.elapsedMs || 0) / 1000).toFixed(1);
     showToast('Tested ' + String(result?.tested || 0) + ' relays in ' + seconds + 's · ' + String(result?.reachable || 0) + ' replied.');
-    await loadConnections();
   } catch (e) {
     showToast(e.message || 'Fast relay test failed.', true);
   } finally {

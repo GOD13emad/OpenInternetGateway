@@ -720,6 +720,10 @@ class Backend {
       else if (action === 'benchmark-active') result = await this.benchmarkActive();
       else if (action === 'benchmark-all-fast') result = await this.benchmarkAllFast();
       else result = await (this.platform === 'win32' ? this._windows(action) : this._linux(action));
+      if (action === 'benchmark-all-fast') {
+        this.emit({ type: 'busy', action, busy: false });
+        return result;
+      }
       const status = result?.status || await this.status();
       this.emit({ type: 'status', action, busy: false, status });
       return { ...result, status };

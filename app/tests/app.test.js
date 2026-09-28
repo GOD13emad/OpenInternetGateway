@@ -237,9 +237,12 @@ test('fast Test all probes relays in parallel and table sorting is explicit',()=
   assert.match(backend,/Math\.min\(12/);
   assert.match(backend,/benchmark-all-fast/);
   assert.match(backend,/fastPingMs/);
+  assert.match(backend,/action === 'benchmark-all-fast'[\s\S]*type: 'busy'[\s\S]*return result/);
   assert.match(renderer,/connectionSortValue/);
   assert.match(renderer,/compareConnections/);
   assert.match(renderer,/benchmark-all-fast/);
+  assert.match(renderer,/new Map\(\(result\?\.results \|\| \[\]\)/);
+  assert.doesNotMatch(renderer.slice(renderer.indexOf('async function benchmarkCurrent'),renderer.indexOf('async function loadDiagnostics')),/loadConnections\(\)/);
   assert.match(renderer,/test\.textContent = 'Speed'/);
   assert.match(html,/>Test all</);
   for(const key of ['country','relay','protocol','sourcePing','livePing','download','upload','status']) assert.match(html,new RegExp('data-sort="'+key+'"'));
