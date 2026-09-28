@@ -3,6 +3,8 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const net = require('net');
+const https = require('https');
+const crypto = require('crypto');
 
 function run(file, args, options = {}) {
   return new Promise((resolve, reject) => {
@@ -475,6 +477,197 @@ class Backend {
     all[active.sha256] = result;
     this._writeJson(file, all);
     return { ok: true, benchmark: result, status };
+  }
+
+  _githubHeaders() {
+    return {
+      'User-Agent': 'OpenInternetGateway/' + (this.version || 'unknown'),
+      'Accept': 'application/vnd.github+json',
+      'X-GitHub-Api-Version': '2022-11-28'
+    };
+  }
+
+  _httpsText(url, redirects = 5) {
+    return new Promise((resolve, reject) => {
+      const req = https.get(url, { headers: this._githubHeaders() }, res => {
+        const code = Number(res.statusCode || 0);
+        if ([301,302,303,307,308].includes(code) && res.headers.location && redirects > 0) {
+          res.resume();
+          const next = new URL(res.headers.location, url).toString();
+          this._httpsText(next, redirects - 1).then(resolve, reject);
+          return;
+        }
+        if (code < 200 || code >= 300) {
+          let body = '';
+          res.on('data', d => body += d.toString());
+          res.on('end', () => reject(new Error('GitHub request failed (' + code + '): ' + body.slice(0,180))));
+          return;
+        }
+        let body = '';
+        res.setEncoding('utf8');
+        res.on('data', d => body += d);
+        res.on('end', () => resolve(body));
+      });
+      req.setTimeout(12000, () => req.destroy(new Error('GitHub request timed out.')));
+      req.on('error', reject);
+    });
+  }
+
+  async _githubJson(url) {
+    return JSON.parse(await this._httpsText(url));
+  }
+
+  _versionParts(value) {
+    const core = String(value || '').trim().replace(/^v/i, '').split('-')[0];
+    const parts = core.split('.').slice(0,3).map(x => Number.parseInt(x,10));
+    while (parts.length < 3) parts.push(0);
+    return parts.map(x => Number.isFinite(x) ? x : 0);
+  }
+
+  _compareVersions(a, b) {
+    const av = this._versionParts(a);
+    const bv = this._versionParts(b);
+    for (let i = 0; i < 3; i++) {
+      if (av[i] !== bv[i]) return av[i] > bv[i] ? 1 : -1;
+    }
+    return 0;
+  }
+
+  _selectUpdateAsset(assets, version) {
+    const list = Array.isArray(assets) ? assets : [];
+    if (this.platform === 'win32') {
+      return list.find(a => a.name === 'OpenInternetGateway-Setup-' + version + '.exe')
+        || list.find(a => /^OpenInternetGateway-Setup-.*\.exe$/i.test(a.name || ''));
+    }
+    if (this.platform === 'linux') {
+      return list.find(a => a.name === 'OpenInternetGateway-' + version + '-amd64.deb')
+        || list.find(a => /^OpenInternetGateway-.*-amd64\.deb$/i.test(a.name || ''))
+        || list.find(a => /\.AppImage$/i.test(a.name || ''));
+    }
+    return null;
+  }
+
+  async updateInfo(force = false) {
+    const stateFile = path.join(this.backendRoot, 'state', 'github-update.json');
+    if (!force) {
+      const cached = this._readJson(stateFile, null);
+      const checked = cached?.checkedAt ? Date.parse(cached.checkedAt) : 0;
+      if (checked && Date.now() - checked < 5 * 60 * 1000) return cached;
+    }
+
+    const release = await this._githubJson('https://api.github.com/repos/GOD13emad/OpenInternetGateway/releases/latest');
+    const latestVersion = String(release.tag_name || '').replace(/^v/i, '');
+    if (!latestVersion) throw new Error('GitHub latest release did not contain a version tag.');
+    const asset = this._selectUpdateAsset(release.assets, latestVersion);
+    const sums = (release.assets || []).find(a => a.name === 'SHA256SUMS.txt');
+    const comparison = this._compareVersions(this.version, latestVersion);
+    const digest = String(asset?.digest || '');
+    const info = {
+      checkedAt: new Date().toISOString(),
+      currentVersion: this.version,
+      latestVersion,
+      updateAvailable: comparison < 0,
+      currentAhead: comparison > 0,
+      upToDate: comparison === 0,
+      releaseUrl: String(release.html_url || 'https://github.com/GOD13emad/OpenInternetGateway/releases/latest'),
+      publishedAt: release.published_at || null,
+      releaseName: release.name || release.tag_name || '',
+      asset: asset ? {
+        name: asset.name,
+        url: asset.browser_download_url,
+        size: Number(asset.size || 0),
+        digest,
+        sha256: digest.startsWith('sha256:') ? digest.slice(7).toLowerCase() : ''
+      } : null,
+      checksumsUrl: sums?.browser_download_url || null
+    };
+    this._writeJson(stateFile, info);
+    return info;
+  }
+
+  _downloadWithSha256(url, destination, redirects = 5) {
+    return new Promise((resolve, reject) => {
+      fs.mkdirSync(path.dirname(destination), { recursive: true });
+      const partial = destination + '.partial';
+      try { fs.unlinkSync(partial); } catch {}
+      const request = currentUrl => {
+        const req = https.get(currentUrl, { headers: this._githubHeaders() }, res => {
+          const code = Number(res.statusCode || 0);
+          if ([301,302,303,307,308].includes(code) && res.headers.location && redirects > 0) {
+            res.resume();
+            redirects -= 1;
+            request(new URL(res.headers.location, currentUrl).toString());
+            return;
+          }
+          if (code < 200 || code >= 300) {
+            res.resume();
+            reject(new Error('Update download failed with HTTP ' + code + '.'));
+            return;
+          }
+          const hash = crypto.createHash('sha256');
+          const out = fs.createWriteStream(partial, { flags: 'w' });
+          let bytes = 0;
+          res.on('data', chunk => { hash.update(chunk); bytes += chunk.length; });
+          res.pipe(out);
+          out.on('error', err => {
+            try { res.destroy(); } catch {}
+            try { fs.unlinkSync(partial); } catch {}
+            reject(err);
+          });
+          out.on('finish', () => {
+            out.close(() => {
+              try {
+                fs.renameSync(partial, destination);
+                resolve({ sha256: hash.digest('hex').toLowerCase(), bytes });
+              } catch (error) {
+                try { fs.unlinkSync(partial); } catch {}
+                reject(error);
+              }
+            });
+          });
+        });
+        req.setTimeout(30000, () => req.destroy(new Error('Update download stalled.')));
+        req.on('error', error => {
+          try { fs.unlinkSync(partial); } catch {}
+          reject(error);
+        });
+      };
+      request(url);
+    });
+  }
+
+  async downloadUpdate() {
+    const info = await this.updateInfo(true);
+    if (!info.asset?.url || !info.asset?.name) throw new Error('No compatible update asset was published for this platform.');
+    if (!info.updateAvailable) {
+      return { ok: true, alreadyCurrent: true, info, path: null };
+    }
+    if (!info.asset.sha256) throw new Error('GitHub release asset has no SHA-256 digest; refusing an unverifiable update.');
+
+    if (info.checksumsUrl) {
+      const sums = await this._httpsText(info.checksumsUrl);
+      const line = sums.split(/\r?\n/).find(x => x.trim().endsWith('  ' + info.asset.name));
+      if (!line) throw new Error('Published SHA256SUMS does not include the selected update asset.');
+      const checksum = line.trim().split(/\s+/)[0].toLowerCase();
+      if (checksum !== info.asset.sha256) throw new Error('GitHub digest and SHA256SUMS disagree; update refused.');
+    }
+
+    const destination = path.join(this.backendRoot, 'updates', 'v' + info.latestVersion, info.asset.name);
+    if (fs.existsSync(destination)) {
+      const existing = crypto.createHash('sha256').update(fs.readFileSync(destination)).digest('hex').toLowerCase();
+      if (existing === info.asset.sha256) return { ok: true, cached: true, info, path: destination, sha256: existing };
+      try { fs.unlinkSync(destination); } catch {}
+    }
+
+    const downloaded = await this._downloadWithSha256(info.asset.url, destination);
+    if (downloaded.sha256 !== info.asset.sha256) {
+      try { fs.unlinkSync(destination); } catch {}
+      throw new Error('Downloaded update SHA-256 does not match the published GitHub release digest.');
+    }
+    if (this.platform === 'linux' && /\.AppImage$/i.test(destination)) {
+      try { fs.chmodSync(destination, 0o755); } catch {}
+    }
+    return { ok: true, cached: false, info, path: destination, sha256: downloaded.sha256, bytes: downloaded.bytes };
   }
 
   _factoryStatusPath() {

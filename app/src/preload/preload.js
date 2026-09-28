@@ -8,6 +8,9 @@ contextBridge.exposeInMainWorld('gateway', {
   activity: () => ipcRenderer.invoke('gateway:activity'),
   platform: () => ipcRenderer.invoke('gateway:platform'),
   openLogs: () => ipcRenderer.invoke('gateway:openLogs'),
+  updateInfo: (force = false) => ipcRenderer.invoke('gateway:updateInfo', force),
+  installUpdate: () => ipcRenderer.invoke('gateway:installUpdate'),
+  openRelease: () => ipcRenderer.invoke('gateway:openRelease'),
   setTheme: (theme) => ipcRenderer.invoke('gateway:setTheme', theme),
   onBackendEvent: (callback) => ipcRenderer.on('gateway:event', (_event, payload) => callback(payload))
 });

@@ -87,3 +87,13 @@ html[data-theme="light"] .panel{background:var(--panel)}
 .country-chip,.protocol-chip,.state-chip{display:inline-flex;align-items:center;border:1px solid var(--line);border-radius:999px;padding:4px 7px;font-size:9px}.country-chip{color:var(--accent2)}.protocol-chip{color:var(--soft);text-transform:uppercase}.state-chip.active{color:var(--accent);border-color:rgba(89,227,193,.28)}.state-chip.validated{color:var(--accent2)}.state-chip.bad{color:var(--danger)}
 .metric-real{font-weight:700;color:var(--text)}.metric-source{color:var(--muted)}.row-actions{display:flex;gap:5px;justify-content:flex-end}.row-actions .btn{padding:6px 9px;font-size:9px}
 @media(max-width:1050px){.connection-tools{align-items:flex-start;flex-direction:column}.connection-controls{justify-content:flex-start}.benchmark-summary{grid-template-columns:1fr 1fr}}
+
+
+/* GitHub updates */
+.nav-item{position:relative}.nav-badge{width:7px;height:7px;border-radius:999px;background:transparent;margin-left:auto;box-shadow:none}.nav-item.has-update .nav-badge{background:var(--warn);box-shadow:0 0 0 3px rgba(255,199,102,.10)}
+.update-grid{grid-template-columns:1fr}.update-card{padding:22px}.update-head{align-items:flex-start;gap:18px}.update-head h3{margin:4px 0 6px}.update-head p{margin:0;max-width:720px;color:var(--muted);font-size:10px;line-height:1.55}
+.update-pill{display:inline-flex;align-items:center;border:1px solid var(--line);border-radius:999px;padding:6px 9px;font-size:9px;white-space:nowrap;color:var(--muted)}.update-pill.ready{color:var(--warn);border-color:rgba(255,199,102,.28)}.update-pill.current{color:var(--accent);border-color:rgba(89,227,193,.28)}.update-pill.error{color:var(--danger);border-color:rgba(255,109,134,.28)}
+.update-metrics{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin:18px 0}.update-metrics span{border:1px solid var(--line);border-radius:12px;padding:11px 13px;background:rgba(255,255,255,.025)}.update-metrics small,.update-metrics b{display:block}.update-metrics small{color:var(--muted);font-size:8px;text-transform:uppercase;letter-spacing:.55px}.update-metrics b{font-size:11px;margin-top:5px;overflow-wrap:anywhere}
+.update-detail{border:1px solid var(--line);border-radius:12px;padding:11px 13px;background:rgba(255,255,255,.02)}.update-detail small{display:block;color:var(--muted);font-size:8px;text-transform:uppercase;letter-spacing:.55px;margin-bottom:6px}.update-detail code{font-size:9px;color:var(--soft);overflow-wrap:anywhere}
+.update-actions{margin-top:14px;flex-wrap:wrap}
+@media(max-width:1050px){.update-metrics{grid-template-columns:1fr 1fr}}

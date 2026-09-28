@@ -118,6 +118,23 @@ function registerIpc() {
   ipcMain.handle('gateway:activity', () => backend.activity());
   ipcMain.handle('gateway:platform', () => backend.platformInfo());
   ipcMain.handle('gateway:openLogs', async () => shell.openPath(await backend.logsPath()));
+  ipcMain.handle('gateway:updateInfo', (_e, force) => backend.updateInfo(!!force));
+  ipcMain.handle('gateway:installUpdate', async () => {
+    const result = await backend.downloadUpdate();
+    if (result.alreadyCurrent || !result.path) return { ...result, opened: false };
+    const openError = await shell.openPath(result.path);
+    if (openError) {
+      shell.showItemInFolder(result.path);
+      return { ...result, opened: false, openError };
+    }
+    return { ...result, opened: true };
+  });
+  ipcMain.handle('gateway:openRelease', async () => {
+    let url = 'https://github.com/GOD13emad/OpenInternetGateway/releases/latest';
+    try { url = (await backend.updateInfo(false)).releaseUrl || url; } catch {}
+    await shell.openExternal(url);
+    return { ok: true, url };
+  });
   ipcMain.handle('gateway:setTheme', (_e, theme) => {
     nativeTheme.themeSource = ['light', 'dark', 'system'].includes(theme) ? theme : 'system';
     return { ok: true, theme: nativeTheme.themeSource };

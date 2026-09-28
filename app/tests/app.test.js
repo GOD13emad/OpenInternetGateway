@@ -245,6 +245,30 @@ test('fast Test all probes relays in parallel and table sorting is explicit',()=
   for(const key of ['country','relay','protocol','sourcePing','livePing','download','upload','status']) assert.match(html,new RegExp('data-sort="'+key+'"'));
 });
 
+test('GitHub updater checks latest release and verifies published SHA-256',()=>{
+  const backend=fs.readFileSync(path.join(root,'src/main/platform-backend.js'),'utf8');
+  const main=fs.readFileSync(path.join(root,'src/main/main.js'),'utf8');
+  const preload=fs.readFileSync(path.join(root,'src/preload/preload.js'),'utf8');
+  const renderer=fs.readFileSync(path.join(root,'src/renderer/app.js'),'utf8');
+  const html=fs.readFileSync(path.join(root,'src/renderer/index.html'),'utf8');
+  assert.match(backend,/releases\/latest/);
+  assert.match(backend,/SHA256SUMS/);
+  assert.match(backend,/GitHub digest and SHA256SUMS disagree/);
+  assert.match(backend,/Downloaded update SHA-256 does not match/);
+  assert.match(backend,/async updateInfo\(force = false\)/);
+  assert.match(backend,/async downloadUpdate\(\)/);
+  assert.match(main,/gateway:updateInfo/);
+  assert.match(main,/gateway:installUpdate/);
+  assert.match(main,/shell\.openPath\(result\.path\)/);
+  assert.match(preload,/updateInfo/);
+  assert.match(preload,/installUpdate/);
+  assert.match(renderer,/renderUpdateInfo/);
+  assert.match(renderer,/loadUpdates/);
+  assert.match(html,/data-page="updates"/);
+  assert.match(html,/GITHUB RELEASES/);
+  assert.match(html,/Download verified update/);
+});
+
 test('Linux Debian package path is sandbox-safe',()=>{
   const afterPack=fs.readFileSync(path.join(root,'tools/afterPack.js'),'utf8');
   const afterInstall=fs.readFileSync(path.join(root,'build/linux-after-install.sh'),'utf8');

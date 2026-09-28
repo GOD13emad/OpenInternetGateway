@@ -1,5 +1,5 @@
 const $ = (id) => document.getElementById(id);
-const state = { status: null, busy: false, platform: null, page: 'overview', profiles: [], countries: [], countryFilter: '', sortKey: 'rank', sortDir: 'asc' };
+const state = { status: null, busy: false, platform: null, page: 'overview', profiles: [], countries: [], countryFilter: '', sortKey: 'rank', sortDir: 'asc', updateInfo: null };
 
 function setText(id, value) { const el = $(id); if (el) el.textContent = value ?? '—'; }
 function safeArray(v) { return Array.isArray(v) ? v : v ? [v] : []; }
@@ -16,7 +16,7 @@ function setBusy(on, action = '') {
   state.busy = on;
   $('busyOverlay').classList.toggle('show', on);
   if (on) {
-    const names = { connect:'Connecting', disconnect:'Disconnecting', refresh:'Refreshing config pool', ensure:'Repairing connection', 'connect-profile':'Switching relay', 'benchmark-active':'Measuring real tunnel speed', 'benchmark-all-fast':'Testing all relays in parallel', 'factory-refresh':'Refreshing config pool', 'auto-install':'Installing recovery', 'auto-remove':'Removing recovery', 'console-enable':'Enabling console gateway', 'console-disable':'Disabling console gateway', 'console-status':'Checking console gateway' };
+    const names = { connect:'Connecting', disconnect:'Disconnecting', refresh:'Refreshing config pool', ensure:'Repairing connection', 'connect-profile':'Switching relay', 'benchmark-active':'Measuring real tunnel speed', 'benchmark-all-fast':'Testing all relays in parallel', 'update-check':'Checking GitHub release', 'update-download':'Downloading verified update', 'factory-refresh':'Refreshing config pool', 'auto-install':'Installing recovery', 'auto-remove':'Removing recovery', 'console-enable':'Enabling console gateway', 'console-disable':'Disabling console gateway', 'console-status':'Checking console gateway' };
     setText('busyTitle', names[action] || 'Working…');
   }
 }
@@ -330,6 +330,71 @@ async function loadActivity() {
   } catch (e) { box.innerHTML = '<div class="empty">Unable to read activity.</div>'; }
 }
 
+function formatDate(value) {
+  if (!value) return '—';
+  const d = new Date(value);
+  return Number.isNaN(d.getTime()) ? '—' : d.toLocaleString();
+}
+
+function renderUpdateInfo(info) {
+  state.updateInfo = info || null;
+  const nav = document.querySelector('[data-page="updates"]');
+  const pill = $('updateState');
+  const button = $('installUpdate');
+  const available = !!info?.updateAvailable;
+  nav?.classList.toggle('has-update', available);
+  setText('updateCurrent', info?.currentVersion || state.platform?.version || '—');
+  setText('updateLatest', info?.latestVersion || '—');
+  setText('updatePublished', formatDate(info?.publishedAt));
+  setText('updateAsset', info?.asset?.name || 'No compatible asset');
+  setText('updateChecksum', info?.asset?.sha256 || '—');
+  if (pill) {
+    pill.className = 'update-pill ' + (available ? 'ready' : (info?.upToDate ? 'current' : ''));
+    pill.textContent = available ? 'Update available' : (info?.currentAhead ? 'Development build' : (info?.upToDate ? 'Up to date' : 'Checked'));
+  }
+  if (button) {
+    button.disabled = !available || !info?.asset;
+    button.textContent = available ? ('Download v' + info.latestVersion) : 'No update needed';
+  }
+}
+
+async function loadUpdates(force = false) {
+  const pill = $('updateState');
+  if (pill) { pill.className = 'update-pill'; pill.textContent = 'Checking…'; }
+  try {
+    const info = await window.gateway.updateInfo(force);
+    renderUpdateInfo(info);
+    return info;
+  } catch (e) {
+    if (pill) { pill.className = 'update-pill error'; pill.textContent = 'Check failed'; }
+    showToast(e.message || 'Unable to check GitHub releases.', true);
+    return null;
+  }
+}
+
+async function installUpdate() {
+  if (state.busy) return;
+  setBusy(true, 'update-download');
+  try {
+    const result = await window.gateway.installUpdate();
+    if (result?.alreadyCurrent) {
+      renderUpdateInfo(result.info);
+      showToast('This installation already matches the latest GitHub release.');
+      return;
+    }
+    if (result?.opened) {
+      showToast('Verified update downloaded. Installer/package manager opened.');
+    } else if (result?.path) {
+      showToast('Verified update downloaded. Open it from the shown folder.');
+    }
+    if (result?.info) renderUpdateInfo(result.info);
+  } catch (e) {
+    showToast(e.message || 'Update download failed.', true);
+  } finally {
+    setBusy(false);
+  }
+}
+
 function escapeHtml(s='') { return s.replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[c])); }
 
 function setPage(name) {
@@ -341,12 +406,14 @@ function setPage(name) {
     connections:['Connections','Choose countries and relays, then measure real tunnel performance.'],
     diagnostics:['Diagnostics','Verify egress, DNS integrity and recovery readiness.'],
     activity:['Activity','Evidence from connection and recovery events.'],
+    updates:['Updates','Check and download verified releases directly from GitHub.'],
     settings:['Settings','Appearance, recovery and runtime information.']
   }[name];
   setText('pageTitle', meta[0]); setText('pageSubtitle', meta[1]);
   if (name === 'connections') loadConnections();
   if (name === 'diagnostics') loadDiagnostics();
   if (name === 'activity') loadActivity();
+  if (name === 'updates') loadUpdates(false);
 }
 
 async function init() {
@@ -378,6 +445,9 @@ async function init() {
   $('installRecovery').addEventListener('click', () => runAction('auto-install', 'Auto-Recovery installed.'));
   $('removeRecovery').addEventListener('click', () => runAction('auto-remove', 'Auto-Recovery removed.'));
   $('openLogs').addEventListener('click', () => window.gateway.openLogs());
+  $('checkUpdates').addEventListener('click', () => loadUpdates(true));
+  $('installUpdate').addEventListener('click', installUpdate);
+  $('openRelease').addEventListener('click', () => window.gateway.openRelease());
 
   document.querySelectorAll('[data-theme-value]').forEach(b => b.addEventListener('click', async () => {
     const theme = b.dataset.themeValue;
@@ -404,6 +474,7 @@ async function init() {
   state.platform = await window.gateway.platform();
   setText('platformBadge', (state.platform.platform === 'win32' ? 'Windows' : 'Linux') + ' · ' + state.platform.arch);
   setText('appVersion', 'v' + (state.platform.version || '—') + ' · Stable Headless');
+  setText('updateCurrent', state.platform.version || '—');
   $('systemInfo').innerHTML = [
     ['Version', state.platform.version],
     ['Platform', state.platform.platform],
@@ -413,6 +484,7 @@ async function init() {
   ].map(([k,v]) => '<div class="sys-row"><small>'+escapeHtml(k)+'</small><b>'+escapeHtml(String(v || '—'))+'</b></div>').join('');
 
   await refreshStatus(false);
+  window.gateway.updateInfo(false).then(renderUpdateInfo).catch(() => {});
   setInterval(() => { if (!state.busy && document.visibilityState === 'visible') refreshStatus(true); }, 10000);
 }
 
