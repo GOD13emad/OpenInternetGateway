@@ -111,6 +111,17 @@ test('version is runtime-derived and quit disconnects the managed tunnel',()=>{
   assert.match(linux,/DESIRED OFF/);
 });
 
+test('Windows upgrade shutdown preserves tunnel intent while explicit Quit disconnects',()=>{
+  const main=fs.readFileSync(path.join(root,'src/main/main.js'),'utf8');
+  assert.match(main,/function requestProcessExitPreservingTunnel/);
+  assert.match(main,/process\.platform === 'win32'\) requestProcessExitPreservingTunnel/);
+  assert.match(main,/else requestQuit\(\)/);
+  assert.match(main,/click: \(\) => requestQuit\(\)/);
+  assert.match(main,/await disconnectBeforeQuit\(\)/);
+  const preserve=main.slice(main.indexOf('function requestProcessExitPreservingTunnel'),main.indexOf('if (gotSingleInstanceLock)'));
+  assert.doesNotMatch(preserve,/backend\.action\('disconnect'\)/);
+});
+
 test('shutdown event emission tolerates destroyed renderer',()=>{
   const main=fs.readFileSync(path.join(root,'src/main/main.js'),'utf8');
   assert.match(main,/!mainWindow\.isDestroyed\(\)/);

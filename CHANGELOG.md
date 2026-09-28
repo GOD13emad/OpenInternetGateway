@@ -2,6 +2,7 @@
 
 ## 2.5.0
 
+- Windows upgrade/process shutdown is now distinguished from explicit user Quit: installer-driven dashboard replacement preserves the desired tunnel state, while tray/desktop explicit Quit still disconnects before exit.
 - Added **Direct Internet / ISP Baseline** on the Connections page: real ping, download, upload, direct public IP and country measured from the physical Internet adapter rather than the active OIG VPN route.
 - Direct measurements explicitly bypass HTTP/SOCKS proxy settings and bind the physical path: Windows uses the physical adapter IPv4 address; Linux binds the physical interface.
 - Added observable bypass proof by comparing normal routed egress with direct physical-adapter egress. On the validated Windows machine, OIG VPN remained TH / 27.130.95.200 while Direct Internet measured IR / 164.215.159.13.

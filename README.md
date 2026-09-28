@@ -44,6 +44,7 @@ OIG does **not** use the OpenVPN Connect desktop UI as its runtime.
 - Your normal OpenVPN Connect application remains independent for manual use.
 - Closing the OIG dashboard hides it to the OIG tray and keeps the application/tunnel alive.
 - Explicit Quit disconnects the OIG-managed tunnel before the application exits.
+- Installer/OS replacement of the Windows dashboard is not treated as explicit Quit: it preserves the persisted connection intent and independent headless tunnel so upgrades do not silently turn protection off.
 - OIG can start at login with `--background`.
 - Auto-Recovery runs through one elevated scheduled task and a headless backend.
 

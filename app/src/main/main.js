@@ -197,6 +197,17 @@ async function requestQuit() {
   }
 }
 
+function requestProcessExitPreservingTunnel() {
+  if (allowQuit) return;
+  // Windows installers and OS lifecycle events may terminate the dashboard
+  // during an upgrade. That is not the user's explicit Quit command and must
+  // not rewrite desired-state=off or tear down the independent headless tunnel.
+  app.isQuitting = true;
+  if (trayPoll) clearInterval(trayPoll);
+  allowQuit = true;
+  app.quit();
+}
+
 if (gotSingleInstanceLock) {
 app.on('second-instance', (_event, argv, _workingDirectory, additionalData) => {
     const intent = additionalData?.intent || (argv.includes('--quit') ? 'quit' : 'show');
@@ -243,8 +254,14 @@ app.on('second-instance', (_event, argv, _workingDirectory, additionalData) => {
   // closed/destroyed. Explicit Quit remains the only app-termination path.
   app.on('window-all-closed', () => {});
   
-  process.on('SIGTERM', () => requestQuit());
-  process.on('SIGINT', () => requestQuit());
+  process.on('SIGTERM', () => {
+    if (process.platform === 'win32') requestProcessExitPreservingTunnel();
+    else requestQuit();
+  });
+  process.on('SIGINT', () => {
+    if (process.platform === 'win32') requestProcessExitPreservingTunnel();
+    else requestQuit();
+  });
   
   app.on('before-quit', (event) => {
     if (allowQuit) {
@@ -252,7 +269,8 @@ app.on('second-instance', (_event, argv, _workingDirectory, additionalData) => {
       return;
     }
     event.preventDefault();
-    requestQuit();
+    if (process.platform === 'win32') requestProcessExitPreservingTunnel();
+    else requestQuit();
   });
   
 }
