@@ -130,6 +130,14 @@ test('Linux close-to-dock and desktop Quit lifecycle are explicit',()=>{
   assert.match(backend,/copyFileSync\(systemDesktop, userDesktop\)/);
 });
 
+test('tray app survives last window destruction until explicit Quit',()=>{
+  const main=fs.readFileSync(path.join(root,'src/main/main.js'),'utf8');
+  assert.match(main,/app\.on\('window-all-closed', \(\) => \{\}\)/);
+  assert.match(main,/mainWindow\.on\('closed'/);
+  assert.match(main,/mainWindow = null/);
+  assert.match(main,/mainWindow && !mainWindow\.isDestroyed\(\)/);
+});
+
 test('Linux independent exit watchdog enforces disconnect safely',()=>{
   const watchdog=fs.readFileSync(path.join(root,'backend/linux/watch-parent.sh'),'utf8');
   assert.match(watchdog,/\/proc\/\$pid\/stat/);

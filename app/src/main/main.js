@@ -65,6 +65,9 @@ function createWindow() {
     // reliably support programmatic minimize, while hiding keeps it live.
     mainWindow.hide();
   });
+  mainWindow.on('closed', () => {
+    mainWindow = null;
+  });
 }
 
 function renderTray(status = lastStatus) {
@@ -215,9 +218,13 @@ app.on('second-instance', (_event, argv, _workingDirectory, additionalData) => {
   });
   
   app.on('activate', () => {
-    if (mainWindow) { mainWindow.show(); mainWindow.focus(); }
+    if (mainWindow && !mainWindow.isDestroyed()) { mainWindow.show(); mainWindow.focus(); }
     else createWindow();
   });
+
+  // Tray-style desktop apps must stay alive when the last BrowserWindow is
+  // closed/destroyed. Explicit Quit remains the only app-termination path.
+  app.on('window-all-closed', () => {});
   
   process.on('SIGTERM', () => requestQuit());
   process.on('SIGINT', () => requestQuit());
