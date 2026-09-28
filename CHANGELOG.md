@@ -1,5 +1,13 @@
 # Changelog
 
+## 2.5.1
+
+- Fixed Connections live-state desynchronization after Auto-Recovery or independent headless relay changes.
+- Backend status now exposes the authoritative active profile SHA when connected.
+- The Connections table reconciles its ACTIVE row on every status refresh/event instead of only when the page inventory is first loaded.
+- If the live tunnel profile is no longer present in the refreshed relay pool, OIG shows a synthetic ACTIVE row from current tunnel state rather than displaying “nothing connected”.
+- Preserves all v2.5.0 Direct ISP benchmark, direct-path Test all, verified updater, Windows upgrade intent-preservation and headless recovery behavior.
+
 ## 2.5.0
 
 - Fixed Connections/backend desynchronization after Auto-Recovery or external headless relay changes: live status now carries the active profile SHA, the relay table re-marks ACTIVE on every status refresh, and a synthetic ACTIVE row is shown if the live tunnel profile is no longer present in the current pool.
