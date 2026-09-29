@@ -296,7 +296,7 @@ test('failed exact relay attempt preserves preferred metadata and clears stale r
   backend.backendRoot=tmp;
   backend.profiles=async()=>({profiles:[{...previous,active:true,quarantined:false},target]});
   backend._windows=async()=>{throw new Error('SIMULATED_EXACT_FAIL')};
-  await assert.rejects(backend.connectProfile(target.sha256),/Previous relay could not be restored automatically/);
+  await assert.rejects(backend.connectProfile(target.sha256),/previous working relay could not be restored automatically/i);
   const after=JSON.parse(fs.readFileSync(path.join(stateDir,'preferred-profile.json'),'utf8'));
   assert.equal(after.sha256,previous.sha256);
   assert.equal(fs.existsSync(path.join(stateDir,'exact-profile.request')),false);
@@ -601,7 +601,11 @@ test('disconnected exact relay failure restores saved preferred relay',async()=>
     fs.writeFileSync(path.join(stateDir,'current-openvpn-profile.json'),JSON.stringify({sha256:previous.sha256}));
     return {ok:true};
   };
-  await assert.rejects(backend.connectProfile(target.sha256),/Previous working relay was restored/);
+  const result=await backend.connectProfile(target.sha256);
+  assert.equal(result.ok,false);
+  assert.equal(result.recovered,true);
+  assert.equal(result.code,'SELECTED_RELAY_FAILED_RESTORED');
+  assert.match(result.message,/Previous working relay was restored/);
   assert.deepEqual(calls,[target.sha256,previous.sha256]);
   const preferred=JSON.parse(fs.readFileSync(path.join(stateDir,'preferred-profile.json'),'utf8'));
   assert.equal(preferred.sha256,previous.sha256);
@@ -623,4 +627,27 @@ test('renderer terminal backend events close only the matching busy overlay',()=
   assert.match(renderer,/payload\.type === 'status'[\s\S]*payload\.busy === false && state\.busyAction === payload\.action[\s\S]*setBusy\(false\)/);
   assert.match(renderer,/payload\.type === 'error'[\s\S]*payload\.busy === false && state\.busyAction === payload\.action[\s\S]*setBusy\(false\)/);
   assert.match(renderer,/payload\.type === 'busy'[\s\S]*payload\.busy \|\| !state\.busyAction \|\| state\.busyAction === payload\.action/);
+});
+
+
+test('recovered relay failure is a structured non-error outcome and Speed does not benchmark fallback',()=>{
+  const backend=fs.readFileSync(path.join(root,'src/main/platform-backend.js'),'utf8');
+  const renderer=fs.readFileSync(path.join(root,'src/renderer/app.js'),'utf8');
+  assert.match(backend,/recovered:\s*true/);
+  assert.match(backend,/SELECTED_RELAY_FAILED_RESTORED/);
+  assert.match(backend,/if \(restored\) return recoveredResult/);
+  assert.match(renderer,/if \(connected\?\.recovered\)[\s\S]*showToast\(connected\.message[\s\S]*await loadConnections\(\);[\s\S]*return;/);
+  const connectBlock=renderer.slice(renderer.indexOf('async function connectOrTestProfile'),renderer.indexOf('async function benchmarkCurrent'));
+  const recoveredPos=connectBlock.indexOf('if (connected?.recovered)');
+  const benchmarkPos=connectBlock.indexOf("window.gateway.action('benchmark-active')");
+  assert.ok(recoveredPos >= 0 && benchmarkPos > recoveredPos);
+});
+
+test('renderer strips Electron IPC and PowerShell framing from user-facing errors',()=>{
+  const renderer=fs.readFileSync(path.join(root,'src/renderer/app.js'),'utf8');
+  assert.match(renderer,/function userErrorMessage\(error, fallback/);
+  assert.match(renderer,/Error invoking remote method/);
+  assert.match(renderer,/CategoryInfo\|FullyQualifiedErrorId/);
+  assert.match(renderer,/showToast\(userErrorMessage\(e, 'Relay operation failed\.'\), true\)/);
+  assert.match(renderer,/showToast\(userErrorMessage\(payload\.message, 'Action failed\.'\), true\)/);
 });

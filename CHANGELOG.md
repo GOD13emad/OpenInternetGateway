@@ -181,3 +181,8 @@
 - Added regression coverage ensuring Windows explicit Quit is not gated by status.connected and Windows degraded-status semantics match the established Linux pattern.
 - Fixed the renderer busy-overlay completion race: delayed terminal backend events now close only the matching action overlay and cannot clear a newer operation.
 
+
+## 2.5.9 - 2026-09-29
+- Treat a failed selected relay with successful rollback as a recovered outcome instead of an IPC exception.
+- Prevent Speed from benchmarking the restored fallback when the requested relay failed.
+- Strip Electron IPC / PowerShell framing from user-facing relay errors while retaining backend evidence logs.

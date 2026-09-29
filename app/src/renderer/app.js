@@ -12,6 +12,21 @@ function showToast(message, error = false) {
   showToast.timer = setTimeout(() => toast.className = 'toast', 3600);
 }
 
+function userErrorMessage(error, fallback = 'Action failed.') {
+  let raw = String(error?.message || error || '').replace(/\x1B\[[0-?]*[ -\/]*[@-~]/g, '').trim();
+  if (!raw) return fallback;
+  raw = raw.replace(/^Error invoking remote method '[^']+':\s*/i, '').replace(/^Error:\s*/i, '').replace(/^Exception:\s*/i, '');
+  const lines = raw.split(/\r?\n/).map(line => line.trim()).filter(Boolean);
+  const cleaned = lines.map(line => line.replace(/^\|\s*/, '')).filter(line =>
+    !/^[~^+]+$/.test(line) &&
+    !/^at <ScriptBlock>/i.test(line) &&
+    !/^[A-Z]:\\.*\.ps1:\s*line\s+\d+/i.test(line) &&
+    !/^\+\s*(CategoryInfo|FullyQualifiedErrorId)/i.test(line)
+  );
+  const semantic = cleaned.find(line => /^(Selected relay|Selected profile|Profile |Previous relay|No physical|Direct ISP|Real download|Real upload|Connect a relay|The active relay|Unable|Could not)/i.test(line));
+  return semantic || cleaned[0] || fallback;
+}
+
 function setBusy(on, action = '', detail = '') {
   state.busy = on;
   state.busyAction = on ? action : '';
@@ -358,6 +373,11 @@ async function connectOrTestProfile(sha256, testAfter = false) {
     if (!selected?.active) {
       const connected = await window.gateway.action('connect-profile', { sha256 });
       if (connected?.status) renderStatus(connected.status);
+      if (connected?.recovered) {
+        showToast(connected.message || 'Selected relay failed validation. Previous working relay was restored.');
+        await loadConnections();
+        return;
+      }
     }
     if (testAfter) {
       setBusy(true, 'benchmark-active');
@@ -370,7 +390,7 @@ async function connectOrTestProfile(sha256, testAfter = false) {
     }
     await loadConnections();
   } catch (e) {
-    showToast(e.message || 'Relay operation failed.', true);
+    showToast(userErrorMessage(e, 'Relay operation failed.'), true);
   } finally {
     setBusy(false);
   }
@@ -583,7 +603,7 @@ async function init() {
     }
     if (payload.type === 'error') {
       if (payload.busy === false && state.busyAction === payload.action) setBusy(false);
-      showToast(payload.message, true);
+      showToast(userErrorMessage(payload.message, 'Action failed.'), true);
     }
   });
 

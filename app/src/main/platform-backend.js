@@ -361,15 +361,25 @@ class Backend {
         return false;
       }
     };
+    const recoveredResult = async (code, message) => ({
+      ok: false,
+      recovered: true,
+      code,
+      profile,
+      message,
+      status: await this.status()
+    });
 
     try {
       await requestExact(wanted, profile.country, profile.host || profile.ip);
-    } catch (error) {
+    } catch {
       try { fs.unlinkSync(request); } catch {}
       const restored = await restorePrevious();
-      throw new Error((error?.message || 'Selected relay failed.') + (restored
-        ? ' Previous working relay was restored.'
-        : ' Previous relay could not be restored automatically.'));
+      if (restored) return recoveredResult(
+        'SELECTED_RELAY_FAILED_RESTORED',
+        'Selected relay failed validation. Previous working relay was restored.'
+      );
+      throw new Error('Selected relay failed validation, and the previous working relay could not be restored automatically. Choose another validated relay or run Repair now.');
     }
 
     this.emit({
@@ -383,15 +393,19 @@ class Backend {
     const actualSha = String(current.sha256 || '').toLowerCase();
     if (!status.connected || !actualSha || actualSha !== wanted) {
       const restored = await restorePrevious();
-      throw new Error('Selected relay was not the tunnel that became active.' + (restored
-        ? ' Previous working relay was restored.'
-        : ' The connection was stopped rather than accepting a fallback relay.'));
+      if (restored) return recoveredResult(
+        'SELECTED_RELAY_NOT_ACTIVE_RESTORED',
+        'Selected relay did not become active. Previous working relay was restored.'
+      );
+      throw new Error('Selected relay did not become active. No fallback relay was accepted; choose another validated relay or run Repair now.');
     }
     if (profile.country && status.country && profile.country !== status.country) {
       const restored = await restorePrevious();
-      throw new Error('Selected relay exit country did not match its advertised country.' + (restored
-        ? ' Previous working relay was restored.'
-        : ' No fallback relay was accepted.'));
+      if (restored) return recoveredResult(
+        'SELECTED_RELAY_COUNTRY_MISMATCH_RESTORED',
+        'Selected relay exit country did not match its advertised country. Previous working relay was restored.'
+      );
+      throw new Error('Selected relay exit country did not match its advertised country. No fallback relay was accepted; choose another validated relay.');
     }
     savePreferred();
     return { ok: true, profile, status };
