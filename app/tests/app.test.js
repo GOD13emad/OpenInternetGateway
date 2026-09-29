@@ -679,3 +679,17 @@ test('active throughput benchmark reuses its validated status for inventory mapp
   assert.match(block,/const status = await this\.status\(\)/);
   assert.match(block,/const inventory = await this\.profiles\(status\)/);
 });
+
+
+test('active throughput upload tolerates one transient Cloudflare POST failure without accepting an unverified result',()=>{
+  const backend=fs.readFileSync(path.join(root,'src/main/platform-backend.js'),'utf8');
+  const start=backend.indexOf('async benchmarkActive()');
+  const block=backend.slice(start,backend.indexOf('_githubHeaders()',start));
+  assert.match(block,/let uploadAttempts = 0/);
+  assert.match(block,/for \(let attempt = 0; attempt < 2; attempt\+\+\)/);
+  assert.match(block,/--connect-timeout','8','--max-time','20'/);
+  assert.match(block,/timeout: 24000, allowFailure: true/);
+  assert.match(block,/code === '200' && Number\(speed\) > 0/);
+  assert.match(block,/after a bounded retry/);
+  assert.match(block,/uploadAttempts,/);
+});

@@ -714,16 +714,23 @@ class Backend {
     fs.mkdirSync(path.dirname(tempUpload), { recursive: true });
     fs.writeFileSync(tempUpload, Buffer.alloc(upBytes));
     let up;
+    let uploadAttempts = 0;
     try {
-      up = await run('curl', [
-        '-4','--noproxy','*','-L','--max-time','12','-sS','-o',sink,'-w','%{http_code}|%{time_total}|%{speed_upload}',
+      const uploadArgs = [
+        '-4','--noproxy','*','-L','--connect-timeout','8','--max-time','20','-sS','-o',sink,'-w','%{http_code}|%{time_total}|%{speed_upload}',
         '-X','POST','--data-binary','@' + tempUpload,'https://speed.cloudflare.com/__up'
-      ], { timeout: 15000, allowFailure: true });
+      ];
+      for (let attempt = 0; attempt < 2; attempt++) {
+        uploadAttempts++;
+        up = await run('curl', uploadArgs, { timeout: 24000, allowFailure: true });
+        const [code,,speed] = String(up.stdout || '').trim().split('|');
+        if (code === '200' && Number(speed) > 0) break;
+      }
     } finally {
       try { fs.unlinkSync(tempUpload); } catch {}
     }
-    const [upCode, upTime, upSpeed] = String(up.stdout || '').trim().split('|');
-    if (upCode !== '200' || !(Number(upSpeed) > 0)) throw new Error('Real upload test did not complete successfully.');
+    const [upCode, upTime, upSpeed] = String(up?.stdout || '').trim().split('|');
+    if (upCode !== '200' || !(Number(upSpeed) > 0)) throw new Error('Real upload test did not complete successfully after a bounded retry.');
 
     const previous = active.benchmark || {};
     const result = {
@@ -740,6 +747,7 @@ class Backend {
       uploadMbps: Math.round(Number(upSpeed) * 8 / 1_000_000 * 100) / 100,
       downloadBytes: downBytes,
       uploadBytes: upBytes,
+      uploadAttempts,
       downloadSeconds: Number(downTime) || null,
       uploadSeconds: Number(upTime) || null,
       endpoint: 'speed.cloudflare.com'

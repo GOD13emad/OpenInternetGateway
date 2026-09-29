@@ -197,3 +197,9 @@
 - Treat a failed selected relay with successful rollback as a recovered outcome instead of an IPC exception.
 - Prevent Speed from benchmarking the restored fallback when the requested relay failed.
 - Strip Electron IPC / PowerShell framing from user-facing relay errors while retaining backend evidence logs.
+
+## 2.5.12
+
+- Hardened real tunnel Speed upload measurement against one transient Cloudflare upload failure: the same verified 512 kB POST is retried once with a bounded 8 s connect timeout / 20 s total timeout before declaring failure.
+- Keeps fail-closed throughput semantics: a Speed result is accepted only after HTTP 200 and a positive measured upload rate; failed or partial attempts are not promoted as a benchmark.
+- Records `uploadAttempts` in successful tunnel benchmark evidence and adds regression coverage for the bounded retry contract.
