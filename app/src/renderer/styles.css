@@ -11,7 +11,7 @@ html[data-theme="light"]{
 }
 *{box-sizing:border-box}
 body{margin:0;font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:radial-gradient(circle at 70% -10%,rgba(40,116,177,.20),transparent 35%),var(--bg);color:var(--text);height:100vh;overflow:hidden}
-button{font:inherit}
+button,input,select,textarea{font:inherit}
 .app-shell{height:100vh;display:grid;grid-template-columns:240px 1fr}
 .sidebar{padding:26px 18px 20px;border-right:1px solid var(--line);background:linear-gradient(180deg,rgba(6,15,27,.86),rgba(8,19,33,.68));display:flex;flex-direction:column;backdrop-filter:blur(18px)}
 html[data-theme="light"] .sidebar{background:rgba(255,255,255,.74)}
@@ -75,7 +75,7 @@ html[data-theme="light"] .panel{background:var(--panel)}
 .connection-tools{gap:18px;align-items:flex-end}.connection-tools h3{margin:4px 0 5px}.panel-note,.measurement-note{margin:0;color:var(--muted);font-size:10px;line-height:1.5}
 .panel-note{max-width:650px}.measurement-note{margin-top:12px}
 .connection-controls{display:flex;gap:8px;align-items:center;flex-wrap:wrap;justify-content:flex-end}
-.select-control{border:1px solid var(--line);background:var(--panel-strong);color:var(--text);border-radius:11px;padding:8px 11px;font:11px inherit;min-width:145px}
+.select-control{border:1px solid var(--line);background:var(--panel-strong);color:var(--text);border-radius:11px;padding:8px 11px;font-size:11px;min-width:145px}
 .benchmark-summary{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin:18px 0}
 .benchmark-summary span{border:1px solid var(--line);border-radius:12px;padding:11px 13px;background:rgba(255,255,255,.025)}
 .benchmark-summary small,.benchmark-summary b{display:block}.benchmark-summary small{color:var(--muted);font-size:9px;text-transform:uppercase;letter-spacing:.55px}.benchmark-summary b{font-size:13px;margin-top:5px}

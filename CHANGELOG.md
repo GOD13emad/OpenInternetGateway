@@ -7,6 +7,7 @@
 - Fixed Linux exact-relay failure semantics so a failed foreground relay choice no longer sets global `desired=off`; Auto-Recovery can deterministically restore the previous preferred relay.
 - Live Linux regression: forced trace failure remained Connected with `healthProbeDegraded=true`; forced nonexistent exact SHA failed with rc=21 while `desired=on`, and Ensure restored the preferred FI tunnel with two protected routes and clean DNS.
 - Preserves v2.5.5 foreground-operation serialization/watchdog hardening, v2.5.4 startup reconciliation/Live Ping/native typography/direct-ISP binding, and v2.5.3 Windows exact Connect/Speed fixes.
+- Standardized native form-control typography: select/input/textarea/button controls now inherit the same platform `system-ui` stack as the dashboard, fixing Chromium's Arial fallback in the country selector while keeping the compact 11px selector size.
 
 ## 2.5.5
 

@@ -375,6 +375,14 @@ test('Linux direct ISP path rejects tunnel defaults and stale exact request file
   assert.match(connect,/fs\.unlinkSync\(request\)/);
 });
 
+test('native UI typography applies to form controls and select sizing is valid',()=>{
+  const css=fs.readFileSync(path.join(root,'src/renderer/styles.css'),'utf8');
+  assert.match(css,/body\{[^}]*font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif/);
+  assert.match(css,/button,input,select,textarea\{font:inherit\}/);
+  assert.match(css,/\.select-control\{[^}]*font-size:11px/);
+  assert.doesNotMatch(css,/font:11px inherit/);
+});
+
 test('all-relay probe covers the full pool and UI explains missing live replies',()=>{
   const backend=fs.readFileSync(path.join(root,'src/main/platform-backend.js'),'utf8');
   const renderer=fs.readFileSync(path.join(root,'src/renderer/app.js'),'utf8');
