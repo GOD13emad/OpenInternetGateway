@@ -614,3 +614,13 @@ test('backend strips ANSI terminal formatting before surfacing command errors',(
   assert.match(backend,/stdout: stripAnsi\(stdout\)\.trim\(\), stderr: stripAnsi\(stderr\)\.trim\(\)/);
   assert.match(backend,/new Error\(result\.stderr \|\| result\.stdout/);
 });
+
+
+test('renderer terminal backend events close only the matching busy overlay',()=>{
+  const renderer=fs.readFileSync(path.join(root,'src/renderer/app.js'),'utf8');
+  assert.match(renderer,/busyAction:\s*''/);
+  assert.match(renderer,/state\.busyAction = on \? action : ''/);
+  assert.match(renderer,/payload\.type === 'status'[\s\S]*payload\.busy === false && state\.busyAction === payload\.action[\s\S]*setBusy\(false\)/);
+  assert.match(renderer,/payload\.type === 'error'[\s\S]*payload\.busy === false && state\.busyAction === payload\.action[\s\S]*setBusy\(false\)/);
+  assert.match(renderer,/payload\.type === 'busy'[\s\S]*payload\.busy \|\| !state\.busyAction \|\| state\.busyAction === payload\.action/);
+});

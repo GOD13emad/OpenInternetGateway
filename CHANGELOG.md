@@ -179,4 +179,5 @@
 - Fixed explicit Quit so it always performs the idempotent managed disconnect instead of trusting a transient status probe.
 - Hardened Windows tunnel status against transient geo-probe loss by reusing the verified managed profile only when the headless connector is running, both protected routes exist, and no DNS poison is observed; degraded status is surfaced explicitly.
 - Added regression coverage ensuring Windows explicit Quit is not gated by status.connected and Windows degraded-status semantics match the established Linux pattern.
+- Fixed the renderer busy-overlay completion race: delayed terminal backend events now close only the matching action overlay and cannot clear a newer operation.
 

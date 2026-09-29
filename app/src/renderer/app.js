@@ -1,5 +1,5 @@
 const $ = (id) => document.getElementById(id);
-const state = { status: null, busy: false, platform: null, page: 'overview', profiles: [], countries: [], countryFilter: '', sortKey: 'rank', sortDir: 'asc', updateInfo: null, directBenchmark: null };
+const state = { status: null, busy: false, busyAction: '', platform: null, page: 'overview', profiles: [], countries: [], countryFilter: '', sortKey: 'rank', sortDir: 'asc', updateInfo: null, directBenchmark: null };
 
 function setText(id, value) { const el = $(id); if (el) el.textContent = value ?? '—'; }
 function safeArray(v) { return Array.isArray(v) ? v : v ? [v] : []; }
@@ -14,6 +14,7 @@ function showToast(message, error = false) {
 
 function setBusy(on, action = '', detail = '') {
   state.busy = on;
+  state.busyAction = on ? action : '';
   $('busyOverlay').classList.toggle('show', on);
   if (on) {
     const names = { connect:'Connecting', disconnect:'Disconnecting', refresh:'Refreshing config pool', ensure:'Repairing connection', 'connect-profile':'Switching relay', 'benchmark-active':'Measuring real tunnel speed', 'benchmark-all-fast':'Testing all relays from direct Internet', 'benchmark-direct-internet':'Measuring direct ISP speed', 'update-check':'Checking GitHub release', 'update-download':'Downloading verified update', 'factory-refresh':'Refreshing config pool', 'auto-install':'Installing recovery', 'auto-remove':'Removing recovery', 'console-enable':'Enabling console gateway', 'console-disable':'Disabling console gateway', 'console-status':'Checking console gateway' };
@@ -572,10 +573,18 @@ async function init() {
   }));
 
   window.gateway.onBackendEvent(payload => {
-    if (payload.type === 'busy') setBusy(payload.busy, payload.action);
+    if (payload.type === 'busy') {
+      if (payload.busy || !state.busyAction || state.busyAction === payload.action) setBusy(payload.busy, payload.action);
+    }
     if (payload.type === 'progress') setBusy(true, payload.action, payload.message || 'Working…');
-    if (payload.type === 'status' && payload.status) renderStatus(payload.status);
-    if (payload.type === 'error') showToast(payload.message, true);
+    if (payload.type === 'status' && payload.status) {
+      renderStatus(payload.status);
+      if (payload.busy === false && state.busyAction === payload.action) setBusy(false);
+    }
+    if (payload.type === 'error') {
+      if (payload.busy === false && state.busyAction === payload.action) setBusy(false);
+      showToast(payload.message, true);
+    }
   });
 
   const savedTheme = localStorage.getItem('oig-theme') || 'dark';
