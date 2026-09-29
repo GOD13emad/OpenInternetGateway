@@ -196,6 +196,26 @@ test('multi-country config factories retain country metadata and no JP-only gate
   assert.match(platform,/\$loc -ne 'IR'/);
 });
 
+test('Linux status tolerates a transient geo probe failure only for a real managed tunnel',()=>{
+  const linux=fs.readFileSync(path.join(root,'backend/linux/oig-linux.sh'),'utf8');
+  const statusBlock=linux.slice(linux.indexOf('json_status()'),linux.indexOf('\nhealthy()'));
+  assert.match(statusBlock,/managed_active=false/);
+  assert.match(statusBlock,/connection show --active/);
+  assert.match(statusBlock,/\$1==n && \$2=="vpn"/);
+  assert.doesNotMatch(statusBlock,/\$3 ~ \/\^\(tun\|tap\)\//);
+  assert.match(statusBlock,/probe_degraded=false/);
+  assert.match(statusBlock,/\[\[ -z "\$loc" && "\$managed_active" == true && "\$routes" -ge 2/);
+  assert.match(statusBlock,/healthProbeDegraded/);
+  assert.match(statusBlock,/connected=\(r>=2 and managed=="true"/);
+});
+
+test('Linux failed exact relay does not turn desired gateway intent off',()=>{
+  const linux=fs.readFileSync(path.join(root,'backend/linux/oig-linux.sh'),'utf8');
+  const failure=linux.slice(linux.indexOf('rm -f "$KEEP"',linux.indexOf('connect_gateway()')),linux.indexOf('\n}\n\ndisconnect_gateway()',linux.indexOf('connect_gateway()')));
+  assert.match(failure,/Selected relay failed validation/);
+  assert.doesNotMatch(failure,/set_desired off/);
+});
+
 test('Linux foreground actions wait for the operation lock while periodic Ensure yields safely',()=>{
   const linux=fs.readFileSync(path.join(root,'backend/linux/oig-linux.sh'),'utf8');
   const block=linux.slice(linux.indexOf('action="${1:-status}"'),linux.indexOf('case "$action" in'));

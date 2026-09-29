@@ -1,5 +1,13 @@
 # Changelog
 
+## 2.5.6
+
+- Hardened Linux live status against transient geo/trace failures: when the managed `OIG-VPN-LIVE` connection is active, the effective route is on the tunnel, protected routes are present and DNS is clean, a temporary Cloudflare trace timeout no longer makes the UI falsely report Protection off. The last validated profile supplies temporary IP/country fallback and status exposes `healthProbeDegraded`.
+- Kept fail-closed semantics: an explicit trace result of IR, missing managed VPN connection, missing protected route, or DNS poison still reports disconnected/unhealthy.
+- Fixed Linux exact-relay failure semantics so a failed foreground relay choice no longer sets global `desired=off`; Auto-Recovery can deterministically restore the previous preferred relay.
+- Live Linux regression: forced trace failure remained Connected with `healthProbeDegraded=true`; forced nonexistent exact SHA failed with rc=21 while `desired=on`, and Ensure restored the preferred FI tunnel with two protected routes and clean DNS.
+- Preserves v2.5.5 foreground-operation serialization/watchdog hardening, v2.5.4 startup reconciliation/Live Ping/native typography/direct-ISP binding, and v2.5.3 Windows exact Connect/Speed fixes.
+
 ## 2.5.5
 
 - Serialized Linux foreground Connect/Connect-profile/Refresh against the periodic recovery timer: foreground operations now wait up to 90 seconds for the gateway lock instead of falsely succeeding when the timer owns it, while periodic Ensure yields harmlessly when a foreground operation is active.
