@@ -50,6 +50,7 @@ app/evidence-*.json
 app/tools/*
 !app/tools/validate.js
 !app/tools/afterPack.js
+!app/tools/afterAllArtifactBuild.js
 
 # Electron archives and local build helpers
 app/electron-v*.zip

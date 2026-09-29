@@ -210,7 +210,7 @@ test('Linux status tolerates a transient geo probe failure only for a real manag
 });
 
 test('Linux failed exact relay does not turn desired gateway intent off',()=>{
-  const linux=fs.readFileSync(path.join(root,'backend/linux/oig-linux.sh'),'utf8');
+  const linux=fs.readFileSync(path.join(root,'backend/linux/oig-linux.sh'),'utf8').replace(/\r\n/g,'\n');
   const failure=linux.slice(linux.indexOf('rm -f "$KEEP"',linux.indexOf('connect_gateway()')),linux.indexOf('\n}\n\ndisconnect_gateway()',linux.indexOf('connect_gateway()')));
   assert.match(failure,/Selected relay failed validation/);
   assert.doesNotMatch(failure,/set_desired off/);
@@ -540,6 +540,18 @@ test('GitHub workflows use current hosted-runner actions and Node LTS',()=>{
   assert.match(release,/actions\/download-artifact@v8/);
   assert.match(build,/node-version:\s*['"]24['"]/);
   assert.match(release,/node-version:\s*['"]24['"]/);
+});
+
+test('Linux Debian desktop entry is normalized to world-readable mode after packaging',()=>{
+  const pkg=require(path.join(root,'package.json'));
+  const hook=fs.readFileSync(path.join(root,'tools/afterAllArtifactBuild.js'),'utf8');
+  assert.equal(pkg.build.afterAllArtifactBuild,'tools/afterAllArtifactBuild.js');
+  assert.match(hook,/--raw-extract/);
+  assert.match(hook,/fs\.chmodSync\(desktop, 0o644\)/);
+  assert.match(hook,/fs\.chmodSync\(controlDir, 0o755\)/);
+  assert.match(hook,/--root-owner-group/);
+  assert.match(hook,/desktop entry mode is not 0644/);
+  assert.ok(hook.includes('artifactPaths') && hook.includes('.deb$/i.test(file)'));
 });
 
 test('Linux Debian package path is sandbox-safe',()=>{

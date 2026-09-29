@@ -86,7 +86,8 @@
     "afterPack": "tools/afterPack.js",
     "deb": {
       "afterInstall": "build/linux-after-install.sh"
-    }
+    },
+    "afterAllArtifactBuild": "tools/afterAllArtifactBuild.js"
   },
   "homepage": "https://github.com/GOD13emad/OpenInternetGateway",
   "repository": {
