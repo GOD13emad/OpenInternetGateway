@@ -287,6 +287,19 @@ test('selected relay connection is exact rather than fallback',()=>{
   assert.match(backend,/_linux\('connect-profile', \[sha\]\)/);
 });
 
+test('explicit Windows disconnect cancels queued recovery and exact requests before running recovery task',()=>{
+  const disconnect=fs.readFileSync(path.join(root,'backend/windows/scripts/Disconnect-OpenInternet.ps1'),'utf8');
+  assert.match(disconnect,/exact-profile\.request/);
+  assert.match(disconnect,/headless-known-recover\.request/);
+  assert.match(disconnect,/headless-pool-probe\.request/);
+  assert.match(disconnect,/connector-probe\.request/);
+  assert.match(disconnect,/Remove-Item -LiteralPath/);
+  const off=disconnect.indexOf("desired='off'");
+  const cleanup=disconnect.indexOf("exact-profile.request");
+  const runTask=disconnect.indexOf("schtasks.exe /Run");
+  assert.ok(off >= 0 && cleanup > off && runTask > cleanup);
+});
+
 test('disabled Windows Auto-Recovery task is reported unhealthy and self-reenabled by Repair',()=>{
   const ensure=fs.readFileSync(path.join(root,'backend/windows/scripts/Ensure-OpenInternet.ps1'),'utf8');
   const status=fs.readFileSync(path.join(root,'backend/windows/scripts/Status-OpenInternet.ps1'),'utf8');
