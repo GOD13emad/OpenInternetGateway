@@ -173,8 +173,9 @@ function startLinuxExitWatchdog() {
 
 async function disconnectBeforeQuit() {
   if (!backend) return;
-  const status = await backend.status();
-  if (status?.connected) await backend.action('disconnect');
+  // Explicit Quit is an intent change, not a health inference. A transient
+  // geo/status probe must never leave a managed tunnel or desired=on behind.
+  await backend.action('disconnect');
 }
 
 async function requestQuit() {

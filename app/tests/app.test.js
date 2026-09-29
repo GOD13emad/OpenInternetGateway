@@ -130,6 +130,9 @@ test('Windows upgrade shutdown preserves tunnel intent while explicit Quit disco
   assert.match(main,/else requestQuit\(\)/);
   assert.match(main,/click: \(\) => requestQuit\(\)/);
   assert.match(main,/await disconnectBeforeQuit\(\)/);
+  const explicitQuit=main.slice(main.indexOf('async function disconnectBeforeQuit'),main.indexOf('async function requestQuit'));
+  assert.match(explicitQuit,/await backend\.action\('disconnect'\)/);
+  assert.doesNotMatch(explicitQuit,/backend\.status\(\)/);
   const preserve=main.slice(main.indexOf('function requestProcessExitPreservingTunnel'),main.indexOf('if (gotSingleInstanceLock)'));
   assert.doesNotMatch(preserve,/backend\.action\('disconnect'\)/);
 });
@@ -207,6 +210,20 @@ test('Linux status tolerates a transient geo probe failure only for a real manag
   assert.match(statusBlock,/\[\[ -z "\$loc" && "\$managed_active" == true && "\$routes" -ge 2/);
   assert.match(statusBlock,/healthProbeDegraded/);
   assert.match(statusBlock,/connected=\(r>=2 and managed=="true"/);
+});
+
+test('Windows status tolerates a transient geo probe failure only for a real managed tunnel',()=>{
+  const winStatus=fs.readFileSync(path.join(root,'backend/windows/scripts/Status-OpenInternet.ps1'),'utf8');
+  const platform=fs.readFileSync(path.join(root,'src/main/platform-backend.js'),'utf8');
+  const winBlock=platform.slice(platform.indexOf("if (action === 'status')"),platform.indexOf('const mapped = map[action]'));
+  assert.match(winStatus,/\$managedActive=\(\$svc -and \$svc\.Status -eq 'Running'\)/);
+  assert.match(winStatus,/\$probeDegraded=\$false/);
+  assert.match(winStatus,/if\(-not \$loc -and \$managedActive -and \$routes\.Count -ge 2/);
+  assert.match(winStatus,/HealthProbeDegraded=\[bool\]\$probeDegraded/);
+  assert.match(winBlock,/\$managedActive=\(\$svc -and \$svc\.Status -eq 'Running'\)/);
+  assert.match(winBlock,/\$probeDegraded=\$false/);
+  assert.match(winBlock,/healthProbeDegraded=\[bool\]\$probeDegraded/);
+  assert.match(winBlock,/connected=\(\$routes\.Count -ge 2 -and \$managedActive/);
 });
 
 test('Linux failed exact relay does not turn desired gateway intent off',()=>{

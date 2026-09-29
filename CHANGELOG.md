@@ -175,3 +175,8 @@
 - Fixed exact-relay failure recovery when no tunnel is currently active: the desktop backend now restores the saved preferred/LKG relay instead of requiring `previousActive`.
 - Sanitized ANSI terminal escape sequences from backend command stdout/stderr before errors reach the Electron UI.
 - Added regression coverage for disconnected-state preferred-relay restoration and terminal-error sanitization.
+## 2.5.8 - 2026-09-29
+- Fixed explicit Quit so it always performs the idempotent managed disconnect instead of trusting a transient status probe.
+- Hardened Windows tunnel status against transient geo-probe loss by reusing the verified managed profile only when the headless connector is running, both protected routes exist, and no DNS poison is observed; degraded status is surfaced explicitly.
+- Added regression coverage ensuring Windows explicit Quit is not gated by status.connected and Windows degraded-status semantics match the established Linux pattern.
+

@@ -12,16 +12,23 @@ $task=Get-ScheduledTask -TaskName 'OpenInternetGateway-AutoRecovery' -ErrorActio
 $desired='off'
 $desiredFile=Join-Path $Root 'state\desired-state.json'
 if(Test-Path $desiredFile){try{$desired=[string](Get-Content -Raw $desiredFile|ConvertFrom-Json).desired}catch{}}
-$relay='';$protocol='';$engine='OVPNConnectorService'
+$relay='';$protocol='';$engine='OVPNConnectorService';$profileIP='';$profileCountry=''
 $stateFile=Join-Path $Root 'state\current-openvpn-profile.json'
-if(Test-Path $stateFile){try{$s=Get-Content -Raw $stateFile|ConvertFrom-Json;$relay=([string]$s.serverIP)+':'+([string]$s.port);$protocol=[string]$s.protocol;if($s.engine){$engine=[string]$s.engine}}catch{}}
+if(Test-Path $stateFile){try{$s=Get-Content -Raw $stateFile|ConvertFrom-Json;$relay=([string]$s.serverIP)+':'+([string]$s.port);$protocol=[string]$s.protocol;if($s.engine){$engine=[string]$s.engine};$profileIP=[string]$s.observedIP;if(-not $profileIP){$profileIP=[string]$s.serverIP};$profileCountry=[string]$s.country;if(-not $profileCountry){$profileCountry=[string]$s.configuredCountry}}catch{}}
 $svc=Get-Service OVPNConnectorService -ErrorAction SilentlyContinue
+$managedActive=($svc -and $svc.Status -eq 'Running')
+$probeDegraded=$false
+if(-not $loc -and $managedActive -and $routes.Count -ge 2 -and -not $poison -and $profileCountry){
+  $loc=$profileCountry
+  if(-not $ip){$ip=$profileIP}
+  $probeDegraded=$true
+}
 $pool=$null
 try{$pool=& (Join-Path $PSScriptRoot 'Config-Factory.ps1') -Action Status|ConvertFrom-Json}catch{}
 [pscustomobject]@{
- Connected=($routes.Count -ge 2 -and $loc -and $loc -ne 'IR' -and -not $poison -and $svc -and $svc.Status -eq 'Running')
+ Connected=($routes.Count -ge 2 -and $managedActive -and $loc -and $loc -ne 'IR' -and -not $poison)
  IP=$ip;Country=$loc;Dns=($dns -join ',');Poison=$poison;FullRoutes=$routes.Count
- Relay=$relay;Protocol=$protocol;Engine=$engine;DesiredState=$desired
+ Relay=$relay;Protocol=$protocol;Engine=$engine;ManagedTunnelActive=[bool]$managedActive;HealthProbeDegraded=[bool]$probeDegraded;DesiredState=$desired
  AutoRecovery=$(if(-not $task){'NotInstalled'}elseif(-not [bool]$task.Settings.Enabled){'Disabled'}else{'Installed'})
  AutoRecoveryTask=$(if(-not $task){'Missing'}elseif(-not [bool]$task.Settings.Enabled){'Disabled'}else{[string]$task.State})
  ConfigPool=$(if($pool){[int]$pool.pool}else{0})
