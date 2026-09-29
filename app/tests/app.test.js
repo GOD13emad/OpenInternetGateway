@@ -565,9 +565,11 @@ test('Linux Debian desktop entry is normalized to world-readable mode after pack
   assert.equal(pkg.build.afterAllArtifactBuild,'tools/afterAllArtifactBuild.js');
   assert.match(hook,/--raw-extract/);
   assert.match(hook,/fs\.chmodSync\(desktop, 0o644\)/);
+  assert.match(hook,/fs\.chmodSync\(icon, 0o644\)/);
   assert.match(hook,/fs\.chmodSync\(controlDir, 0o755\)/);
   assert.match(hook,/--root-owner-group/);
   assert.match(hook,/desktop entry mode is not 0644/);
+  assert.match(hook,/application icon mode is not 0644/);
   assert.ok(hook.includes('artifactPaths') && hook.includes('.deb$/i.test(file)'));
 });
 

@@ -1,5 +1,10 @@
 # Changelog
 
+## 2.5.11
+
+- Fixed Debian icon permissions: the packaged application icon is now forced to and verified as mode `0644` alongside the desktop entry, preventing root-only icons under restrictive build umasks.
+- Added packaging regression coverage for the Debian icon mode.
+
 ## 2.5.10
 
 - Fixed a Windows Speed TOCTOU race: `benchmarkActive()` now reuses the already validated live status when mapping the active relay instead of running a second independent status probe that could transiently time out and hide the active relay.

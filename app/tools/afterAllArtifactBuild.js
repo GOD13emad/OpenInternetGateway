@@ -22,13 +22,21 @@ function fixDebDesktopMode(debPath) {
     if (!fs.existsSync(controlDir)) throw new Error('Debian control directory missing after raw extract');
     fs.chmodSync(controlDir, 0o755);
     const desktop = path.join(root, 'usr', 'share', 'applications', 'OpenInternetGateway.desktop');
+    const icon = path.join(root, 'usr', 'share', 'icons', 'hicolor', '512x512', 'apps', 'open-internet-gateway.png');
     if (!fs.existsSync(desktop)) throw new Error('Linux desktop entry missing from Debian artifact');
+    if (!fs.existsSync(icon)) throw new Error('Linux application icon missing from Debian artifact');
     fs.chmodSync(desktop, 0o644);
+    fs.chmodSync(icon, 0o644);
     run('dpkg-deb', ['--root-owner-group', '-Zxz', '--build', root, rebuilt]);
     const listing = run('dpkg-deb', ['--contents', rebuilt]);
-    const desktopLine = listing.split(/\r?\n/).find(line => line.includes('./usr/share/applications/OpenInternetGateway.desktop'));
+    const lines = listing.split(/\r?\n/);
+    const desktopLine = lines.find(line => line.includes('./usr/share/applications/OpenInternetGateway.desktop'));
+    const iconLine = lines.find(line => line.includes('./usr/share/icons/hicolor/512x512/apps/open-internet-gateway.png'));
     if (!desktopLine || !desktopLine.startsWith('-rw-r--r--')) {
       throw new Error('Debian desktop entry mode is not 0644 after repack');
+    }
+    if (!iconLine || !iconLine.startsWith('-rw-r--r--')) {
+      throw new Error('Debian application icon mode is not 0644 after repack');
     }
     fs.copyFileSync(rebuilt, debPath);
   } finally {
