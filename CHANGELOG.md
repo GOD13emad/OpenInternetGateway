@@ -170,3 +170,8 @@
 - Added Linux NetworkManager/OpenVPN backend.
 - Added Linux systemd user Auto-Recovery.
 - Added UUID-only NetworkManager lifecycle and connection serialization.
+
+## 2.5.7 - 2026-09-29
+- Fixed exact-relay failure recovery when no tunnel is currently active: the desktop backend now restores the saved preferred/LKG relay instead of requiring `previousActive`.
+- Sanitized ANSI terminal escape sequences from backend command stdout/stderr before errors reach the Electron UI.
+- Added regression coverage for disconnected-state preferred-relay restoration and terminal-error sanitization.

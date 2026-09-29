@@ -5,6 +5,10 @@ const os = require('os');
 const https = require('https');
 const crypto = require('crypto');
 
+function stripAnsi(value) {
+  return String(value || '').replace(/\x1B\[[0-?]*[ -\/]*[@-~]/g, '');
+}
+
 function run(file, args, options = {}) {
   return new Promise((resolve, reject) => {
     const child = spawn(file, args, {
@@ -24,9 +28,9 @@ function run(file, args, options = {}) {
     child.on('error', err => { clearTimeout(timer); reject(err); });
     child.on('close', code => {
       clearTimeout(timer);
-      const result = { code, stdout: stdout.trim(), stderr: stderr.trim() };
+      const result = { code, stdout: stripAnsi(stdout).trim(), stderr: stripAnsi(stderr).trim() };
       if (code === 0 || options.allowFailure) resolve(result);
-      else reject(Object.assign(new Error(stderr || stdout || ('Command failed (' + code + ')')), { result }));
+      else reject(Object.assign(new Error(result.stderr || result.stdout || ('Command failed (' + code + ')')), { result }));
     });
   });
 }
@@ -311,7 +315,8 @@ class Backend {
     if (!profile) throw new Error('Selected profile is no longer in the active config pool.');
     if (profile.quarantined) throw new Error('Selected profile is quarantined after repeated failures.');
     const previousActive = list.profiles.find(p => p.active);
-    const previousSha = String(previousActive?.sha256 || '').toLowerCase();
+    const previousSha = String(previousActive?.sha256 || list.preferredSha || '').toLowerCase();
+    const previousProfile = previousActive || list.profiles.find(p => String(p.sha256 || '').toLowerCase() === previousSha);
     const preferredPath = path.join(this.backendRoot, 'state', 'preferred-profile.json');
     const savePreferred = () => this._writeJson(preferredPath, {
       sha256: wanted, country: profile.country, host: profile.host, at: new Date().toISOString()
@@ -345,7 +350,7 @@ class Backend {
         message: 'Selected relay failed. Restoring the previous working relay…'
       });
       try {
-        await requestExact(previousSha, previousActive?.country || '', previousActive?.host || previousActive?.ip || '');
+        await requestExact(previousSha, previousProfile?.country || '', previousProfile?.host || previousProfile?.ip || '');
         const restored = this._readJson(this._profileStatePath(), {}) || {};
         const restoredSha = String(restored.sha256 || '').toLowerCase();
         return restoredSha === previousSha;

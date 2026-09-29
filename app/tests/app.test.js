@@ -561,3 +561,39 @@ test('Linux Debian package path is sandbox-safe',()=>{
   assert.match(afterInstall,/APPDIR="\/opt\/open-internet-gateway"/);
   assert.doesNotMatch(afterInstall,/\/opt\/Open Internet Gateway/);
 });
+
+test('disconnected exact relay failure restores saved preferred relay',async()=>{
+  const os=require('os');
+  const Backend=require(path.join(root,'src/main/platform-backend.js'));
+  const tmp=fs.mkdtempSync(path.join(os.tmpdir(),'oig-preferred-restore-'));
+  const stateDir=path.join(tmp,'state');
+  fs.mkdirSync(stateDir,{recursive:true});
+  const previous={sha256:'c'.repeat(64),country:'VN',host:'saved-working',ip:'203.0.113.9',active:false,quarantined:false};
+  const target={sha256:'d'.repeat(64),country:'JP',host:'dead-target',ip:'198.51.100.7',active:false,quarantined:false};
+  fs.writeFileSync(path.join(stateDir,'preferred-profile.json'),JSON.stringify(previous));
+  const backend=new Backend({version:'test',resourcesPath:tmp,appPath:tmp,userData:tmp,emit:()=>{}});
+  backend.platform='win32';
+  backend.backendRoot=tmp;
+  backend.profiles=async()=>({profiles:[previous,target],preferredSha:previous.sha256});
+  backend.status=async()=>({connected:true,country:'VN'});
+  const calls=[];
+  backend._windows=async(_action,args)=>{
+    const sha=String(args?.[1]||'');
+    calls.push(sha);
+    if(sha===target.sha256) throw new Error('SIMULATED_EXACT_FAIL');
+    fs.writeFileSync(path.join(stateDir,'current-openvpn-profile.json'),JSON.stringify({sha256:previous.sha256}));
+    return {ok:true};
+  };
+  await assert.rejects(backend.connectProfile(target.sha256),/Previous working relay was restored/);
+  assert.deepEqual(calls,[target.sha256,previous.sha256]);
+  const preferred=JSON.parse(fs.readFileSync(path.join(stateDir,'preferred-profile.json'),'utf8'));
+  assert.equal(preferred.sha256,previous.sha256);
+  fs.rmSync(tmp,{recursive:true,force:true});
+});
+
+test('backend strips ANSI terminal formatting before surfacing command errors',()=>{
+  const backend=fs.readFileSync(path.join(root,'src/main/platform-backend.js'),'utf8');
+  assert.match(backend,/function stripAnsi\(value\)/);
+  assert.match(backend,/stdout: stripAnsi\(stdout\)\.trim\(\), stderr: stripAnsi\(stderr\)\.trim\(\)/);
+  assert.match(backend,/new Error\(result\.stderr \|\| result\.stdout/);
+});
