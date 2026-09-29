@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.5.10
+
+- Fixed a Windows Speed TOCTOU race: `benchmarkActive()` now reuses the already validated live status when mapping the active relay instead of running a second independent status probe that could transiently time out and hide the active relay.
+- Added regression coverage proving a validated status override marks the live profile active without a second probe.
+- Preserves fail-closed behavior: the first live status must still confirm a connected tunnel before throughput measurement begins.
+
 ## 2.5.6
 
 - Hardened Linux live status against transient geo/trace failures: when the managed `OIG-VPN-LIVE` connection is active, the effective route is on the tunnel, protected routes are present and DNS is clean, a temporary Cloudflare trace timeout no longer makes the UI falsely report Protection off. The last validated profile supplies temporary IP/country fallback and status exposes `healthProbeDegraded`.

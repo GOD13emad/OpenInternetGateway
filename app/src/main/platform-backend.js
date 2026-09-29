@@ -245,9 +245,9 @@ class Backend {
       : path.join(this.backendRoot, 'common', 'runtime', 'config-factory');
   }
 
-  async profiles() {
+  async profiles(liveStatusOverride = null) {
     const items = this._readJson(this._profileIndexPath(), []);
-    const liveStatus = await this.status();
+    const liveStatus = liveStatusOverride || await this.status();
     const factory = this._factoryRoot();
     const successes = this._readJson(path.join(factory, 'successes.json'), {}) || {};
     const quarantine = this._readJson(path.join(factory, 'quarantine.json'), {}) || {};
@@ -691,7 +691,7 @@ class Backend {
   async benchmarkActive() {
     const status = await this.status();
     if (!status.connected) throw new Error('Connect a relay before running a real throughput test.');
-    const inventory = await this.profiles();
+    const inventory = await this.profiles(status);
     const active = inventory.profiles.find(p => p.active);
     if (!active) throw new Error('The active relay could not be mapped to the config inventory.');
 

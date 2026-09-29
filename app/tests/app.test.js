@@ -431,7 +431,7 @@ test('connection inventory exposes honest source-vs-live metrics and selectable 
   assert.match(renderer,/connect-profile/);
   assert.match(preload,/gateway:profiles/);
   assert.match(main,/gateway:profiles/);
-  assert.match(backend,/async profiles\(\)/);
+  assert.match(backend,/async profiles\(liveStatusOverride = null\)/);
   assert.match(backend,/connection-benchmarks\.json/);
   assert.match(backend,/preferred-profile\.json/);
   assert.match(backend,/speed\.cloudflare\.com\/__down/);
@@ -465,7 +465,7 @@ test('Connections stays synchronized with externally recovered active tunnel',()
 
 test('connection inventory active state requires live tunnel',()=>{
   const backend=fs.readFileSync(path.join(root,'src/main/platform-backend.js'),'utf8');
-  assert.match(backend,/const liveStatus = await this\.status\(\)/);
+  assert.match(backend,/const liveStatus = liveStatusOverride \|\| await this\.status\(\)/);
   assert.match(backend,/active: !!liveStatus\.connected && !!sha && sha === activeSha/);
 });
 
@@ -650,4 +650,30 @@ test('renderer strips Electron IPC and PowerShell framing from user-facing error
   assert.match(renderer,/CategoryInfo\|FullyQualifiedErrorId/);
   assert.match(renderer,/showToast\(userErrorMessage\(e, 'Relay operation failed\.'\), true\)/);
   assert.match(renderer,/showToast\(userErrorMessage\(payload\.message, 'Action failed\.'\), true\)/);
+});
+
+test('profiles can reuse an already validated live status without a second transient probe',async()=>{
+  const os=require('os');
+  const Backend=require(path.join(root,'src/main/platform-backend.js'));
+  const tmp=fs.mkdtempSync(path.join(os.tmpdir(),'oig-status-reuse-'));
+  fs.mkdirSync(path.join(tmp,'runtime','udp-cache'),{recursive:true});
+  fs.mkdirSync(path.join(tmp,'runtime','config-factory'),{recursive:true});
+  fs.mkdirSync(path.join(tmp,'state'),{recursive:true});
+  const sha='e'.repeat(64);
+  fs.writeFileSync(path.join(tmp,'runtime','udp-cache','index.json'),JSON.stringify([{Rank:1,Host:'relay',IP:'203.0.113.10',Port:443,Protocol:'tcp',Country:'VN',SHA256:sha}]));
+  fs.writeFileSync(path.join(tmp,'state','current-openvpn-profile.json'),JSON.stringify({sha256:sha,host:'relay',serverIP:'203.0.113.10',port:443,protocol:'tcp',configuredCountry:'VN'}));
+  const backend=new Backend({version:'test',resourcesPath:tmp,appPath:tmp,userData:tmp,emit:()=>{}});
+  backend.platform='win32'; backend.backendRoot=tmp;
+  let statusCalls=0; backend.status=async()=>{statusCalls++;return {connected:false};};
+  const inventory=await backend.profiles({connected:true});
+  assert.equal(statusCalls,0); assert.equal(inventory.profiles.length,1); assert.equal(inventory.profiles[0].active,true);
+  fs.rmSync(tmp,{recursive:true,force:true});
+});
+
+test('active throughput benchmark reuses its validated status for inventory mapping',()=>{
+  const backend=fs.readFileSync(path.join(root,'src/main/platform-backend.js'),'utf8');
+  const start=backend.indexOf('async benchmarkActive()');
+  const block=backend.slice(start,backend.indexOf('async diagnostics()',start));
+  assert.match(block,/const status = await this\.status\(\)/);
+  assert.match(block,/const inventory = await this\.profiles\(status\)/);
 });
