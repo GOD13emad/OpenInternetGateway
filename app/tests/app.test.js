@@ -196,9 +196,25 @@ test('multi-country config factories retain country metadata and no JP-only gate
   assert.match(platform,/\$loc -ne 'IR'/);
 });
 
-test('Linux connection watchdog does not inherit operation lock',()=>{
+test('Linux foreground actions wait for the operation lock while periodic Ensure yields safely',()=>{
   const linux=fs.readFileSync(path.join(root,'backend/linux/oig-linux.sh'),'utf8');
-  assert.match(linux,/start_watchdog\(\)[\s\S]*exec 9>&-/);
+  const block=linux.slice(linux.indexOf('action="${1:-status}"'),linux.indexOf('case "$action" in'));
+  assert.match(block,/if \[\[ "\$action" == "ensure" \]\]/);
+  assert.match(block,/flock -n 9/);
+  assert.match(block,/periodic recovery skipped/);
+  assert.match(block,/flock -w 90 9/);
+  assert.match(block,/exit 75/);
+});
+
+test('Linux connection watchdog is fully detached and reaps its sleeper on cancellation',()=>{
+  const linux=fs.readFileSync(path.join(root,'backend/linux/oig-linux.sh'),'utf8');
+  const block=linux.slice(linux.indexOf('start_watchdog()'),linux.indexOf('profile_lines()'));
+  assert.match(block,/exec 9>&-/);
+  assert.match(block,/sleeper=''/);
+  assert.match(block,/trap '[^']*kill "\$sleeper"[^']*wait "\$sleeper"[^']*' TERM INT/);
+  assert.match(block,/sleep 180 &/);
+  assert.match(block,/wait "\$sleeper" \|\| exit 0/);
+  assert.match(block,/<\/dev\/null >\/dev\/null 2>&1 &/);
 });
 
 test('Windows exact relay switch is atomic, bounded and SHA verified',()=>{

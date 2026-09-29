@@ -2,6 +2,8 @@
 
 ## 2.5.5
 
+- Serialized Linux foreground Connect/Connect-profile/Refresh against the periodic recovery timer: foreground operations now wait up to 90 seconds for the gateway lock instead of falsely succeeding when the timer owns it, while periodic Ensure yields harmlessly when a foreground operation is active.
+- Fully detached the Linux 180-second connection watchdog from stdin/stdout/stderr and made cancellation reap its `sleep` child, preventing orphaned watchdog processes from keeping Electron/Node pipes open after a successful `connect-profile`.
 - Hardened Windows Auto-Recovery against an externally disabled Scheduled Task: Repair/Ensure now re-enables the existing user-owned task without a UAC prompt before running recovery.
 - Windows status now reports a disabled recovery task explicitly as `Disabled`, and the UI treats that state as unhealthy instead of presenting it as a healthy installed recovery service.
 - Preserves all v2.5.4 startup reconciliation, exact Connect/Speed serialization, honest Live Ping labels, native system typography, Linux physical-ISP binding, and stale-request cleanup.

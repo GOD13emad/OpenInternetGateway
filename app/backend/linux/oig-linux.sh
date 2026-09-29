@@ -108,11 +108,16 @@ start_watchdog() {
   rm -f "$KEEP"
   (
     exec 9>&-
-    sleep 180
+    sleeper=''
+    trap 'if [[ -n "$sleeper" ]]; then kill "$sleeper" 2>/dev/null || true; wait "$sleeper" 2>/dev/null || true; fi; exit 0' TERM INT
+    sleep 180 &
+    sleeper=$!
+    wait "$sleeper" || exit 0
+    trap - TERM INT
     if [[ ! -f "$KEEP" ]]; then
       delete_named_connections
     fi
-  ) &
+  ) </dev/null >/dev/null 2>&1 &
   echo $! > "$STATE/watchdog.pid"
 }
 
@@ -405,9 +410,16 @@ console_disable() {
 action="${1:-status}"
 if [[ "$action" == "connect" || "$action" == "connect-profile" || "$action" == "refresh" || "$action" == "ensure" || "$action" == "factory-refresh" ]]; then
   exec 9>"$LOCK"
-  if ! flock -n 9; then
-    echo "Another gateway operation is active."
-    exit 0
+  if [[ "$action" == "ensure" ]]; then
+    if ! flock -n 9; then
+      echo "Another gateway operation is active; periodic recovery skipped."
+      exit 0
+    fi
+  else
+    if ! flock -w 90 9; then
+      echo "Another gateway operation did not finish within 90 seconds." >&2
+      exit 75
+    fi
   fi
 fi
 
