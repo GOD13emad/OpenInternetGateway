@@ -52,17 +52,18 @@
           "from": "common",
           "to": "backend/common"
         }
-      ]
+      ],
+      "requestedExecutionLevel": "asInvoker"
     },
     "nsis": {
       "oneClick": true,
       "perMachine": false,
-      "allowElevation": false,
       "packElevateHelper": false,
       "runAfterFinish": true,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
-      "shortcutName": "Open Internet Gateway"
+      "shortcutName": "Open Internet Gateway",
+      "allowElevation": false
     },
     "linux": {
       "target": [

@@ -24,6 +24,7 @@ test('Linux backend implements required actions',()=>{
 test('package includes no-admin Windows installer and Linux update formats',()=>{
   const pkg=JSON.parse(fs.readFileSync(path.join(root,'package.json'),'utf8'));
   assert.equal(pkg.build.win.target[0].target,'nsis');
+  assert.equal(pkg.build.win.requestedExecutionLevel,'asInvoker');
   assert.equal(pkg.build.nsis.oneClick,true);
   assert.equal(pkg.build.nsis.perMachine,false);
   assert.equal(pkg.build.nsis.allowElevation,false);
