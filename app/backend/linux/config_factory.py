@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-import argparse, base64, datetime as dt, fcntl, hashlib, json, os, re, shutil, sys, tempfile, urllib.request
+import argparse, base64, concurrent.futures, datetime as dt, fcntl, hashlib, json, os, re, shutil, subprocess, sys, tempfile, urllib.request
 from pathlib import Path
 
 SEEDS = [
+    "https://www.vpngate.net",
     "http://210.222.246.148:12814",
     "http://150.40.105.19:35399",
     "http://150.40.105.6:11803",
@@ -28,34 +29,86 @@ def write_json(path, value):
     tmp.replace(path)
 
 def fetch(url, timeout=8):
-    req = urllib.request.Request(url, headers={"User-Agent":"OpenInternetGateway/2.2"})
+    # urllib timeouts are per blocking socket operation, not a hard wall-clock
+    # deadline. Prefer curl's bounded connect + total transfer limits so dead
+    # mirrors cannot stall refresh while a working VPN remains active.
+    curl = shutil.which("curl")
+    if curl:
+        proc = subprocess.run([
+            curl,"-4","-L","--fail","--noproxy","*",
+            "--connect-timeout","2","--max-time",str(timeout),"-sS",url
+        ], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+           timeout=timeout+2, check=False)
+        if proc.returncode:
+            raise RuntimeError(f"curl failed ({proc.returncode})")
+        return proc.stdout
+    req = urllib.request.Request(url, headers={"User-Agent":"OpenInternetGateway/2.5"})
     with urllib.request.urlopen(req, timeout=timeout) as r:
         return r.read()
 
-def refresh_snapshot(evidence):
+def refresh_snapshot(evidence, max_sources=3):
     csv_path = evidence / "vpngate-mirror-api.csv"
-    used = None
+    used = []
+    merged = []
+    seen = set()
+
+    def fetch_one(base):
+        try:
+            data = fetch(base + "/api/iphone/", timeout=6)
+            if len(data) <= 100_000:
+                return base, None
+            return base, data
+        except Exception:
+            return base, None
+
     if os.environ.get("OIG_FACTORY_OFFLINE") != "1":
-        for base in SEEDS:
-            try:
-                data = fetch(base + "/api/iphone/")
-                if len(data) > 100_000:
-                    tmp = csv_path.with_suffix(".partial")
-                    tmp.write_bytes(data)
-                    tmp.replace(csv_path)
-                    used = base
+        # Query the official HTTPS endpoint and known mirrors in parallel.  We
+        # only need a few independent snapshots; bounded fan-out avoids making
+        # refresh time scale with dead mirrors.
+        with concurrent.futures.ThreadPoolExecutor(max_workers=min(6, len(SEEDS))) as pool:
+            futures = [pool.submit(fetch_one, base) for base in SEEDS]
+            for future in concurrent.futures.as_completed(futures):
+                base, data = future.result()
+                if not data:
+                    continue
+                rows = []
+                for line in data.decode("utf-8", errors="replace").splitlines():
+                    if not line or line.startswith("*") or line.startswith("#"):
+                        continue
+                    parts = line.split(",")
+                    if len(parts) < 15:
+                        continue
+                    # Deduplicate identical OpenVPN endpoints/configs across
+                    # mirrors while retaining different transports/profiles.
+                    key = (parts[0].strip(), parts[1].strip(), parts[-1].strip())
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    rows.append(line)
+                if rows:
+                    merged.extend(rows)
+                    used.append(base)
+                if len(used) >= max_sources:
+                    for pending in futures:
+                        pending.cancel()
                     break
-            except Exception:
-                pass
+
+        if merged:
+            tmp = csv_path.with_suffix(".partial")
+            tmp.write_text("\n".join(merged) + "\n", encoding="utf-8")
+            tmp.replace(csv_path)
+
     if not csv_path.exists():
         raise RuntimeError("No live VPN Gate mirror and no cached API snapshot.")
+    source = " + ".join(used) if used else "cached VPN Gate mirror snapshot"
     write_json(evidence / "mirror-refresh-last.json", {
-        "at": now(), "refresh": bool(used), "usedMirror": used,
-        "source": used or "cached VPN Gate mirror snapshot"
+        "at": now(), "refresh": bool(used), "usedMirror": (used[0] if used else None),
+        "usedMirrors": used, "sourceCount": len(used), "mergedRows": len(merged),
+        "source": source
     })
-    return csv_path, used
+    return csv_path, (used[0] if used else None)
 
-def parse_candidates(csv_path, count=24, per_country=4):
+def parse_candidates(csv_path, count=48, per_country=6):
     rows, seen = [], set()
     for line in csv_path.read_text(encoding="utf-8", errors="replace").splitlines():
         if not line or line.startswith("*") or line.startswith("#"):
@@ -92,6 +145,10 @@ def parse_candidates(csv_path, count=24, per_country=4):
         if not re.search(r"(?s)<ca>.+?</ca>", text): continue
         if not re.search(r"(?s)<cert>.+?</cert>", text): continue
         if not re.search(r"(?s)<key>.+?</key>", text): continue
+        # Public profiles are data, never executable policy. Reject directives
+        # that can launch local programs or load external plugins/scripts.
+        if re.search(r"(?mi)^\s*(?:script-security|up|down|route-up|route-pre-down|ipchange|plugin|client-connect|client-disconnect|learn-address)\b", text):
+            continue
         try:
             score, speed, sessions = int(p[2]), int(p[4]), int(p[7])
         except Exception:
@@ -160,7 +217,7 @@ def preserve_old(active, stage, meta, success, limit=4):
         current_shas.add(sha)
     return kept
 
-def promote(common, evidence, count=24, keep_generations=4, preserve_count=4):
+def promote(common, evidence, count=48, keep_generations=4, preserve_count=8):
     active = common / "runtime" / "udp-cache"
     factory = common / "runtime" / "config-factory"
     generations = factory / "generations"
@@ -296,7 +353,14 @@ def record(common, mode, sha, host="", ip="", port=0, reason="", observed_ip="",
     quarantine=read_json(factory/"quarantine.json",{})
     key=(sha or f"{ip}:{port}").lower()
     if mode=="success":
-        successes[key]={"at":now(),"host":host,"ip":ip,"port":int(port or 0),"sha256":sha,"observedIP":observed_ip,"country":country}
+        prior=successes.get(key,{}) if isinstance(successes.get(key,{}),dict) else {}
+        stamp=now()
+        successes[key]={
+            "at":stamp,"first":prior.get("first") or prior.get("at") or stamp,
+            "count":int(prior.get("count",0) or 0)+1,
+            "host":host,"ip":ip,"port":int(port or 0),"sha256":sha,
+            "observedIP":observed_ip,"country":country
+        }
         failures.pop(key,None); quarantine.pop(key,None)
     else:
         prev=failures.get(key,{})
