@@ -539,7 +539,7 @@ test('GitHub updater checks latest release and verifies published SHA-256',()=>{
   assert.doesNotMatch(main,/shell\.openPath\(result\.path\)/);
   assert.match(backend,/async launchDownloadedUpdate/);
   assert.match(backend,/installScope: 'current-user'/);
-  assert.match(backend,/Open Internet Gateway', 'Open Internet Gateway\.exe'/);
+  assert.ok(backend.includes("Programs', 'open-internet-gateway', 'Open Internet Gateway.exe'"));
   assert.match(backend,/--appimage-extract/);
   assert.match(backend,/update-desktop-database/);
   assert.match(preload,/updateInfo/);

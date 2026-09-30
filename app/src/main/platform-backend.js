@@ -899,7 +899,7 @@ class Backend {
   }
 
   _windowsPerUserExecutable() {
-    return path.join(process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local'), 'Programs', 'Open Internet Gateway', 'Open Internet Gateway.exe');
+    return path.join(process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local'), 'Programs', 'open-internet-gateway', 'Open Internet Gateway.exe');
   }
 
   async launchDownloadedUpdate(downloaded, { appPid = process.pid, currentExecutable = process.execPath } = {}) {
