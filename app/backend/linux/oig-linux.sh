@@ -6,6 +6,7 @@ OIG_COMMON="${OIG_COMMON:-$OIG_HOME/common}"
 STATE="$OIG_HOME/state"
 EVIDENCE="$OIG_HOME/evidence"
 CONN="OIG-VPN-LIVE"
+PREFLIGHT_CONN="OIG-VPN-PREFLIGHT"
 LEGACY_CONN="OIG-JP-UDP-LIVE"
 CONSOLE_CONN="OIG-Console-Gateway"
 KEEP="$STATE/linux.keep"
@@ -16,7 +17,7 @@ mkdir -p "$STATE" "$EVIDENCE"
 
 record_intent() {
   local value="$1" reason="${2:-${action:-unknown}}" parent=""
-  parent="$(tr '\0' ' ' < "/proc/$PPID/cmdline" 2>/dev/null || true)"
+  if [[ -r "/proc/$PPID/cmdline" ]]; then parent="$(tr '\0' ' ' < "/proc/$PPID/cmdline" 2>/dev/null || true)"; fi
   python3 - "$EVIDENCE/intent-history.jsonl" "$value" "$reason" "$$" "$PPID" "$parent" <<'PY' || true
 import datetime,json,sys
 path,value,reason,pid,ppid,parent=sys.argv[1:]
@@ -54,6 +55,7 @@ delete_connection_name() {
 }
 
 delete_named_connections() {
+  delete_connection_name "$PREFLIGHT_CONN"
   delete_connection_name "$CONN"
   delete_connection_name "$LEGACY_CONN"
 }
@@ -79,15 +81,19 @@ json_status() {
   relay=""
   profile_ip=""
   profile_country=""
+  profile_pending=false
   if [[ -f "$STATE/current-linux-profile.json" ]]; then
-    read -r relay profile_ip profile_country < <(python3 - "$STATE/current-linux-profile.json" <<'PY'
+    read -r relay profile_ip profile_country profile_pending < <(python3 - "$STATE/current-linux-profile.json" <<'PY'
 import json,sys
 try:
     d=json.load(open(sys.argv[1],encoding="utf-8"))
     relay=f"{d.get('serverIP','')}:{d.get('port','')}".strip(':')
-    print(relay, d.get("serverIP",""), d.get("country") or d.get("configuredCountry") or "")
+    pending=bool(d.get("validationPending",False))
+    profile_ip="" if pending else d.get("serverIP","")
+    profile_country="" if pending else (d.get("country") or d.get("configuredCountry") or "")
+    print(relay, profile_ip, profile_country, "true" if pending else "false")
 except Exception:
-    print("", "", "")
+    print("", "", "", "false")
 PY
 )
   fi
@@ -156,36 +162,172 @@ start_watchdog() {
 
 profile_lines() {
   local only_sha="${1:-}"
-  python3 - "$OIG_COMMON/runtime/udp-cache/index.json" "$OIG_COMMON/runtime/config-factory/quarantine.json" "$STATE/preferred-profile.json" "$only_sha" <<'PY'
-import json,sys,os
-data=json.load(open(sys.argv[1],encoding="utf-8-sig"))
-try:
-    q=json.load(open(sys.argv[2],encoding="utf-8-sig"))
-except Exception:
-    q={}
-try:
-    pref=json.load(open(sys.argv[3],encoding="utf-8-sig")).get("sha256","").lower()
-except Exception:
-    pref=""
+  python3 - "$OIG_COMMON/runtime/udp-cache/index.json" "$OIG_COMMON/runtime/config-factory/quarantine.json" "$STATE/preferred-profile.json" "$only_sha" "$STATE/connection-benchmarks.json" "$OIG_COMMON/runtime/config-factory/successes.json" "$OIG_COMMON/runtime/config-factory/failures.json" <<'PY'
+import json,sys,os,math,datetime as dt
+
+def load(path,default):
+    try: return json.load(open(path,encoding="utf-8-sig"))
+    except Exception: return default
+
+data=load(sys.argv[1],[])
+q=load(sys.argv[2],{})
+pref=load(sys.argv[3],{}).get("sha256","").lower()
 only_sha=(sys.argv[4] if len(sys.argv)>4 else "").lower()
+bench=load(sys.argv[5],{})
+success=load(sys.argv[6],{})
+failures=load(sys.argv[7],{})
+
+def num(v,default=None):
+    try:
+        x=float(v)
+        return x if math.isfinite(x) else default
+    except Exception: return default
+
+def fresh_iso(value,hours=48):
+    if not value: return False
+    try:
+        ts=dt.datetime.fromisoformat(str(value).replace("Z","+00:00"))
+        return (dt.datetime.now(dt.timezone.utc)-ts.astimezone(dt.timezone.utc)).total_seconds() <= hours*3600
+    except Exception: return False
+
+def quality(c):
+    sha=str(c.get("SHA256","")).lower()
+    proto=str(c.get("Protocol","")).lower()
+    port=int(c.get("Port",0) or 0)
+    b=bench.get(sha,{}) if isinstance(bench.get(sha,{}),dict) else {}
+    s=success.get(sha,{}) if isinstance(success.get(sha,{}),dict) else {}
+    f=failures.get(sha,{}) if isinstance(failures.get(sha,{}),dict) else {}
+    score=0.0
+    # OpenVPN is optimized for UDP; TCP remains a restricted-network fallback.
+    score += 45.0 if proto=="udp" else 0.0
+    # VPN Gate notes that ports below 2000 tend to be more stable.
+    if 0 < port < 2000: score += 30.0
+    elif proto=="tcp" and port==443: score += 20.0
+    sp=num(c.get("Ping"))
+    if sp is not None: score += max(-30.0,110.0-sp)
+    src_speed=max(0.0,num(c.get("Speed"),0.0) or 0.0)
+    if src_speed>0: score += min(120.0,math.log10(src_speed+1.0)*15.0)
+    src_score=max(0.0,num(c.get("Score"),0.0) or 0.0)
+    if src_score>0: score += min(80.0,math.log10(src_score+1.0)*12.0)
+    if s:
+        score += 90.0 + min(60.0,15.0*max(1,int(s.get("count",1) or 1)))
+    score -= min(240.0,60.0*max(0,int(f.get("count",0) or 0)))
+    # A relay that just failed a real handshake/validation is poor recovery
+    # material even if VPN Gate still advertises excellent source metrics.
+    # Keep the penalty temporary so transient outages can recover naturally.
+    if fresh_iso(f.get("last"),6): score -= 320.0
+    if pref and sha==pref: score += 20.0
+    fast=num(b.get("fastPingMs"))
+    if fresh_iso(b.get("fastAt"),24):
+        if fast is not None: score += max(-80.0,140.0-fast*0.45)
+        elif proto=="tcp" and b.get("fastReachable") is False: score -= 180.0
+    down=num(b.get("downloadMbps")); up=num(b.get("uploadMbps")); lat=num(b.get("httpsLatencyMs"))
+    if fresh_iso(b.get("at"),72) and (down is not None or up is not None or lat is not None):
+        if down is not None: score += min(260.0,down*12.0)
+        if up is not None: score += min(120.0,up*15.0)
+        if lat is not None: score -= min(220.0,lat*0.25)
+    return score
+
 if only_sha:
     data=[c for c in data if str(c.get("SHA256","")).lower()==only_sha]
 else:
-    data=sorted(data,key=lambda c:(0 if pref and str(c.get("SHA256","")).lower()==pref else 1,int(c.get("Rank",9999) or 9999)))
+    for c in data: c["_quality"]=quality(c)
+    data=sorted(data,key=lambda c:(-float(c.get("_quality",0.0)),int(c.get("Rank",9999) or 9999)))
 n=0
 for c in data:
     key=str(c.get("SHA256","")).lower() or f"{c.get('IP','')}:{c.get('Port','')}"
-    if key in q:
-        continue
-    p=str(c.get("Profile","")).replace("\\","/")
-    leaf=os.path.basename(p)
+    if key in q: continue
+    raw=str(c.get("Profile","")).replace("\\","/")
+    leaf=os.path.basename(raw)
     print("\t".join([
         str(c.get("Host","")),str(c.get("IP","")),str(c.get("Port","")),
         leaf,str(c.get("SHA256","")),str(c.get("Protocol","unknown")),str(c.get("Country",""))
     ]))
     n+=1
-    if n >= (1 if only_sha else 24):
-        break
+    if n >= (1 if only_sha else 16): break
+PY
+}
+
+dns_server_fingerprint() {
+  # Compare resolver server values, not transient link identifiers. A parallel
+  # VPN with ignore-auto-dns may add an empty tun link to resolvectl output.
+  { resolvectl dns 2>/dev/null |
+      sed -E 's/^Global:[[:space:]]*//; s/^Link [0-9]+ \([^)]*\):[[:space:]]*//' |
+      tr ' ' '\n' |
+      grep -E '^(([0-9]{1,3}\.){3}[0-9]{1,3}|[0-9A-Fa-f:]+)$' || true; } |
+    sed '/^$/d' | sort -u | sha256sum | awk '{print $1}'
+}
+
+preflight_one() {
+  local host="$1" ipaddr="$2" port="$3" leaf="$4" expected="$5" protocol="$6" country="$7"
+  local profile="$OIG_COMMON/runtime/udp-cache/$leaf"
+  [[ -f "$profile" ]] || return 10
+  if [[ -n "$expected" ]]; then
+    local actual
+    actual="$(sha256sum "$profile" | awk '{print $1}')"
+    [[ "$actual" == "$expected" ]] || return 11
+  fi
+
+  delete_connection_name "$PREFLIGHT_CONN"
+  local import_name imported uuid before_route before_dns after_route after_dns
+  import_name="$(basename "$profile" .ovpn)"
+  delete_connection_name "$import_name"
+  before_route="$(ip -4 route get 1.1.1.1 2>/dev/null | head -1 || true)"
+  before_dns="$(dns_server_fingerprint)"
+
+  imported="$(nmcli connection import type openvpn file "$profile" 2>&1)" || return 12
+  uuid="$(nmcli -t -f UUID,NAME connection show | awk -F: -v n="$import_name" '$2==n {print $1; exit}')"
+  [[ -n "$uuid" ]] || return 12
+  nmcli connection modify uuid "$uuid" connection.id "$PREFLIGHT_CONN" connection.autoconnect no \
+    ipv6.method disabled ipv4.never-default yes ipv4.ignore-auto-routes yes ipv4.ignore-auto-dns yes
+
+  if ! nmcli -w 10 connection up uuid "$uuid" >/dev/null 2>&1; then
+    nmcli connection delete uuid "$uuid" >/dev/null 2>&1 || true
+    return 13
+  fi
+  if ! nmcli -t -f UUID,NAME,TYPE connection show --active 2>/dev/null |
+      awk -F: -v u="$uuid" '$1==u && $2=="OIG-VPN-PREFLIGHT" && $3=="vpn" {ok=1} END{exit(ok?0:1)}'; then
+    nmcli connection down uuid "$uuid" >/dev/null 2>&1 || true
+    nmcli connection delete uuid "$uuid" >/dev/null 2>&1 || true
+    return 14
+  fi
+
+  after_route="$(ip -4 route get 1.1.1.1 2>/dev/null | head -1 || true)"
+  after_dns="$(dns_server_fingerprint)"
+  nmcli connection down uuid "$uuid" >/dev/null 2>&1 || true
+  nmcli connection delete uuid "$uuid" >/dev/null 2>&1 || true
+  python3 - "$EVIDENCE/preflight-last.json" "$host" "$ipaddr" "$port" "$protocol" "$country" "$expected" "$before_route" "$after_route" "$before_dns" "$after_dns" <<'PY'
+import datetime,json,sys
+path,host,ip,port,protocol,country,sha,before_route,after_route,before_dns,after_dns=sys.argv[1:]
+route_ok=before_route==after_route
+dns_ok=before_dns==after_dns
+json.dump({
+  "at":datetime.datetime.now().astimezone().isoformat(),"ok":route_ok and dns_ok,
+  "host":host,"ip":ip,"port":int(port),"protocol":protocol,"country":country,"sha256":sha,
+  "defaultRoutePreserved":route_ok,"dnsStatePreserved":dns_ok,
+  "beforeRoute":before_route,"afterRoute":after_route,
+  "beforeDnsFingerprint":before_dns,"afterDnsFingerprint":after_dns
+},open(path,"w"),indent=2)
+PY
+  [[ "$before_route" == "$after_route" && "$before_dns" == "$after_dns" ]] || return 15
+  return 0
+}
+
+write_profile_state() {
+  local path="$1" host="$2" ipaddr="$3" port="$4" profile="$5" sha="$6" protocol="$7" configured_country="$8" observed_country="$9" pending="${10:-false}" observed_ip="${11:-}"
+  python3 - "$path" "$host" "$ipaddr" "$port" "$profile" "$sha" "$protocol" "$configured_country" "$observed_country" "$pending" "$observed_ip" <<'PY'
+import datetime,json,os,sys
+path,host,ip,port,profile,sha,protocol,configured_country,observed_country,pending,observed_ip=sys.argv[1:]
+data={
+  "at":datetime.datetime.now().astimezone().isoformat(),
+  "host":host,"serverIP":ip,"port":int(port),"profile":profile,"sha256":sha,
+  "protocol":protocol,"configuredCountry":configured_country,"country":observed_country,
+  "validationPending":pending.lower()=="true"
+}
+if observed_ip: data["observedIP"]=observed_ip
+tmp=path+".partial"
+with open(tmp,"w") as f: json.dump(data,f,indent=2)
+os.replace(tmp,path)
 PY
 }
 
@@ -199,6 +341,10 @@ connect_one() {
     actual="$(sha256sum "$profile" | awk '{print $1}')"
     [[ "$actual" == "$expected" ]] || return 11
   fi
+
+  local state_file="$STATE/current-linux-profile.json"
+  local previous_state="$STATE/current-linux-profile.before-connect.json"
+  if [[ -f "$state_file" ]]; then cp -f "$state_file" "$previous_state"; else rm -f "$previous_state"; fi
 
   delete_named_connections
   local import_name imported uuid
@@ -215,6 +361,11 @@ connect_one() {
     return 13
   fi
 
+  # Persist relay identity immediately. If the caller disappears during the
+  # slower geo/data validation phase, status reports the actual active remote
+  # instead of stale metadata. Pending state is never a health geo fallback.
+  write_profile_state "$state_file" "$host" "$ipaddr" "$port" "$profile" "$expected" "$protocol" "$country" "" true ""
+
   for _ in 1 2 3 4 5 6; do
     sleep 3
     if healthy; then
@@ -224,16 +375,10 @@ connect_one() {
       if [[ -n "$country" && "$observed_country" != "$country" ]]; then
         continue
       fi
-      python3 - "$STATE/current-linux-profile.json" "$host" "$ipaddr" "$port" "$profile" "$expected" "$protocol" "$country" "$observed_country" <<'PY'
-import json,sys,datetime
-path,host,ip,port,profile,sha,protocol,configured_country,observed_country=sys.argv[1:]
-json.dump({
-    "at":datetime.datetime.now().astimezone().isoformat(),
-    "host":host,"serverIP":ip,"port":int(port),"profile":profile,
-    "sha256":sha,"protocol":protocol,"configuredCountry":configured_country,
-    "country":observed_country
-},open(path,"w"),indent=2)
-PY
+      local observed_ip
+      observed_ip="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1]).get("ip",""))' "$stat")"
+      write_profile_state "$state_file" "$host" "$ipaddr" "$port" "$profile" "$expected" "$protocol" "$country" "$observed_country" false "$observed_ip"
+      rm -f "$previous_state"
       touch "$KEEP"
       stop_watchdog
       return 0
@@ -243,6 +388,7 @@ PY
   nmcli connection down uuid "$uuid" >/dev/null 2>&1 || true
   nmcli connection delete uuid "$uuid" >/dev/null 2>&1 || true
   delete_named_connections
+  if [[ -f "$previous_state" ]]; then mv -f "$previous_state" "$state_file"; else rm -f "$state_file"; fi
   return 14
 }
 
@@ -328,7 +474,12 @@ teardown_gateway() {
   rm -f "$KEEP"
   stop_watchdog
   delete_named_connections
-  sleep 2
+  # Do not impose a fixed outage on explicit switches. Wait only while an OIG
+  # VPN is actually still active, bounded to one second.
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    if ! nmcli -t -f NAME,TYPE connection show --active 2>/dev/null | grep -q '^OIG-VPN-.*:vpn$'; then break; fi
+    sleep 0.1
+  done
 }
 
 disconnect_gateway() {
@@ -466,6 +617,22 @@ case "$action" in
   connect) set_desired on; connect_gateway ;;
   connect-profile)
     [[ -n "${2:-}" ]] || { echo "Profile SHA-256 is required." >&2; exit 64; }
+    # When a protected tunnel is already healthy, prove the candidate can
+    # complete an OpenVPN handshake without taking default-route/DNS ownership
+    # before touching the working connection.
+    if healthy; then
+      candidate="$(profile_lines "$2" | head -n1 || true)"
+      [[ -n "$candidate" ]] || { echo "Selected relay is missing or quarantined." >&2; exit 21; }
+      IFS="$(printf '	')" read -r phost pip pport pleaf psha pproto pcountry <<<"$candidate"
+      if preflight_one "$phost" "$pip" "$pport" "$pleaf" "$psha" "$pproto" "$pcountry"; then
+        :
+      else
+        rc=$?
+        record_failure "$psha" "$phost" "$pip" "$pport" "PREFLIGHT_$rc"
+        echo "Selected relay failed non-disruptive OpenVPN preflight; current tunnel preserved." >&2
+        exit 21
+      fi
+    fi
     # Relay switching is not a user disconnect: preserve desired=on before
     # teardown so interruption cannot strand the gateway intent at off.
     set_desired on "connect-profile"
