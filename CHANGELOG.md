@@ -203,3 +203,8 @@
 - Hardened real tunnel Speed upload measurement against one transient Cloudflare upload failure: the same verified 512 kB POST is retried once with a bounded 8 s connect timeout / 20 s total timeout before declaring failure.
 - Keeps fail-closed throughput semantics: a Speed result is accepted only after HTTP 200 and a positive measured upload rate; failed or partial attempts are not promoted as a benchmark.
 - Records `uploadAttempts` in successful tunnel benchmark evidence and adds regression coverage for the bounded retry contract.
+
+## 2.5.13 - 2026-09-30
+- Made Linux exact-relay switching intent-atomic: switching no longer writes `desired=off` during tunnel teardown, so an interrupted switch cannot strand Auto-Recovery in the off state.
+- Added append-only Linux intent provenance (`evidence/intent-history.jsonl`) with action, PID/PPID, and parent command for future disconnect forensics while preserving the plain `desired-state` compatibility contract.
+- Added regression coverage for relay-switch ordering and provenance logging.

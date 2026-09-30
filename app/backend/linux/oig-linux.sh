@@ -14,8 +14,24 @@ FACTORY_PY="$OIG_HOME/linux/config_factory.py"
 DESIRED="$STATE/desired-state"
 mkdir -p "$STATE" "$EVIDENCE"
 
+record_intent() {
+  local value="$1" reason="${2:-${action:-unknown}}" parent=""
+  parent="$(tr '\0' ' ' < "/proc/$PPID/cmdline" 2>/dev/null || true)"
+  python3 - "$EVIDENCE/intent-history.jsonl" "$value" "$reason" "$$" "$PPID" "$parent" <<'PY' || true
+import datetime,json,sys
+path,value,reason,pid,ppid,parent=sys.argv[1:]
+with open(path,"a",encoding="utf-8") as f:
+    f.write(json.dumps({
+        "at":datetime.datetime.now().astimezone().isoformat(),
+        "desired":value,"reason":reason,"pid":int(pid),"ppid":int(ppid),
+        "parentCommand":parent.strip()
+    },separators=(",",":"))+"\n")
+PY
+}
+
 set_desired() {
   printf '%s\n' "$1" > "$DESIRED"
+  record_intent "$1" "${2:-${action:-unknown}}"
 }
 
 desired_state() {
@@ -308,12 +324,16 @@ connect_gateway() {
   return 21
 }
 
-disconnect_gateway() {
-  set_desired off
+teardown_gateway() {
   rm -f "$KEEP"
   stop_watchdog
   delete_named_connections
   sleep 2
+}
+
+disconnect_gateway() {
+  set_desired off "${1:-${action:-disconnect}}"
+  teardown_gateway
   echo "DISCONNECTED"
 }
 
@@ -446,8 +466,10 @@ case "$action" in
   connect) set_desired on; connect_gateway ;;
   connect-profile)
     [[ -n "${2:-}" ]] || { echo "Profile SHA-256 is required." >&2; exit 64; }
-    disconnect_gateway >/dev/null 2>&1 || true
-    set_desired on
+    # Relay switching is not a user disconnect: preserve desired=on before
+    # teardown so interruption cannot strand the gateway intent at off.
+    set_desired on "connect-profile"
+    teardown_gateway >/dev/null 2>&1 || true
     connect_gateway "$2"
     ;;
   disconnect) disconnect_gateway ;;

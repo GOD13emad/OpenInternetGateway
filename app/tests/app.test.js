@@ -693,3 +693,25 @@ test('active throughput upload tolerates one transient Cloudflare POST failure w
   assert.match(block,/after a bounded retry/);
   assert.match(block,/uploadAttempts,/);
 });
+
+
+test('Linux exact relay switch preserves gateway intent atomically and records provenance',()=>{
+  const linux=fs.readFileSync(path.join(root,'backend/linux/oig-linux.sh'),'utf8').replace(/\r\n/g,'\n');
+  const start=linux.indexOf('  connect-profile)');
+  const end=linux.indexOf('    ;;',start);
+  const block=linux.slice(start,end);
+  assert.ok(start>=0 && end>start);
+  assert.match(block,/set_desired on "connect-profile"/);
+  assert.match(block,/teardown_gateway/);
+  assert.match(block,/connect_gateway "\$2"/);
+  assert.doesNotMatch(block,/disconnect_gateway/);
+  assert.ok(block.indexOf('set_desired on') < block.indexOf('teardown_gateway'));
+  assert.ok(block.indexOf('teardown_gateway') < block.indexOf('connect_gateway'));
+  const intent=linux.slice(linux.indexOf('record_intent()'),linux.indexOf('\ndesired_state()'));
+  assert.match(intent,/intent-history\.jsonl/);
+  assert.match(intent,/\/proc\/\$PPID\/cmdline/);
+  assert.match(intent,/parentCommand/);
+  const disconnect=linux.slice(linux.indexOf('disconnect_gateway()'),linux.indexOf('\nrefresh_cache()'));
+  assert.match(disconnect,/set_desired off/);
+  assert.match(disconnect,/teardown_gateway/);
+});
