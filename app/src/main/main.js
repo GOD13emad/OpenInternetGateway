@@ -121,13 +121,24 @@ function registerIpc() {
   ipcMain.handle('gateway:updateInfo', (_e, force) => backend.updateInfo(!!force));
   ipcMain.handle('gateway:installUpdate', async () => {
     const result = await backend.downloadUpdate();
-    if (result.alreadyCurrent || !result.path) return { ...result, opened: false };
-    const openError = await shell.openPath(result.path);
-    if (openError) {
-      shell.showItemInFolder(result.path);
-      return { ...result, opened: false, openError };
+    if (result.alreadyCurrent || !result.path) return { ...result, applying: false };
+    const launched = await backend.launchDownloadedUpdate(result, {
+      appPid: process.pid,
+      currentExecutable: process.execPath
+    });
+    if (launched?.applying) {
+      if (process.platform === 'linux' && backend?.backendRoot) {
+        // Disarm the old parent-exit watchdog. The new app writes its own lease
+        // after restart; a failed updater helper relaunches the previous app.
+        try {
+          const lease = path.join(backend.backendRoot, 'state', 'app-process.lease');
+          fs.mkdirSync(path.dirname(lease), { recursive: true });
+          fs.writeFileSync(lease, 'update ' + process.pid + ' ' + Date.now() + '\n');
+        } catch {}
+      }
+      setTimeout(requestProcessExitPreservingTunnel, 500);
     }
-    return { ...result, opened: true };
+    return { ...result, ...launched };
   });
   ipcMain.handle('gateway:openRelease', async () => {
     let url = 'https://github.com/GOD13emad/OpenInternetGateway/releases/latest';
@@ -200,9 +211,9 @@ async function requestQuit() {
 
 function requestProcessExitPreservingTunnel() {
   if (allowQuit) return;
-  // Windows installers and OS lifecycle events may terminate the dashboard
-  // during an upgrade. That is not the user's explicit Quit command and must
-  // not rewrite desired-state=off or tear down the independent headless tunnel.
+  // Installer/update lifecycle exits are not the user's explicit Quit command.
+  // Keep desired-state and the independent tunnel intact while the dashboard
+  // is replaced and restarted.
   app.isQuitting = true;
   if (trayPoll) clearInterval(trayPoll);
   allowQuit = true;

@@ -203,7 +203,7 @@
         <div class="settings-grid update-grid">
           <article class="panel settings-card wide update-card">
             <div class="panel-head update-head">
-              <div><span class="eyebrow">GITHUB RELEASES</span><h3>Application updates</h3><p>Check the official GOD13emad/OpenInternetGateway release, verify its published SHA-256, then open the installer or package manager.</p></div>
+              <div><span class="eyebrow">GITHUB RELEASES</span><h3>Application updates</h3><p>Check the official GOD13emad/OpenInternetGateway release, verify its published SHA-256, then install it in user space and restart automatically.</p></div>
               <span class="update-pill" id="updateState">Not checked</span>
             </div>
             <div class="update-metrics">
@@ -218,10 +218,10 @@
             </div>
             <div class="button-row update-actions">
               <button class="btn secondary" id="checkUpdates">Check now</button>
-              <button class="btn" id="installUpdate" disabled>Download verified update</button>
+              <button class="btn" id="installUpdate" disabled>Install verified update</button>
               <button class="btn ghost" id="openRelease">Open GitHub release</button>
             </div>
-            <p class="measurement-note">The downloaded file is opened only after its SHA-256 matches both the GitHub asset digest and the release SHA256SUMS file. Windows opens the NSIS installer; Linux opens the DEB package installer and may request administrator approval.</p>
+            <p class="measurement-note">Updates are applied only after SHA-256 matches both the GitHub asset digest and SHA256SUMS. Windows uses a current-user NSIS install and Linux uses AppImage under ~/.local/opt, so normal updates do not require administrator/root approval.</p>
           </article>
         </div>
       </section>

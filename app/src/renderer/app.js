@@ -512,10 +512,10 @@ async function installUpdate() {
       showToast('This installation already matches the latest GitHub release.');
       return;
     }
-    if (result?.opened) {
-      showToast('Verified update downloaded. Installer/package manager opened.');
+    if (result?.applying) {
+      showToast('Verified update is installing. Open Internet Gateway will restart automatically.');
     } else if (result?.path) {
-      showToast('Verified update downloaded. Open it from the shown folder.');
+      showToast('Verified update downloaded, but automatic apply did not start.', true);
     }
     if (result?.info) renderUpdateInfo(result.info);
   } catch (e) {
@@ -536,7 +536,7 @@ function setPage(name) {
     connections:['Connections','Choose countries and relays, then measure real tunnel performance.'],
     diagnostics:['Diagnostics','Verify egress, DNS integrity and recovery readiness.'],
     activity:['Activity','Evidence from connection and recovery events.'],
-    updates:['Updates','Check and download verified releases directly from GitHub.'],
+    updates:['Updates','Check, verify and install releases directly from GitHub without administrator prompts.'],
     settings:['Settings','Appearance, recovery and runtime information.']
   }[name];
   setText('pageTitle', meta[0]); setText('pageSubtitle', meta[1]);

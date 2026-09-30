@@ -4,7 +4,7 @@ Open Internet Gateway (OIG) is a cross-platform desktop application for maintain
 
 The Windows and Linux backends are different, but both sit behind the same Electron dashboard, lifecycle model, health gates, multi-country relay inventory, Self-Healing Config Factory, and verified GitHub update workflow.
 
-## Current release: 2.5.6
+## Current release line: 2.5.14
 
 ### Connections
 
@@ -26,13 +26,13 @@ OIG's Direct Internet test binds the physical network path and disables ordinary
 
 The **Updates** page checks the official `GOD13emad/OpenInternetGateway` GitHub release feed.
 
-Before an update file is opened, OIG requires all three integrity checks to agree:
+Before an update is applied, OIG requires all three integrity checks to agree:
 
 1. the SHA-256 digest published by the GitHub release asset,
 2. the matching entry in the release `SHA256SUMS.txt`,
 3. the SHA-256 of the bytes downloaded by OIG.
 
-Windows selects the NSIS installer. Linux selects the amd64 Debian package with AppImage fallback. The application does not bypass OS privilege approval for installation.
+Windows automatic updates use a current-user one-click NSIS install under the user profile, so routine application updates do not request UAC. Linux automatic updates use the AppImage release under `~/.local/opt`; the Debian package remains available for manual/system-managed installation. The updater never bypasses OS security: privileged backend bootstrap/console operations remain explicit, separate actions.
 
 ### Windows
 
@@ -116,7 +116,7 @@ Validated on Ubuntu 24.04-class systems with:
 - systemd user services
 - `curl`
 
-The Debian package is the preferred Linux install. Linux Debian installs to `/opt/open-internet-gateway` so Chromium's setuid sandbox does not inherit a path containing spaces. AppImage is also provided for portable use; some distributions may require FUSE compatibility or an extracted AppImage workflow.
+The Debian package remains the preferred system-managed Linux install. Linux Debian installs to `/opt/open-internet-gateway` so Chromium's setuid sandbox does not inherit a path containing spaces. Automatic in-app updates use the AppImage release extracted into `~/.local/opt` so they do not require root; some distributions may require FUSE compatibility only when launching AppImage directly.
 
 ## Building
 
@@ -155,7 +155,7 @@ See [SECURITY.md](SECURITY.md).
 
 ## Release verification
 
-Every published release includes `SHA256SUMS.txt`. The in-app updater verifies the selected release asset before opening it.
+Every published release includes `SHA256SUMS.txt`. The in-app updater verifies the selected release asset against both GitHub's published digest and `SHA256SUMS.txt`, re-hashes the downloaded bytes, then applies the user-space update and restarts the dashboard.
 
 No Authenticode signing certificate is configured in the repository build configuration as of v2.5.6, so Windows users should verify the published checksum when installing manually.
 

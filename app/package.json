@@ -1,6 +1,6 @@
 {
   "name": "open-internet-gateway",
-  "version": "2.5.13",
+  "version": "2.5.14",
   "description": "Cross-platform censorship-resilient Internet gateway with headless OpenVPN, anti-flap recovery, and a self-healing configuration factory.",
   "main": "src/main/main.js",
   "author": {
@@ -55,8 +55,11 @@
       ]
     },
     "nsis": {
-      "oneClick": false,
-      "allowToChangeInstallationDirectory": true,
+      "oneClick": true,
+      "perMachine": false,
+      "allowElevation": false,
+      "packElevateHelper": false,
+      "runAfterFinish": true,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
       "shortcutName": "Open Internet Gateway"

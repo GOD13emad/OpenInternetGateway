@@ -820,8 +820,10 @@ class Backend {
         || list.find(a => /^OpenInternetGateway-Setup-.*\.exe$/i.test(a.name || ''));
     }
     if (this.platform === 'linux') {
-      return list.find(a => a.name === 'OpenInternetGateway-' + version + '-amd64.deb')
-        || list.find(a => /^OpenInternetGateway-.*-amd64\.deb$/i.test(a.name || ''))
+      // Automatic Linux updates must remain user-space and never invoke apt/dpkg/sudo.
+      // Prefer the AppImage release asset; the DEB remains available for manual/system installs.
+      return list.find(a => a.name === 'OpenInternetGateway-' + version + '-x86_64.AppImage')
+        || list.find(a => /^OpenInternetGateway-.*-x86_64\.AppImage$/i.test(a.name || ''))
         || list.find(a => /\.AppImage$/i.test(a.name || ''));
     }
     return null;
@@ -890,6 +892,181 @@ class Backend {
       try { fs.unlinkSync(partial); } catch {}
       throw error;
     }
+  }
+
+  _updateResultPath(version) {
+    return path.join(this.backendRoot, 'updates', 'v' + String(version || 'unknown'), 'apply-result.json');
+  }
+
+  _windowsPerUserExecutable() {
+    return path.join(process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local'), 'Programs', 'Open Internet Gateway', 'Open Internet Gateway.exe');
+  }
+
+  async launchDownloadedUpdate(downloaded, { appPid = process.pid, currentExecutable = process.execPath } = {}) {
+    if (!downloaded?.path || !downloaded?.info?.latestVersion || !downloaded?.sha256) {
+      throw new Error('Verified update payload is incomplete; refusing to launch an update.');
+    }
+    const version = String(downloaded.info.latestVersion);
+    const expectedSha = String(downloaded.sha256).toLowerCase();
+    const updateDir = path.dirname(downloaded.path);
+    const resultFile = this._updateResultPath(version);
+    fs.mkdirSync(updateDir, { recursive: true });
+
+    if (this.platform === 'win32') {
+      if (!/\.exe$/i.test(downloaded.path)) throw new Error('Windows automatic update requires the verified NSIS installer.');
+      const helper = path.join(updateDir, 'apply-update.ps1');
+      const target = this._windowsPerUserExecutable();
+      const script = String.raw`param(
+  [Parameter(Mandatory=$true)][string]$Installer,
+  [Parameter(Mandatory=$true)][string]$ExpectedSha,
+  [Parameter(Mandatory=$true)][string]$Version,
+  [Parameter(Mandatory=$true)][int]$WaitPid,
+  [Parameter(Mandatory=$true)][string]$Target,
+  [Parameter(Mandatory=$true)][string]$Fallback,
+  [Parameter(Mandatory=$true)][string]$ResultFile
+)
+$ErrorActionPreference='Stop'
+function Save-Result([hashtable]$Data){
+  $dir=Split-Path -Parent $ResultFile
+  New-Item -ItemType Directory -Force -Path $dir | Out-Null
+  $Data.at=(Get-Date).ToString('o')
+  $Data | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $ResultFile -Encoding UTF8
+}
+try {
+  $deadline=(Get-Date).AddSeconds(120)
+  while(Get-Process -Id $WaitPid -ErrorAction SilentlyContinue){
+    if((Get-Date) -gt $deadline){throw 'Timed out waiting for the old app process to exit.'}
+    Start-Sleep -Milliseconds 200
+  }
+  $actual=(Get-FileHash -LiteralPath $Installer -Algorithm SHA256).Hash.ToLowerInvariant()
+  if($actual -ne $ExpectedSha.ToLowerInvariant()){throw 'Verified installer hash changed before apply.'}
+  $p=Start-Process -FilePath $Installer -ArgumentList @('/S') -PassThru -Wait
+  if($p.ExitCode -ne 0){throw ('NSIS updater failed with exit code '+$p.ExitCode)}
+  if(-not(Test-Path -LiteralPath $Target)){throw 'Per-user installation target was not created.'}
+  $installed=[string](Get-Item -LiteralPath $Target).VersionInfo.ProductVersion
+  if($installed -notlike ($Version+'*')){throw ('Installed version mismatch: '+$installed)}
+  Save-Result @{ok=$true;version=$Version;sha256=$actual;target=$Target;installScope='current-user';exitCode=$p.ExitCode}
+  Start-Process -FilePath $Target
+  exit 0
+} catch {
+  Save-Result @{ok=$false;version=$Version;error=$_.Exception.Message;target=$Target;installScope='current-user'}
+  if(Test-Path -LiteralPath $Target){Start-Process -FilePath $Target}
+  elseif(Test-Path -LiteralPath $Fallback){Start-Process -FilePath $Fallback}
+  exit 1
+}
+`;
+      fs.writeFileSync(helper, script, 'utf8');
+      const child = spawn('pwsh.exe', [
+        '-NoProfile','-WindowStyle','Hidden','-ExecutionPolicy','Bypass','-File',helper,
+        '-Installer',downloaded.path,
+        '-ExpectedSha',expectedSha,
+        '-Version',version,
+        '-WaitPid',String(appPid),
+        '-Target',target,
+        '-Fallback',String(currentExecutable || ''),
+        '-ResultFile',resultFile
+      ], { detached: true, windowsHide: true, stdio: 'ignore' });
+      child.unref();
+      return { ok: true, applying: true, restart: true, installScope: 'current-user', resultFile, target };
+    }
+
+    if (this.platform === 'linux') {
+      if (!/\.AppImage$/i.test(downloaded.path)) throw new Error('Linux automatic update requires the verified AppImage asset.');
+      const helper = path.join(updateDir, 'apply-update.sh');
+      const target = path.join(os.homedir(), '.local', 'opt', 'OpenInternetGateway-' + version + '-final');
+      const script = `#!/usr/bin/env bash
+set -euo pipefail
+image="$1"
+expected="$2"
+version="$3"
+wait_pid="$4"
+result_file="$5"
+target="$6"
+fallback="$7"
+write_result() {
+  local ok="$1" message="$2"
+  python3 - "$result_file" "$ok" "$message" "$version" "$target" <<'PY'
+import datetime,json,os,sys
+path,ok,message,version,target=sys.argv[1:]
+os.makedirs(os.path.dirname(path),exist_ok=True)
+with open(path,'w',encoding='utf-8') as f:
+    json.dump({'ok':ok=='true','message':message,'version':version,'target':target,
+               'installScope':'current-user','at':datetime.datetime.now().astimezone().isoformat()},f,indent=2)
+PY
+}
+fail() {
+  local msg="$1"
+  write_result false "$msg" || true
+  if [ -x "$target/AppRun" ]; then nohup "$target/AppRun" >/tmp/oig-update-fallback.log 2>&1 </dev/null &
+  elif [ -n "$fallback" ] && [ -x "$fallback" ]; then nohup "$fallback" >/tmp/oig-update-fallback.log 2>&1 </dev/null &
+  fi
+  exit 1
+}
+deadline=$((SECONDS+120))
+while kill -0 "$wait_pid" 2>/dev/null; do
+  [ "$SECONDS" -lt "$deadline" ] || fail "Timed out waiting for the old app process to exit."
+  sleep 0.2
+done
+actual="$(sha256sum "$image" | awk '{print tolower($1)}')"
+[ "$actual" = "\${expected,,}" ] || fail "Verified AppImage hash changed before apply."
+chmod 755 "$image" || fail "Could not mark AppImage executable."
+base="$HOME/.local/opt"
+stage="$base/.OpenInternetGateway-\${version}-stage-$$"
+candidate="$stage/squashfs-root"
+mkdir -p "$base"
+rm -rf "$stage"
+mkdir -p "$stage"
+(
+  cd "$stage"
+  "$image" --appimage-extract >/dev/null
+) || fail "AppImage extraction failed."
+[ -x "$candidate/AppRun" ] || fail "Extracted AppImage does not contain AppRun."
+previous="\${target}.previous"
+rm -rf "$previous"
+if [ -d "$target" ]; then mv "$target" "$previous" || fail "Could not preserve previous app directory."; fi
+mv "$candidate" "$target" || {
+  [ -d "$previous" ] && mv "$previous" "$target" || true
+  fail "Could not promote extracted AppImage."
+}
+rm -rf "$stage"
+desktop_dir="$HOME/.local/share/applications"
+desktop="$desktop_dir/OpenInternetGateway.desktop"
+desktop_tmp="\${desktop}.tmp.$$"
+mkdir -p "$desktop_dir"
+cat >"$desktop_tmp" <<EOF
+[Desktop Entry]
+Type=Application
+Name=Open Internet Gateway
+Comment=Stable multi-country Internet gateway
+Exec=$target/AppRun %U
+Icon=$target/open-internet-gateway.png
+Terminal=false
+Categories=Network;
+StartupWMClass=OpenInternetGateway
+X-AppImage-Version=$version
+Actions=Quit;
+
+[Desktop Action Quit]
+Name=Quit and disconnect
+Exec=$target/AppRun --quit
+EOF
+chmod 644 "$desktop_tmp"
+mv "$desktop_tmp" "$desktop"
+update-desktop-database "$desktop_dir" >/dev/null 2>&1 || true
+write_result true "Update applied." || true
+nohup "$target/AppRun" >/tmp/oig-update-\${version}.log 2>&1 </dev/null &
+exit 0
+`;
+      fs.writeFileSync(helper, script, 'utf8');
+      try { fs.chmodSync(helper, 0o755); } catch {}
+      const child = spawn('/bin/bash', [
+        helper, downloaded.path, expectedSha, version, String(appPid), resultFile, target, String(currentExecutable || '')
+      ], { detached: true, stdio: 'ignore', env: { ...process.env } });
+      child.unref();
+      return { ok: true, applying: true, restart: true, installScope: 'current-user', resultFile, target };
+    }
+
+    throw new Error('Automatic update apply is unsupported on this platform.');
   }
 
   async downloadUpdate() {

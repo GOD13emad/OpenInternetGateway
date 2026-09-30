@@ -208,3 +208,11 @@
 - Made Linux exact-relay switching intent-atomic: switching no longer writes `desired=off` during tunnel teardown, so an interrupted switch cannot strand Auto-Recovery in the off state.
 - Added append-only Linux intent provenance (`evidence/intent-history.jsonl`) with action, PID/PPID, and parent command for future disconnect forensics while preserving the plain `desired-state` compatibility contract.
 - Added regression coverage for relay-switch ordering and provenance logging.
+
+## 2.5.14 - 2026-09-30
+- Changed Windows packaging to one-click current-user NSIS (`perMachine=false`) with elevation disabled and no bundled elevate helper, so routine launches and future in-app application updates do not request UAC.
+- Changed Linux automatic update selection from DEB to AppImage and added user-space promotion under `~/.local/opt`, keeping the DEB available for manual/system-managed installs.
+- Updater now applies the SHA-256-verified release itself and restarts the dashboard instead of merely opening the downloaded installer/package.
+- Preserved fail-closed update integrity: GitHub asset digest, SHA256SUMS, downloaded bytes, and pre-apply re-hash must agree.
+- Preserved managed tunnel intent during updater-driven dashboard restart; Linux disarms the old exit-watchdog lease before replacement.
+- Added regression coverage for per-user/no-elevation NSIS policy, AppImage update preference, updater apply path, and absence of RunAs in the automatic update launcher.

@@ -21,9 +21,13 @@ test('Linux backend implements required actions',()=>{
   for(const action of ['connect','disconnect','refresh','ensure','auto-install','auto-remove','console-status','console-enable','console-disable']) assert.ok(sh.includes(action));
 });
 
-test('package includes Windows and Linux installers',()=>{
+test('package includes no-admin Windows installer and Linux update formats',()=>{
   const pkg=JSON.parse(fs.readFileSync(path.join(root,'package.json'),'utf8'));
   assert.equal(pkg.build.win.target[0].target,'nsis');
+  assert.equal(pkg.build.nsis.oneClick,true);
+  assert.equal(pkg.build.nsis.perMachine,false);
+  assert.equal(pkg.build.nsis.allowElevation,false);
+  assert.equal(pkg.build.nsis.packElevateHelper,false);
   assert.ok(pkg.build.linux.target.includes('AppImage'));
   assert.ok(pkg.build.linux.target.includes('deb'));
 });
@@ -530,14 +534,21 @@ test('GitHub updater checks latest release and verifies published SHA-256',()=>{
   assert.match(backend,/async downloadUpdate\(\)/);
   assert.match(main,/gateway:updateInfo/);
   assert.match(main,/gateway:installUpdate/);
-  assert.match(main,/shell\.openPath\(result\.path\)/);
+  assert.match(main,/launchDownloadedUpdate/);
+  assert.match(main,/requestProcessExitPreservingTunnel/);
+  assert.doesNotMatch(main,/shell\.openPath\(result\.path\)/);
+  assert.match(backend,/async launchDownloadedUpdate/);
+  assert.match(backend,/installScope: 'current-user'/);
+  assert.match(backend,/Open Internet Gateway', 'Open Internet Gateway\.exe'/);
+  assert.match(backend,/--appimage-extract/);
+  assert.match(backend,/update-desktop-database/);
   assert.match(preload,/updateInfo/);
   assert.match(preload,/installUpdate/);
   assert.match(renderer,/renderUpdateInfo/);
   assert.match(renderer,/loadUpdates/);
   assert.match(html,/data-page="updates"/);
   assert.match(html,/GITHUB RELEASES/);
-  assert.match(html,/Download verified update/);
+  assert.match(html,/Install verified update/);
 });
 
 test('GitHub workflows use current hosted-runner actions and Node LTS',()=>{
@@ -714,4 +725,27 @@ test('Linux exact relay switch preserves gateway intent atomically and records p
   const disconnect=linux.slice(linux.indexOf('disconnect_gateway()'),linux.indexOf('\nrefresh_cache()'));
   assert.match(disconnect,/set_desired off/);
   assert.match(disconnect,/teardown_gateway/);
+});
+
+
+test('automatic updater prefers user-space assets and avoids elevation paths',()=>{
+  const Backend=require(path.join(root,'src/main/platform-backend.js'));
+  const tmp=fs.mkdtempSync(path.join(require('os').tmpdir(),'oig-update-select-'));
+  const backend=new Backend({version:'2.5.13',resourcesPath:tmp,appPath:tmp,userData:tmp,emit:()=>{}});
+  const assets=[
+    {name:'OpenInternetGateway-2.5.14-amd64.deb'},
+    {name:'OpenInternetGateway-2.5.14-x86_64.AppImage'},
+    {name:'OpenInternetGateway-Setup-2.5.14.exe'}
+  ];
+  backend.platform='linux';
+  assert.equal(backend._selectUpdateAsset(assets,'2.5.14').name,'OpenInternetGateway-2.5.14-x86_64.AppImage');
+  backend.platform='win32';
+  assert.equal(backend._selectUpdateAsset(assets,'2.5.14').name,'OpenInternetGateway-Setup-2.5.14.exe');
+  const main=fs.readFileSync(path.join(root,'src/main/main.js'),'utf8');
+  const source=fs.readFileSync(path.join(root,'src/main/platform-backend.js'),'utf8');
+  assert.ok(source.includes("ArgumentList @('/S')"));
+  const launchBlock=source.slice(source.indexOf('async launchDownloadedUpdate'),source.indexOf('async downloadUpdate'));
+  assert.doesNotMatch(launchBlock,/-Verb RunAs/);
+  assert.ok(main.includes('app-process.lease'));
+  fs.rmSync(tmp,{recursive:true,force:true});
 });
