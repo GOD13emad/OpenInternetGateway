@@ -1,5 +1,5 @@
 [CmdletBinding()]
-param([int]$Count=24,[int]$PerCountry=4,[int]$PreserveOld=4,[int]$KeepGenerations=4)
+param([int]$Count=48,[int]$PerCountry=6,[int]$PreserveOld=8,[int]$KeepGenerations=4)
 $ErrorActionPreference='Stop'
 $Root=Split-Path -Parent $PSScriptRoot
 $csv=Join-Path $Root 'evidence\vpngate-mirror-api.csv'
@@ -48,6 +48,8 @@ foreach($line in Get-Content -LiteralPath $csv){
  if($text -notmatch '(?s)<ca>.+?</ca>'){continue}
  if($text -notmatch '(?s)<cert>.+?</cert>'){continue}
  if($text -notmatch '(?s)<key>.+?</key>'){continue}
+ # Treat public profiles as data, never executable local policy.
+ if($text -match '(?mi)^\s*(?:script-security|up|down|route-up|route-pre-down|ipchange|plugin|client-connect|client-disconnect|learn-address)'){continue}
  $rows += [pscustomobject]@{
    Host=$p[0];IP=$ip;Score=[int64]$p[2];Ping=$p[3];Speed=[int64]$p[4];
    Sessions=[int]$p[7];Port=$port;Text=$text;Source='VPNGate';

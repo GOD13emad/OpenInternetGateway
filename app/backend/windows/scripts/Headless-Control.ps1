@@ -14,6 +14,7 @@ $preferredFile=Join-Path $Root 'state\preferred-profile.json'
 $factory=Join-Path $Root 'runtime\config-factory'
 $successFile=Join-Path $factory 'successes.json'
 $failureFile=Join-Path $factory 'failures.json'
+$benchmarkFile=Join-Path $Root 'state\connection-benchmarks.json'
 $quarantineFile=Join-Path $factory 'quarantine.json'
 New-Item -ItemType Directory -Force -Path (Join-Path $Root 'state'),(Join-Path $Root 'evidence'),$factory,$programData|Out-Null
 
@@ -109,15 +110,77 @@ function Record-Failure($c,[string]$Reason){
 function Record-Success($c,$h){
  $success=Read-Map $successFile;$fail=Read-Map $failureFile;$quar=Read-Map $quarantineFile
  $key=Config-Key $c
- $success[$key]=[ordered]@{at=(Get-Date).ToString('o');host=[string]$c.Host;ip=[string]$c.IP;port=[int]$c.Port;sha256=[string]$c.SHA256;observedIP=[string]$h.IP;country=[string]$h.Country;engine='OVPNConnectorService'}
+ $prior=@{}
+ if($success.ContainsKey($key)){try{$prior=$success[$key]}catch{$prior=@{}}}
+ $stamp=(Get-Date).ToString('o')
+ $first=$stamp;$count=1
+ try{if($prior.first){$first=[string]$prior.first}elseif($prior.at){$first=[string]$prior.at}}catch{}
+ try{$count=[int]$prior.count+1}catch{$count=1}
+ $success[$key]=[ordered]@{at=$stamp;first=$first;count=$count;host=[string]$c.Host;ip=[string]$c.IP;port=[int]$c.Port;sha256=[string]$c.SHA256;observedIP=[string]$h.IP;country=[string]$h.Country;engine='OVPNConnectorService'}
  if($fail.ContainsKey($key)){$fail.Remove($key)}
  if($quar.ContainsKey($key)){$quar.Remove($key)}
  Write-Map $success $successFile;Write-Map $fail $failureFile;Write-Map $quar $quarantineFile
 }
+function Get-Number($Value){
+ if($null -eq $Value -or [string]::IsNullOrWhiteSpace([string]$Value)){return $null}
+ try{
+  $n=[Convert]::ToDouble($Value,[Globalization.CultureInfo]::InvariantCulture)
+  if([double]::IsNaN($n) -or [double]::IsInfinity($n)){return $null}
+  return $n
+ }catch{return $null}
+}
+function Test-Fresh($Value,[double]$Hours){
+ if([string]::IsNullOrWhiteSpace([string]$Value)){return $false}
+ try{
+  $d=[DateTimeOffset]::Parse([string]$Value,[Globalization.CultureInfo]::InvariantCulture,[Globalization.DateTimeStyles]::RoundtripKind)
+  $age=([DateTimeOffset]::UtcNow-$d.ToUniversalTime()).TotalHours
+  return ($age -ge -0.1 -and $age -le $Hours)
+ }catch{return $false}
+}
+function Get-QualityScore($c,[string]$Key,[hashtable]$Success,[hashtable]$Failures,[hashtable]$Bench,[string]$Preferred){
+ [double]$score=0
+ $proto=([string]$c.Protocol).ToLowerInvariant()
+ $port=0;try{$port=[int]$c.Port}catch{}
+ if($proto -eq 'udp'){$score+=45}
+ if($port -gt 0 -and $port -lt 2000){$score+=30}elseif($proto -eq 'tcp' -and $port -eq 443){$score+=20}
+ $sp=Get-Number $c.Ping
+ if($null -ne $sp){$score+=[Math]::Max(-30,110-$sp)}
+ $srcSpeed=Get-Number $c.Speed
+ if($null -ne $srcSpeed -and $srcSpeed -gt 0){$score+=[Math]::Min(120,[Math]::Log10($srcSpeed+1)*15)}
+ $srcScore=Get-Number $c.Score
+ if($null -ne $srcScore -and $srcScore -gt 0){$score+=[Math]::Min(80,[Math]::Log10($srcScore+1)*12)}
+ if($Success.ContainsKey($Key)){
+  $sc=1;try{$sc=[Math]::Max(1,[int]$Success[$Key].count)}catch{}
+  $score+=90+[Math]::Min(60,15*$sc)
+ }
+ if($Failures.ContainsKey($Key)){
+  $fc=0;try{$fc=[Math]::Max(0,[int]$Failures[$Key].count)}catch{}
+  $score-=[Math]::Min(240,60*$fc)
+  try{if(Test-Fresh $Failures[$Key].last 6){$score-=320}}catch{}
+ }
+ if($Preferred -and $Key -eq $Preferred){$score+=20}
+ if($Bench.ContainsKey($Key)){
+  $b=$Bench[$Key]
+  try{
+   if(Test-Fresh $b.fastAt 24){
+    $fast=Get-Number $b.fastPingMs
+    if($null -ne $fast){$score+=[Math]::Max(-80,140-$fast*0.45)}
+    elseif($proto -eq 'tcp' -and $null -ne $b.fastReachable -and -not [bool]$b.fastReachable){$score-=180}
+   }
+   if(Test-Fresh $b.at 72){
+    $down=Get-Number $b.downloadMbps;$up=Get-Number $b.uploadMbps;$lat=Get-Number $b.httpsLatencyMs
+    if($null -ne $down){$score+=[Math]::Min(260,$down*12)}
+    if($null -ne $up){$score+=[Math]::Min(120,$up*15)}
+    if($null -ne $lat){$score-=[Math]::Min(220,$lat*0.25)}
+   }
+  }catch{}
+ }
+ return [Math]::Round($score,3)
+}
 function Get-Candidates([string]$OnlySha='') {
  $idx=Join-Path $Root 'runtime\udp-cache\index.json'
  if(-not(Test-Path $idx)){return @()}
- $success=Read-Map $successFile;$quar=Read-Map $quarantineFile
+ $success=Read-Map $successFile;$fail=Read-Map $failureFile;$quar=Read-Map $quarantineFile;$bench=Read-Map $benchmarkFile
  $preferred=''
  if(Test-Path $preferredFile){try{$preferred=[string](Get-Content -Raw $preferredFile|ConvertFrom-Json).sha256}catch{}}
  $preferred=$preferred.ToLowerInvariant()
@@ -126,20 +189,11 @@ function Get-Candidates([string]$OnlySha='') {
    $key=Config-Key $c
    if($OnlySha -and $key -ne $OnlySha.ToLowerInvariant()){continue}
    if($quar.ContainsKey($key)){continue}
-   $validated=0;$headless=0;$lastSuccess=0L
-   if($success.ContainsKey($key)){
-     $validated=1
-     $entry=$success[$key]
-     try{if([string]$entry.engine -eq 'OVPNConnectorService'){$headless=1}}catch{}
-     try{$lastSuccess=[DateTimeOffset]::Parse([string]$entry.at).UtcTicks}catch{}
-   }
-   $rows += [pscustomobject]@{
-     Item=$c;Preferred=$(if($preferred -and $key -eq $preferred){1}else{0});
-     Headless=$headless;Validated=$validated;LastSuccess=$lastSuccess;
-     Proto=$(if([string]$c.Protocol -eq 'udp'){0}else{1});Rank=[int]$c.Rank
-   }
+   $quality=Get-QualityScore $c $key $success $fail $bench $preferred
+   $rows += [pscustomobject]@{Item=$c;Quality=$quality;Rank=[int]$c.Rank}
  }
- return @($rows|Sort-Object @{Expression='Preferred';Descending=$true},@{Expression='Headless';Descending=$true},@{Expression='Validated';Descending=$true},@{Expression='LastSuccess';Descending=$true},Proto,Rank|Select-Object -First 6|ForEach-Object {$_.Item})
+ $limit=if($OnlySha){1}else{8}
+ return @($rows|Sort-Object @{Expression='Quality';Descending=$true},Rank|Select-Object -First $limit|ForEach-Object {$_.Item})
 }
 function Resolve-ProfilePath($c){
  $p=[string]$c.Profile

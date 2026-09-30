@@ -1292,6 +1292,18 @@ exit 0
       else if (action === 'benchmark-active') result = await this.benchmarkActive();
       else if (action === 'benchmark-direct-internet') result = await this.benchmarkDirectInternet();
       else if (action === 'benchmark-all-fast') result = await this.benchmarkAllFast();
+      else if (this.platform === 'win32' && action === 'connect') {
+        // Qualify the current OpenVPN pool through the physical ISP path before
+        // the elevated connector ranks candidates. This is read-only.
+        try { await this.benchmarkAllFast(); } catch {}
+        result = await this._windows('connect');
+      }
+      else if (this.platform === 'win32' && (action === 'refresh' || action === 'factory-refresh')) {
+        // Refresh never changes desired state. Qualify the newly promoted pool
+        // only after the atomic cache refresh completes.
+        result = await this._windows(action);
+        try { await this.benchmarkAllFast(); } catch {}
+      }
       else if (this.platform === 'linux' && action === 'connect') {
         // Refresh relay reachability over the physical ISP path before ranking.
         // This is read-only: it never changes the active/default VPN route.

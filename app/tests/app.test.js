@@ -192,7 +192,7 @@ test('multi-country config factories retain country metadata and no JP-only gate
   assert.match(linuxFactory,/CountryName/);
   assert.doesNotMatch(linuxFactory,/p\[6\] != "JP"/);
   assert.match(linuxBackend,/OIG-VPN-LIVE/);
-  assert.match(winFactory,/PerCountry=4/);
+  assert.match(winFactory,/PerCountry=6/);
   assert.match(winFactory,/CountryName/);
   assert.doesNotMatch(winFactory,/\$p\[6\] -ne 'JP'/);
   assert.match(winControl,/ExpectedCountry/);
@@ -925,4 +925,54 @@ test('Linux general recovery is present in every post-selection validation failu
   assert.match(block,/SELECTED_RELAY_FAILED_GENERAL_RECOVERY/);
   assert.match(block,/SELECTED_RELAY_NOT_ACTIVE_GENERAL_RECOVERY/);
   assert.match(block,/SELECTED_RELAY_COUNTRY_MISMATCH_GENERAL_RECOVERY/);
+});
+
+
+test('Windows OpenVPN quality engine mirrors evidence-backed pool and profile safety controls',()=>{
+  const build=fs.readFileSync(path.join(root,'backend/windows/scripts/Build-VpnGateUdpCache.ps1'),'utf8');
+  assert.match(build,/Count=48/);
+  assert.match(build,/PerCountry=6/);
+  assert.match(build,/PreserveOld=8/);
+  for(const token of ['script-security','route-up','route-pre-down','ipchange','plugin','client-connect','client-disconnect','learn-address']) assert.ok(build.includes(token));
+});
+
+test('Windows VPN Gate refresh is bounded, parallel, HTTPS-first and merges multiple snapshots',()=>{
+  const refresh=fs.readFileSync(path.join(root,'backend/windows/scripts/Refresh-VpnGateCache.ps1'),'utf8');
+  assert.match(refresh,/https:\/\/www\.vpngate\.net/);
+  assert.match(refresh,/--connect-timeout','2'/);
+  assert.match(refresh,/--max-time','8'/);
+  assert.match(refresh,/Diagnostics\.ProcessStartInfo/);
+  assert.match(refresh,/sourceCount/);
+  assert.match(refresh,/usedMirrors/);
+  assert.match(refresh,/mergedRows/);
+  assert.match(refresh,/cachedMergedRows/);
+  assert.match(refresh,/liveMergedRows/);
+  assert.match(refresh,/cachedSnapshotExisted/);
+  assert.match(refresh,/liveMergedRows -ge 8/);
+  assert.match(refresh,/MaxSources=3/);
+});
+
+test('Windows headless OpenVPN ranking consumes benchmark history and recent failure evidence',()=>{
+  const headless=fs.readFileSync(path.join(root,'backend/windows/scripts/Headless-Control.ps1'),'utf8');
+  const start=headless.indexOf('function Get-QualityScore');
+  const end=headless.indexOf('function Resolve-ProfilePath',start);
+  const block=headless.slice(start,end);
+  assert.match(headless,/connection-benchmarks\.json/);
+  for(const token of ['fastPingMs','downloadMbps','uploadMbps','httpsLatencyMs']) assert.ok(block.includes(token));
+  assert.match(block,/Test-Fresh \$Failures\[\$Key\]\.last 6/);
+  assert.match(block,/score-=320/);
+  assert.match(block,/score\+=45/);
+  assert.match(block,/\$limit=if\(\$OnlySha\)\{1\}else\{8\}/);
+  assert.match(block,/Select-Object -First \$limit/);
+  assert.match(headless,/first=\$first;count=\$count/);
+});
+
+test('Windows foreground connect qualifies before connector mutation while refresh preserves connect semantics',()=>{
+  const backend=fs.readFileSync(path.join(root,'src/main/platform-backend.js'),'utf8');
+  const start=backend.indexOf('async action(action, options = {})');
+  const end=backend.indexOf('\n  async diagnostics()',start);
+  const block=backend.slice(start,end);
+  assert.match(block,/this\.platform === 'win32' && action === 'connect'[\s\S]*benchmarkAllFast\(\)[\s\S]*_windows\('connect'\)/);
+  assert.match(block,/this\.platform === 'win32' && \(action === 'refresh' \|\| action === 'factory-refresh'\)[\s\S]*_windows\(action\)[\s\S]*benchmarkAllFast\(\)/);
+  assert.doesNotMatch(block,/this\.platform === 'win32'[\s\S]{0,220}action === 'refresh'[\s\S]{0,220}_windows\('connect'\)/);
 });

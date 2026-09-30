@@ -125,3 +125,14 @@ Promotion V&V: dashboard runtime was replaced using staged/verified bytes while 
 Evidence record: evidence/v2517-linux-final-acceptance-20260930.json SHA256 075fbf5bd0d29fab1b5d67efd2ed1a4a195b1ff5fa93a0c5aae729e35c4ad7c6.
 Status: LINUX PASS / WINDOWS PENDING. This is not yet cross-platform FINAL.
 Exact Next Action: port the evidence-backed OpenVPN quality/source/history improvements to Windows, but do not copy Linux NetworkManager-specific handover logic; preserve Windows pre-existing network state during initial implementation/testing.
+
+## 2026-09-30 - v2.5.17 Windows OpenVPN quality source candidate
+Previous accepted cross-platform base: v2.5.16 / 92aae85137fe3dc8a3770ff36721b4f09f1677df. Linux v2.5.17 checkpoint tree was transferred byte-for-byte before Windows work.
+Windows delta is intentionally Windows-native: bounded parallel VPN Gate refresh, structurally safe partial-row recovery with previous-cache coverage fill, public-profile execution-directive filtering, larger diverse pool (target 48), and connector ranking using source metrics + persistent success/failure history + direct fast probes + historical throughput/latency. No Linux NetworkManager handover logic or dual-tunnel experiment was copied.
+Root cause addressed: Windows connector selection previously prioritized preferred/success/UDP/rank but did not consume the already-existing connection-benchmarks history. Pool refresh was serial/first-source and public profiles lacked the Linux execution-directive filter.
+Cold-start V&V in an isolated temp root with no cache: PASS in ~10.1 s; 59 complete live rows; 48 promoted profiles; UDP=6, TCP=42; 7 countries; unsafe profiles=0. A strict 48-row promotion threshold was rejected as unnecessary: 39 valid live rows had previously caused a false cold-start failure even though the builder supports a smaller healthy pool. Minimum live promotion threshold is 8 structurally complete rows, while Count=48 remains the target ceiling.
+Regression gates after final threshold: 65/65 PASS; lint PASS; npm audit production vulnerabilities=0; PowerShell parse PASS; git diff --check PASS.
+Windows user/network prestate remained preserved throughout source work: desired=off, OVPNConnectorService stopped/manual, no OIG /1 routes, physical default route Ethernet 3 via 192.168.20.1. Installed app remains 2.5.16 at this milestone.
+Evidence: C:\Users\Aa.Emad\AppData\Local\OpenInternetGateway\evidence\v2517-windows-source-candidate-20260930.json ; SHA256 010fa4a6de30eb437d67ef8514ac3f86b8e689bd88d7235e72f5f77d39873fdd. Prestate evidence SHA256 a5252418250a0ab231a8780cdbcf10690ff12d8624d9e3be82e84576babf0559.
+Status: SOURCE PASS / WINDOWS ARTIFACT+INSTALL+LIVE V&V PENDING.
+Exact Next Action: commit this source candidate, build Windows 2.5.17, verify packaged source/runtime parity and no-admin installer metadata, then install while desired=off and run runtime/regression validation before any optional live tunnel test.
