@@ -34,7 +34,7 @@ Update transfers use bounded `curl` requests with redirect handling, connection/
 
 Published releases include `SHA256SUMS.txt`.
 
-No publicly trusted Authenticode signing credential is configured for v2.5.15. Windows users performing a manual install should verify the published SHA-256 checksum. The in-app updater verifies the GitHub digest, `SHA256SUMS.txt`, and the downloaded bytes before applying the user-space update.
+No publicly trusted Authenticode signing credential is configured for v2.5.16. Windows users performing a manual install should verify the published SHA-256 checksum. The in-app updater verifies the GitHub digest, `SHA256SUMS.txt`, and the downloaded bytes before applying the user-space update.
 
 ## Linux Chromium sandbox
 

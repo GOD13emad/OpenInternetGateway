@@ -541,6 +541,11 @@ test('GitHub updater checks latest release and verifies published SHA-256',()=>{
   assert.match(backend,/async launchDownloadedUpdate/);
   assert.match(backend,/installScope: 'current-user'/);
   assert.ok(backend.includes("Programs', 'open-internet-gateway', 'Open Internet Gateway.exe'"));
+  assert.match(backend,/apply-update\.cmd/);
+  assert.ok(backend.includes("process.env.ComSpec || 'cmd.exe'"));
+  assert.match(backend,/resultFile \+ '\.started'/);
+  assert.match(backend,/Windows update helper failed to start/);
+  assert.doesNotMatch(backend,/spawn\('pwsh\.exe'/);
   assert.match(backend,/--appimage-extract/);
   assert.match(backend,/update-desktop-database/);
   assert.match(preload,/updateInfo/);

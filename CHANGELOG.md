@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.5.16
+
+- Fixed Windows in-app updater launch reliability for Microsoft Store PowerShell 7: OIG now detaches a native `cmd.exe` parent and runs `pwsh.exe` as its foreground child, preventing the PowerShell helper from dying when the Electron/Node parent exits.
+- Added a helper-start handshake (`apply-result.json.started`) and bounded startup verification so the app refuses to exit for an update unless the PowerShell helper actually started.
+- Preserves SHA-256 verification, current-user NSIS installation, no-UAC update behavior, Windows `asInvoker`, and all v2.5.15 Linux Chromium sandbox hardening.
+
 ## 2.5.15
 
 - Hardened Linux Chromium/Electron sandboxing on hosts where unprivileged user namespaces are restricted: OIG now reuses a root-owned setuid `chrome-sandbox` only when its SHA-256 is byte-identical to the runtime helper and its ownership/mode are exactly `root:root` / `4755`.

@@ -988,6 +988,8 @@ function Save-Result([hashtable]$Data){
   $Data.at=(Get-Date).ToString('o')
   $Data | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $ResultFile -Encoding UTF8
 }
+$startedFile=$ResultFile+'.started'
+Set-Content -LiteralPath $startedFile -Value (Get-Date).ToString('o') -Encoding UTF8
 try {
   $deadline=(Get-Date).AddSeconds(120)
   while(Get-Process -Id $WaitPid -ErrorAction SilentlyContinue){
@@ -1012,7 +1014,24 @@ try {
 }
 `;
       fs.writeFileSync(helper, script, 'utf8');
-      const child = spawn('pwsh.exe', [
+      const wrapper = path.join(updateDir, 'apply-update.cmd');
+      const startedFile = resultFile + '.started';
+      const launchLog = path.join(updateDir, 'apply-update-launch.log');
+      for (const stale of [resultFile, startedFile, launchLog]) {
+        try { fs.unlinkSync(stale); } catch {}
+      }
+      const wrapperScript = String.raw`@echo off
+setlocal
+where.exe pwsh.exe >nul 2>nul
+if errorlevel 1 (
+  > "%~dp0apply-update-launch.log" echo pwsh.exe was not found.
+  exit /b 127
+)
+pwsh.exe %* > "%~dp0apply-update-launch.log" 2>&1
+exit /b %errorlevel%
+`;
+      fs.writeFileSync(wrapper, wrapperScript, 'utf8');
+      const pwshArgs = [
         '-NoProfile','-WindowStyle','Hidden','-ExecutionPolicy','Bypass','-File',helper,
         '-Installer',downloaded.path,
         '-ExpectedSha',expectedSha,
@@ -1021,8 +1040,24 @@ try {
         '-Target',target,
         '-Fallback',String(currentExecutable || ''),
         '-ResultFile',resultFile
-      ], { detached: true, windowsHide: true, stdio: 'ignore' });
+      ];
+      const child = spawn(process.env.ComSpec || 'cmd.exe', ['/d','/c',wrapper,...pwshArgs], {
+        detached: true, windowsHide: true, stdio: 'ignore'
+      });
+      await new Promise((resolve, reject) => {
+        child.once('spawn', resolve);
+        child.once('error', reject);
+      });
       child.unref();
+      const startedDeadline = Date.now() + 5000;
+      while (!fs.existsSync(startedFile) && Date.now() < startedDeadline) {
+        await new Promise(resolve => setTimeout(resolve, 50));
+      }
+      if (!fs.existsSync(startedFile)) {
+        let detail = '';
+        try { detail = fs.readFileSync(launchLog, 'utf8').trim(); } catch {}
+        throw new Error('Windows update helper failed to start.' + (detail ? ' ' + detail : ''));
+      }
       return { ok: true, applying: true, restart: true, installScope: 'current-user', resultFile, target };
     }
 

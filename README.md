@@ -158,7 +158,7 @@ See [SECURITY.md](SECURITY.md).
 
 Every published release includes `SHA256SUMS.txt`. The in-app updater verifies the selected release asset against both GitHub's published digest and `SHA256SUMS.txt`, re-hashes the downloaded bytes, then applies the user-space update and restarts the dashboard.
 
-No publicly trusted Authenticode signing credential is configured for v2.5.15, so Windows users installing manually should verify the published checksum. The in-app updater verifies GitHub digest + `SHA256SUMS.txt` + the downloaded bytes before applying an update.
+No publicly trusted Authenticode signing credential is configured for v2.5.16, so Windows users installing manually should verify the published checksum. The in-app updater verifies GitHub digest + `SHA256SUMS.txt` + the downloaded bytes before applying an update.
 
 ## Scope
 
