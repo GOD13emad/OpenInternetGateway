@@ -54,6 +54,59 @@ class Backend {
     this.emit = emit || (() => {});
     this.platform = process.platform;
     this.backendRoot = null;
+    this.sandboxHardening = null;
+  }
+
+  async _hardenLinuxChromiumSandbox() {
+    const base = {
+      supported: false,
+      hardened: false,
+      changed: false,
+      restartRequired: false,
+      currentProcessNoSandbox: false,
+      runtimeRoot: '',
+      helper: '',
+      reason: 'Native packaged Linux runtime is unavailable.'
+    };
+    if (process.platform !== 'linux' || !this.backendRoot) return base;
+    const runtimeRoot = path.dirname(process.execPath || '');
+    const appRun = path.join(runtimeRoot, 'AppRun');
+    const helperScript = path.join(this.backendRoot, 'linux', 'harden_sandbox.py');
+    if (!runtimeRoot || !fs.existsSync(appRun) || !fs.existsSync(helperScript)) {
+      return { ...base, runtimeRoot };
+    }
+    try {
+      const r = await run('python3', [helperScript, runtimeRoot], { timeout: 10000 });
+      const parsed = JSON.parse(String(r.stdout || '{}').trim() || '{}');
+      let currentProcessNoSandbox = false;
+      try {
+        const argv = fs.readFileSync('/proc/' + String(process.pid) + '/cmdline', 'utf8').split('\0').filter(Boolean);
+        currentProcessNoSandbox = argv.includes('--no-sandbox');
+      } catch {}
+      const result = {
+        ...base,
+        ...parsed,
+        runtimeRoot,
+        currentProcessNoSandbox,
+        restartRequired: !!parsed.hardened
+          && currentProcessNoSandbox
+          && process.env.OIG_SANDBOX_RESTARTED !== '1',
+        version: this.version,
+        at: new Date().toISOString()
+      };
+      try { this._writeJson(path.join(this.backendRoot, 'evidence', 'linux-sandbox-hardening.json'), result); } catch {}
+      return result;
+    } catch (error) {
+      const result = {
+        ...base,
+        runtimeRoot,
+        reason: 'Sandbox hardening helper failed safely: ' + String(error?.message || error),
+        version: this.version,
+        at: new Date().toISOString()
+      };
+      try { this._writeJson(path.join(this.backendRoot, 'evidence', 'linux-sandbox-hardening.json'), result); } catch {}
+      return result;
+    }
   }
 
   async initialize() {
@@ -128,7 +181,9 @@ class Backend {
           }
         }
       } catch {}
+      this.sandboxHardening = await this._hardenLinuxChromiumSandbox();
     }
+    return { sandboxHardening: this.sandboxHardening };
   }
 
   platformInfo() {
@@ -138,7 +193,8 @@ class Backend {
       release: os.release(),
       arch: os.arch(),
       hostname: os.hostname(),
-      backendRoot: this.backendRoot
+      backendRoot: this.backendRoot,
+      sandboxHardening: this.sandboxHardening
     };
   }
 
@@ -984,14 +1040,15 @@ result_file="$5"
 target="$6"
 fallback="$7"
 write_result() {
-  local ok="$1" message="$2"
-  python3 - "$result_file" "$ok" "$message" "$version" "$target" <<'PY'
+  local ok="$1" message="$2" sandbox_hardened="\${3:-false}"
+  python3 - "$result_file" "$ok" "$message" "$version" "$target" "$sandbox_hardened" <<'PY'
 import datetime,json,os,sys
-path,ok,message,version,target=sys.argv[1:]
+path,ok,message,version,target,sandbox_hardened=sys.argv[1:]
 os.makedirs(os.path.dirname(path),exist_ok=True)
 with open(path,'w',encoding='utf-8') as f:
     json.dump({'ok':ok=='true','message':message,'version':version,'target':target,
-               'installScope':'current-user','at':datetime.datetime.now().astimezone().isoformat()},f,indent=2)
+               'installScope':'current-user','sandboxHardened':sandbox_hardened=='true',
+               'at':datetime.datetime.now().astimezone().isoformat()},f,indent=2)
 PY
 }
 fail() {
@@ -1029,6 +1086,14 @@ mv "$candidate" "$target" || {
   fail "Could not promote extracted AppImage."
 }
 rm -rf "$stage"
+sandbox_hardened=false
+sandbox_script="$target/resources/backend/linux/harden_sandbox.py"
+if [ -f "$sandbox_script" ]; then
+  sandbox_json="$(python3 "$sandbox_script" "$target" 2>/dev/null || true)"
+  if printf '%s' "$sandbox_json" | python3 -c 'import json,sys; raise SystemExit(0 if json.load(sys.stdin).get("hardened") else 1)' 2>/dev/null; then
+    sandbox_hardened=true
+  fi
+fi
 desktop_dir="$HOME/.local/share/applications"
 desktop="$desktop_dir/OpenInternetGateway.desktop"
 desktop_tmp="\${desktop}.tmp.$$"
@@ -1053,7 +1118,7 @@ EOF
 chmod 644 "$desktop_tmp"
 mv "$desktop_tmp" "$desktop"
 update-desktop-database "$desktop_dir" >/dev/null 2>&1 || true
-write_result true "Update applied." || true
+write_result true "Update applied." "$sandbox_hardened" || true
 nohup "$target/AppRun" >/tmp/oig-update-\${version}.log 2>&1 </dev/null &
 exit 0
 `;

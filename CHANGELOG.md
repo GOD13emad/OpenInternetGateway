@@ -1,5 +1,12 @@
 # Changelog
 
+## 2.5.15
+
+- Hardened Linux Chromium/Electron sandboxing on hosts where unprivileged user namespaces are restricted: OIG now reuses a root-owned setuid `chrome-sandbox` only when its SHA-256 is byte-identical to the runtime helper and its ownership/mode are exactly `root:root` / `4755`.
+- Added a fail-safe `harden_sandbox.py` helper shared by startup and the Linux AppImage updater. It patches only the extracted per-user runtime and never weakens global AppArmor/sysctl policy or invokes `sudo`/`pkexec`.
+- Added one-time self-restart before the Linux exit watchdog when a newly updated runtime starts with `--no-sandbox` but can be hardened safely; the tunnel/desired-state is preserved across that replacement.
+- Linux updater evidence now records `sandboxHardened`, and regression tests cover the hardening path and restart loop guard.
+- Preserves v2.5.14 no-admin Windows runtime/update architecture and SHA-verified user-space updates on both platforms.
 ## 2.5.11
 
 - Fixed Debian icon permissions: the packaged application icon is now forced to and verified as mode `0644` alongside the desktop entry, preventing root-only icons under restrictive build umasks.

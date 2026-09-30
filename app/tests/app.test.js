@@ -552,6 +552,23 @@ test('GitHub updater checks latest release and verifies published SHA-256',()=>{
   assert.match(html,/Install verified update/);
 });
 
+
+test('Linux Chromium sandbox hardening is fail-safe and update-persistent',()=>{
+  const backend=fs.readFileSync(path.join(root,'src/main/platform-backend.js'),'utf8');
+  const main=fs.readFileSync(path.join(root,'src/main/main.js'),'utf8');
+  const helper=fs.readFileSync(path.join(root,'backend/linux/harden_sandbox.py'),'utf8');
+  assert.match(backend,/_hardenLinuxChromiumSandbox/);
+  assert.match(backend,/linux-sandbox-hardening.json/);
+  assert.match(backend,/sandboxHardened/);
+  assert.match(backend,/resources\/backend\/linux\/harden_sandbox\.py/);
+  assert.match(main,/OIG_SANDBOX_RESTARTED/);
+  assert.ok(main.includes('initialized?.sandboxHardening?.restartRequired'));
+  assert.match(helper,/0o4755/);
+  assert.match(helper,/hash-compatible root-owned setuid Chromium sandbox/);
+  assert.match(helper,/OIG sandbox hardening: prefer a compatible root-owned setuid helper/);
+  assert.doesNotMatch(helper,/sysctl|apparmor_parser|sudo|pkexec/);
+});
+
 test('GitHub workflows use current hosted-runner actions and Node LTS',()=>{
   const build=fs.readFileSync(path.resolve(root,'..','.github','workflows','build.yml'),'utf8');
   const release=fs.readFileSync(path.resolve(root,'..','.github','workflows','release.yml'),'utf8');

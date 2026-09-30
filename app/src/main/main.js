@@ -246,7 +246,29 @@ app.on('second-instance', (_event, argv, _workingDirectory, additionalData) => {
         if (payload?.status) { lastStatus = payload.status; renderTray(lastStatus); }
       }
     });
-    await backend.initialize();
+    const initialized = await backend.initialize();
+    if (process.platform === 'linux'
+        && process.env.OIG_CAPTURE_ONLY !== '1'
+        && initialized?.sandboxHardening?.restartRequired) {
+      const appRun = path.join(initialized.sandboxHardening.runtimeRoot || '', 'AppRun');
+      if (fs.existsSync(appRun)) {
+        const relaunchArgs = process.argv.slice(1).filter(arg => arg !== '--no-sandbox');
+        try {
+          const child = spawn(appRun, relaunchArgs, {
+            detached: true,
+            stdio: 'ignore',
+            env: { ...process.env, OIG_SANDBOX_RESTARTED: '1' }
+          });
+          child.unref();
+          allowQuit = true;
+          app.isQuitting = true;
+          app.quit();
+          return;
+        } catch (error) {
+          console.error('OpenInternetGateway sandbox hardening restart failed:', error);
+        }
+      }
+    }
     startLinuxExitWatchdog();
     if (quitRequestedAtLaunch) { requestQuit(); return; }
     if (process.platform === 'win32' && app.isPackaged) {

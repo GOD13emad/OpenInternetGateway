@@ -150,6 +150,7 @@ Generated relay profiles, local runtime state, machine evidence, dependencies, a
 - Runtime state and generated credentials/profiles are excluded from source control.
 - Windows OIG uses a headless service backend rather than automating or hiding another application's UI.
 - GitHub update downloads are fail-closed on SHA-256 mismatch.
+- Linux Chromium sandbox hardening is fail-safe: when user namespaces are restricted, OIG only reuses a root-owned `4755` setuid `chrome-sandbox` whose SHA-256 is byte-identical to the packaged helper. OIG does not disable AppArmor or change global user-namespace policy.
 
 See [SECURITY.md](SECURITY.md).
 
@@ -157,7 +158,7 @@ See [SECURITY.md](SECURITY.md).
 
 Every published release includes `SHA256SUMS.txt`. The in-app updater verifies the selected release asset against both GitHub's published digest and `SHA256SUMS.txt`, re-hashes the downloaded bytes, then applies the user-space update and restarts the dashboard.
 
-No Authenticode signing certificate is configured in the repository build configuration as of v2.5.6, so Windows users should verify the published checksum when installing manually.
+No publicly trusted Authenticode signing credential is configured for v2.5.15, so Windows users installing manually should verify the published checksum. The in-app updater verifies GitHub digest + `SHA256SUMS.txt` + the downloaded bytes before applying an update.
 
 ## Scope
 

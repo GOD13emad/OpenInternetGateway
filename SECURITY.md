@@ -34,8 +34,11 @@ Update transfers use bounded `curl` requests with redirect handling, connection/
 
 Published releases include `SHA256SUMS.txt`.
 
-No Authenticode signing certificate is configured in the repository build configuration as of v2.5.6. Windows users performing a manual install should verify the published SHA-256 checksum. The in-app updater performs the checksum verification automatically before handing the installer/package to the operating system.
+No publicly trusted Authenticode signing credential is configured for v2.5.15. Windows users performing a manual install should verify the published SHA-256 checksum. The in-app updater verifies the GitHub digest, `SHA256SUMS.txt`, and the downloaded bytes before applying the user-space update.
 
+## Linux Chromium sandbox
+
+OIG keeps Chromium sandbox hardening fail-safe. On Linux hosts where unprivileged user namespaces are restricted, the runtime may reuse a system-provided setuid `chrome-sandbox` only when that helper is owned by `root:root`, has mode `4755`, and is SHA-256-identical to the helper shipped with the current runtime. The application does not change global AppArmor or user-namespace policy and does not invoke `sudo` or `pkexec` from the updater.
 ## Reporting
 
 Use GitHub Security Advisories for vulnerabilities that could affect users. Do not post credentials, private infrastructure addresses, personal logs, or private network captures in public issues.
