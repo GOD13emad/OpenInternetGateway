@@ -425,6 +425,31 @@ class Backend {
       message,
       status: await this.status()
     });
+    const recoverAnyLinux = async () => {
+      if (this.platform !== 'linux') return false;
+      this.emit({
+        type: 'progress',
+        action: 'connect-profile',
+        stage: 'recovering',
+        message: 'Exact rollback is unavailable. Recovering with another validated relay…'
+      });
+      try {
+        await this._linux('connect');
+        const recoveredStatus = await this.status();
+        const recovered = this._readJson(this._profileStatePath(), {}) || {};
+        const recoveredSha = String(recovered.sha256 || '').toLowerCase();
+        if (!recoveredStatus.connected || !recoveredSha) return false;
+        this._writeJson(preferredPath, {
+          sha256: recoveredSha,
+          country: recovered.country || recovered.configuredCountry || recoveredStatus.country || '',
+          host: recovered.host || recovered.serverIP || '',
+          at: new Date().toISOString()
+        });
+        return true;
+      } catch {
+        return false;
+      }
+    };
 
     try {
       await requestExact(wanted, profile.country, profile.host || profile.ip);
@@ -435,7 +460,11 @@ class Backend {
         'SELECTED_RELAY_FAILED_RESTORED',
         'Selected relay failed validation. Previous working relay was restored.'
       );
-      throw new Error('Selected relay failed validation, and the previous working relay could not be restored automatically. Choose another validated relay or run Repair now.');
+      if (await recoverAnyLinux()) return recoveredResult(
+        'SELECTED_RELAY_FAILED_GENERAL_RECOVERY',
+        'Selected relay and exact rollback were unavailable. Another validated relay was recovered automatically.'
+      );
+      throw new Error('Selected relay failed validation, and neither exact rollback nor general recovery could restore protection. Run Repair now.');
     }
 
     this.emit({
@@ -453,7 +482,11 @@ class Backend {
         'SELECTED_RELAY_NOT_ACTIVE_RESTORED',
         'Selected relay did not become active. Previous working relay was restored.'
       );
-      throw new Error('Selected relay did not become active. No fallback relay was accepted; choose another validated relay or run Repair now.');
+      if (await recoverAnyLinux()) return recoveredResult(
+        'SELECTED_RELAY_NOT_ACTIVE_GENERAL_RECOVERY',
+        'Selected relay did not become active and exact rollback was unavailable. Another validated relay was recovered automatically.'
+      );
+      throw new Error('Selected relay did not become active. Neither exact rollback nor general recovery could restore protection. Run Repair now.');
     }
     if (profile.country && status.country && profile.country !== status.country) {
       const restored = await restorePrevious();
@@ -461,7 +494,11 @@ class Backend {
         'SELECTED_RELAY_COUNTRY_MISMATCH_RESTORED',
         'Selected relay exit country did not match its advertised country. Previous working relay was restored.'
       );
-      throw new Error('Selected relay exit country did not match its advertised country. No fallback relay was accepted; choose another validated relay.');
+      if (await recoverAnyLinux()) return recoveredResult(
+        'SELECTED_RELAY_COUNTRY_MISMATCH_GENERAL_RECOVERY',
+        'Selected relay exit country mismatched and exact rollback was unavailable. Another validated relay was recovered automatically.'
+      );
+      throw new Error('Selected relay exit country mismatched. Neither exact rollback nor general recovery could restore protection. Run Repair now.');
     }
     savePreferred();
     return { ok: true, profile, status };
@@ -1255,6 +1292,23 @@ exit 0
       else if (action === 'benchmark-active') result = await this.benchmarkActive();
       else if (action === 'benchmark-direct-internet') result = await this.benchmarkDirectInternet();
       else if (action === 'benchmark-all-fast') result = await this.benchmarkAllFast();
+      else if (this.platform === 'linux' && action === 'connect') {
+        // Refresh relay reachability over the physical ISP path before ranking.
+        // This is read-only: it never changes the active/default VPN route.
+        try { await this.benchmarkAllFast(); } catch {}
+        result = await this._linux('connect');
+      }
+      else if (this.platform === 'linux' && action === 'refresh') {
+        // Build the new pool first, qualify it without switching tunnels, then
+        // connect only if protection is currently down.
+        await this._linux('factory-refresh');
+        try { await this.benchmarkAllFast(); } catch {}
+        result = await this._linux('connect');
+      }
+      else if (this.platform === 'linux' && action === 'factory-refresh') {
+        result = await this._linux('factory-refresh');
+        try { result.fastQualification = await this.benchmarkAllFast(); } catch {}
+      }
       else result = await (this.platform === 'win32' ? this._windows(action) : this._linux(action));
       if (action === 'benchmark-all-fast' || action === 'benchmark-direct-internet') {
         this.emit({ type: 'busy', action, busy: false });
