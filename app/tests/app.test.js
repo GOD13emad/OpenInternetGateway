@@ -282,7 +282,7 @@ test('Windows exact relay switch is atomic, bounded and SHA verified',()=>{
   assert.match(block,/Previous working relay was restored/);
   assert.match(block,/const savePreferred = \(\) => this\._writeJson\(preferredPath/);
   assert.match(block,/if \(profile\.active\)[\s\S]*savePreferred\(\)/);
-  assert.match(block,/No fallback relay was accepted[\s\S]*savePreferred\(\);[\s\S]*return \{ ok: true/);
+  assert.match(block,/neither exact rollback nor general recovery[\s\S]*savePreferred\(\);[\s\S]*return \{ ok: true/);
   assert.match(block,/catch \{[\s\S]*fs\.unlinkSync\(request\)[\s\S]*return false/);
   assert.match(renderer,/Connecting .* speed is measured only after that exact tunnel is validated/);
 });
@@ -301,7 +301,7 @@ test('failed exact relay attempt preserves preferred metadata and clears stale r
   backend.backendRoot=tmp;
   backend.profiles=async()=>({profiles:[{...previous,active:true,quarantined:false},target]});
   backend._windows=async()=>{throw new Error('SIMULATED_EXACT_FAIL')};
-  await assert.rejects(backend.connectProfile(target.sha256),/previous working relay could not be restored automatically/i);
+  await assert.rejects(backend.connectProfile(target.sha256),/neither exact rollback nor general recovery could restore protection/i);
   const after=JSON.parse(fs.readFileSync(path.join(stateDir,'preferred-profile.json'),'utf8'));
   assert.equal(after.sha256,previous.sha256);
   assert.equal(fs.existsSync(path.join(stateDir,'exact-profile.request')),false);
@@ -771,4 +771,158 @@ test('automatic updater prefers user-space assets and avoids elevation paths',()
   assert.doesNotMatch(launchBlock,/-Verb RunAs/);
   assert.ok(main.includes('app-process.lease'));
   fs.rmSync(tmp,{recursive:true,force:true});
+});
+
+test('Linux OpenVPN quality engine uses multi-source refresh and safe public-profile filtering',()=>{
+  const factory=fs.readFileSync(path.join(root,'backend/linux/config_factory.py'),'utf8');
+  assert.match(factory,/https:\/\/www\.vpngate\.net/);
+  assert.match(factory,/ThreadPoolExecutor/);
+  assert.match(factory,/max_sources=3/);
+  assert.match(factory,/usedMirrors/);
+  assert.match(factory,/sourceCount/);
+  assert.match(factory,/mergedRows/);
+  assert.match(factory,/count=48/);
+  assert.match(factory,/preserve_count=8/);
+  for(const token of ['script-security','route-up','route-pre-down','ipchange','plugin','client-connect','client-disconnect','learn-address']) assert.ok(factory.includes(token));
+});
+
+test('Linux adaptive OpenVPN ranking consumes direct probes and persistent quality history',()=>{
+  const linux=fs.readFileSync(path.join(root,'backend/linux/oig-linux.sh'),'utf8').replace(/\r\n/g,'\n');
+  const start=linux.indexOf('profile_lines()');
+  const end=linux.indexOf('\nconnect_one()',start);
+  const block=linux.slice(start,end);
+  assert.match(block,/connection-benchmarks\.json/);
+  assert.match(block,/successes\.json/);
+  assert.match(block,/failures\.json/);
+  assert.match(block,/fastPingMs/);
+  assert.match(block,/downloadMbps/);
+  assert.match(block,/uploadMbps/);
+  assert.match(block,/httpsLatencyMs/);
+  assert.match(block,/fresh_iso\(f\.get\("last"\),6\)/);
+  assert.match(block,/score -= 320\.0/);
+  assert.match(block,/proto=="udp"/);
+  assert.match(block,/proto=="tcp" and b\.get\("fastReachable"\) is False/);
+  assert.match(block,/if n >= \(1 if only_sha else 16\): break/);
+});
+
+test('Linux exact OpenVPN switch preflights beside the working tunnel before teardown',()=>{
+  const linux=fs.readFileSync(path.join(root,'backend/linux/oig-linux.sh'),'utf8').replace(/\r\n/g,'\n');
+  const pre=linux.slice(linux.indexOf('preflight_one()'),linux.indexOf('\nconnect_one()'));
+  assert.match(pre,/OIG-VPN-PREFLIGHT/);
+  assert.match(pre,/ipv4\.never-default yes/);
+  assert.match(pre,/ipv4\.ignore-auto-routes yes/);
+  assert.match(pre,/ipv4\.ignore-auto-dns yes/);
+  assert.match(pre,/nmcli -w 10 connection up/);
+  assert.match(pre,/defaultRoutePreserved/);
+  assert.match(pre,/dnsStatePreserved/);
+  assert.match(linux,/dns_server_fingerprint/);
+  assert.match(pre,/route_ok and dns_ok/);
+  const start=linux.indexOf('  connect-profile)');
+  const end=linux.indexOf('    ;;',start);
+  const block=linux.slice(start,end);
+  assert.ok(block.indexOf('preflight_one') >= 0);
+  assert.ok(block.indexOf('preflight_one') < block.indexOf('teardown_gateway'));
+  assert.match(block,/current tunnel preserved/);
+  assert.match(block,/rc=\$\?/);
+});
+
+test('Linux foreground connect and refresh qualify the OpenVPN pool over physical Internet first',()=>{
+  const backend=fs.readFileSync(path.join(root,'src/main/platform-backend.js'),'utf8');
+  const start=backend.indexOf('async action(action, options = {})');
+  const end=backend.indexOf('\n  async diagnostics()',start);
+  const block=backend.slice(start,end);
+  assert.match(block,/this\.platform === 'linux' && action === 'connect'[\s\S]*benchmarkAllFast\(\)[\s\S]*_linux\('connect'\)/);
+  assert.match(block,/this\.platform === 'linux' && action === 'refresh'[\s\S]*_linux\('factory-refresh'\)[\s\S]*benchmarkAllFast\(\)[\s\S]*_linux\('connect'\)/);
+  assert.match(block,/this\.platform === 'linux' && action === 'factory-refresh'[\s\S]*fastQualification/);
+});
+
+
+test('Linux interrupted OpenVPN activation records pending identity without trusting pending geo fallback',()=>{
+  const linux=fs.readFileSync(path.join(root,'backend/linux/oig-linux.sh'),'utf8').replace(/\r\n/g,'\n');
+  assert.match(linux,/validationPending/);
+  assert.match(linux,/profile_ip="" if pending/);
+  assert.match(linux,/profile_country="" if pending/);
+  const start=linux.indexOf('connect_one()');
+  const end=linux.indexOf('\nrecord_success()',start);
+  const block=linux.slice(start,end);
+  assert.ok(block.indexOf('write_profile_state') > block.indexOf('nmcli -w 30 connection up'));
+  assert.ok(block.indexOf('write_profile_state') < block.indexOf('for _ in 1 2 3 4 5 6'));
+  assert.match(block,/current-linux-profile\.before-connect\.json/);
+  assert.match(block,/mv -f "\$previous_state" "\$state_file"/);
+});
+
+test('Linux teardown waits on observed NetworkManager state instead of fixed outage delay',()=>{
+  const linux=fs.readFileSync(path.join(root,'backend/linux/oig-linux.sh'),'utf8').replace(/\r\n/g,'\n');
+  const start=linux.indexOf('teardown_gateway()');
+  const end=linux.indexOf('\ndisconnect_gateway()',start);
+  const block=linux.slice(start,end);
+  assert.doesNotMatch(block,/sleep 2/);
+  assert.match(block,/connection show --active/);
+  assert.match(block,/sleep 0\.1/);
+});
+
+
+test('Linux intent provenance tolerates a disappearing parent process',()=>{
+  const linux=fs.readFileSync(path.join(root,'backend/linux/oig-linux.sh'),'utf8');
+  const start=linux.indexOf('record_intent()');
+  const end=linux.indexOf('\nset_desired()',start);
+  const block=linux.slice(start,end);
+  assert.match(block,/\[\[ -r "\/proc\/\$PPID\/cmdline" \]\]/);
+  assert.match(block,/2>\/dev\/null \|\| true/);
+});
+
+test('Linux exact relay failure falls through to adaptive recovery when exact rollback is unavailable',async()=>{
+  const os=require('os');
+  const Backend=require(path.join(root,'src/main/platform-backend.js'));
+  const tmp=fs.mkdtempSync(path.join(os.tmpdir(),'oig-linux-general-recovery-'));
+  const stateDir=path.join(tmp,'state');
+  fs.mkdirSync(stateDir,{recursive:true});
+  const previous={sha256:'e'.repeat(64),country:'JP',host:'previous',ip:'203.0.113.10',active:true,quarantined:false};
+  const target={sha256:'f'.repeat(64),country:'JP',host:'target',ip:'198.51.100.20',active:false,quarantined:false};
+  const recoveredSha='1'.repeat(64);
+  fs.writeFileSync(path.join(stateDir,'preferred-profile.json'),JSON.stringify(previous));
+  const backend=new Backend({version:'test',resourcesPath:tmp,appPath:tmp,userData:tmp,emit:()=>{}});
+  backend.platform='linux';
+  backend.backendRoot=tmp;
+  backend.profiles=async()=>({profiles:[previous,target],preferredSha:previous.sha256});
+  let connected=false;
+  backend.status=async()=>({connected,country:connected?'TH':''});
+  const calls=[];
+  backend._linux=async(action,args)=>{
+    calls.push([action,...(args||[])]);
+    if(action==='connect-profile') throw new Error('SIMULATED_EXACT_FAILURE');
+    if(action==='connect'){
+      connected=true;
+      fs.writeFileSync(path.join(stateDir,'current-linux-profile.json'),JSON.stringify({
+        sha256:recoveredSha,country:'TH',host:'adaptive-recovery',serverIP:'203.0.113.77'
+      }));
+      return {ok:true};
+    }
+    throw new Error('UNEXPECTED_ACTION');
+  };
+  const result=await backend.connectProfile(target.sha256);
+  assert.equal(result.ok,false);
+  assert.equal(result.recovered,true);
+  assert.equal(result.code,'SELECTED_RELAY_FAILED_GENERAL_RECOVERY');
+  assert.equal(result.status.connected,true);
+  assert.deepEqual(calls,[
+    ['connect-profile',target.sha256],
+    ['connect-profile',previous.sha256],
+    ['connect']
+  ]);
+  const preferred=JSON.parse(fs.readFileSync(path.join(stateDir,'preferred-profile.json'),'utf8'));
+  assert.equal(preferred.sha256,recoveredSha);
+  assert.equal(preferred.country,'TH');
+  fs.rmSync(tmp,{recursive:true,force:true});
+});
+
+test('Linux general recovery is present in every post-selection validation failure branch',()=>{
+  const backend=fs.readFileSync(path.join(root,'src/main/platform-backend.js'),'utf8');
+  const block=backend.slice(backend.indexOf('async connectProfile'),backend.indexOf('async _directInternetPath'));
+  assert.match(block,/const recoverAnyLinux = async/);
+  assert.match(block,/this\.platform !== 'linux'/);
+  assert.match(block,/await this\._linux\('connect'\)/);
+  assert.match(block,/SELECTED_RELAY_FAILED_GENERAL_RECOVERY/);
+  assert.match(block,/SELECTED_RELAY_NOT_ACTIVE_GENERAL_RECOVERY/);
+  assert.match(block,/SELECTED_RELAY_COUNTRY_MISMATCH_GENERAL_RECOVERY/);
 });
