@@ -28,7 +28,7 @@ def write_json(path, value):
     tmp.write_text(json.dumps(value, indent=2, sort_keys=False), encoding="utf-8")
     tmp.replace(path)
 
-def fetch(url, timeout=8):
+def fetch(url, timeout=8, allow_partial=False):
     # urllib timeouts are per blocking socket operation, not a hard wall-clock
     # deadline. Prefer curl's bounded connect + total transfer limits so dead
     # mirrors cannot stall refresh while a working VPN remains active.
@@ -40,26 +40,31 @@ def fetch(url, timeout=8):
         ], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
            timeout=timeout+2, check=False)
         if proc.returncode:
+            # curl 28 means the hard transfer deadline fired. For the VPN Gate
+            # CSV only, retain bytes already received; refresh_snapshot keeps
+            # newline-terminated complete rows and promote() independently
+            # validates base64/OpenVPN structure and unsafe directives.
+            if allow_partial and proc.returncode == 28 and proc.stdout:
+                return proc.stdout, True
             raise RuntimeError(f"curl failed ({proc.returncode})")
-        return proc.stdout
+        return proc.stdout, False
     req = urllib.request.Request(url, headers={"User-Agent":"OpenInternetGateway/2.5"})
     with urllib.request.urlopen(req, timeout=timeout) as r:
-        return r.read()
+        return r.read(), False
 
 def refresh_snapshot(evidence, max_sources=3):
     csv_path = evidence / "vpngate-mirror-api.csv"
     used = []
     merged = []
     seen = set()
+    partial_sources = 0
 
     def fetch_one(base):
         try:
-            data = fetch(base + "/api/iphone/", timeout=6)
-            if len(data) <= 100_000:
-                return base, None
-            return base, data
+            data, partial = fetch(base + "/api/iphone/", timeout=6, allow_partial=True)
+            return base, data, partial
         except Exception:
-            return base, None
+            return base, None, False
 
     if os.environ.get("OIG_FACTORY_OFFLINE") != "1":
         # Query the official HTTPS endpoint and known mirrors in parallel.  We
@@ -68,11 +73,17 @@ def refresh_snapshot(evidence, max_sources=3):
         with concurrent.futures.ThreadPoolExecutor(max_workers=min(6, len(SEEDS))) as pool:
             futures = [pool.submit(fetch_one, base) for base in SEEDS]
             for future in concurrent.futures.as_completed(futures):
-                base, data = future.result()
+                base, data, partial = future.result()
                 if not data:
                     continue
+                text = data.decode("utf-8", errors="replace")
+                lines = text.splitlines()
+                # A timed-out transfer may end in the middle of one CSV row.
+                # Never treat that unterminated tail as a complete record.
+                if partial and data and not data.endswith((b"\n", b"\r")) and lines:
+                    lines = lines[:-1]
                 rows = []
-                for line in data.decode("utf-8", errors="replace").splitlines():
+                for line in lines:
                     if not line or line.startswith("*") or line.startswith("#"):
                         continue
                     parts = line.split(",")
@@ -85,9 +96,14 @@ def refresh_snapshot(evidence, max_sources=3):
                         continue
                     seen.add(key)
                     rows.append(line)
-                if rows:
+                # Eight complete rows are enough to exceed the release/runtime
+                # minimum after structural OpenVPN validation, without turning
+                # a network timeout into an unbounded retry.
+                if len(rows) >= 8:
                     merged.extend(rows)
                     used.append(base)
+                    if partial:
+                        partial_sources += 1
                 if len(used) >= max_sources:
                     for pending in futures:
                         pending.cancel()
@@ -103,8 +119,8 @@ def refresh_snapshot(evidence, max_sources=3):
     source = " + ".join(used) if used else "cached VPN Gate mirror snapshot"
     write_json(evidence / "mirror-refresh-last.json", {
         "at": now(), "refresh": bool(used), "usedMirror": (used[0] if used else None),
-        "usedMirrors": used, "sourceCount": len(used), "mergedRows": len(merged),
-        "source": source
+        "usedMirrors": used, "sourceCount": len(used), "partialSourceCount": partial_sources,
+        "mergedRows": len(merged), "source": source
     })
     return csv_path, (used[0] if used else None)
 

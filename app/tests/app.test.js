@@ -780,6 +780,11 @@ test('Linux OpenVPN quality engine uses multi-source refresh and safe public-pro
   assert.match(factory,/max_sources=3/);
   assert.match(factory,/usedMirrors/);
   assert.match(factory,/sourceCount/);
+  assert.match(factory,/allow_partial=True/);
+  assert.match(factory,/proc\.returncode == 28/);
+  assert.match(factory,/partialSourceCount/);
+  assert.match(factory,/len\(rows\) >= 8/);
+  assert.match(factory,/not data\.endswith/);
   assert.match(factory,/mergedRows/);
   assert.match(factory,/count=48/);
   assert.match(factory,/preserve_count=8/);
