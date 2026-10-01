@@ -16,6 +16,8 @@ $successFile=Join-Path $factory 'successes.json'
 $failureFile=Join-Path $factory 'failures.json'
 $benchmarkFile=Join-Path $Root 'state\connection-benchmarks.json'
 $quarantineFile=Join-Path $factory 'quarantine.json'
+$shadowFile=Join-Path $Root 'state\windows-physical-shadow.json'
+$shadowEvidence=Join-Path $Root 'evidence\shadow-handover-last.json'
 New-Item -ItemType Directory -Force -Path (Join-Path $Root 'state'),(Join-Path $Root 'evidence'),$factory,$programData|Out-Null
 
 function Test-Admin {
@@ -200,6 +202,92 @@ function Resolve-ProfilePath($c){
  if([IO.Path]::IsPathRooted($p)){return $p}
  return (Join-Path $Root $p)
 }
+function Write-ShadowEvidence($Object){$Object|ConvertTo-Json -Depth 10|Set-Content -Encoding UTF8 $shadowEvidence}
+function Get-PhysicalDefaultPath {
+ $defs=@(Get-NetRoute -AddressFamily IPv4 -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue|Where-Object {$_.NextHop -and $_.NextHop -ne '0.0.0.0'})
+ $rows=@()
+ foreach($r in $defs){$im=99999;try{$im=[int](Get-NetIPInterface -AddressFamily IPv4 -InterfaceIndex $r.InterfaceIndex -ErrorAction Stop).InterfaceMetric}catch{};$rows+=[pscustomobject]@{Route=$r;Effective=[int]$r.RouteMetric+$im}}
+ $best=$rows|Sort-Object Effective|Select-Object -First 1
+ if(-not $best){throw 'No physical IPv4 default route is available.'}
+ $r=$best.Route
+ if($r.InterfaceAlias -match 'OpenVPN|Local Area Connection|TAP|Wintun'){throw ('Refusing shadow path on tunnel-like default interface '+$r.InterfaceAlias+'.')}
+ return [pscustomobject]@{InterfaceIndex=[int]$r.InterfaceIndex;InterfaceAlias=[string]$r.InterfaceAlias;NextHop=[string]$r.NextHop;RouteMetric=[int]$r.RouteMetric;InterfaceMetric=[int](Get-NetIPInterface -AddressFamily IPv4 -InterfaceIndex $r.InterfaceIndex).InterfaceMetric;EffectiveMetric=[int]$best.Effective}
+}
+function Add-PhysicalShadows {
+ if(Test-Path $shadowFile){throw 'Physical shadow state already exists.'}
+ $existing=@(Get-NetRoute -AddressFamily IPv4 -ErrorAction SilentlyContinue|Where-Object {$_.DestinationPrefix -in @('0.0.0.0/1','128.0.0.0/1')})
+ if($existing.Count -gt 0){throw 'Refusing to add physical shadows while /1 routes already exist.'}
+ $p=Get-PhysicalDefaultPath
+ foreach($prefix in @('0.0.0.0/1','128.0.0.0/1')){New-NetRoute -DestinationPrefix $prefix -InterfaceIndex $p.InterfaceIndex -NextHop $p.NextHop -RouteMetric 1 -PolicyStore ActiveStore -ErrorAction Stop|Out-Null}
+ $owned=@(Get-NetRoute -AddressFamily IPv4 -ErrorAction SilentlyContinue|Where-Object {$_.DestinationPrefix -in @('0.0.0.0/1','128.0.0.0/1') -and $_.InterfaceIndex -eq $p.InterfaceIndex -and $_.NextHop -eq $p.NextHop})
+ if($owned.Count -ne 2){throw ('Physical shadow verification failed; expected 2 routes, found '+$owned.Count+'.')}
+ $state=[ordered]@{at=(Get-Date).ToString('o');status='holding-physical';interfaceIndex=$p.InterfaceIndex;interfaceAlias=$p.InterfaceAlias;nextHop=$p.NextHop;routeMetric=1;interfaceMetric=$p.InterfaceMetric;effectiveMetric=(1+$p.InterfaceMetric);prefixes=@('0.0.0.0/1','128.0.0.0/1')}
+ $state|ConvertTo-Json -Depth 7|Set-Content -Encoding UTF8 $shadowFile
+ Write-ShadowEvidence ([ordered]@{at=(Get-Date).ToString('o');result='HOLDING';state=$state})
+ return [pscustomobject]$state
+}
+function Get-ShadowState {if(Test-Path $shadowFile){try{return (Get-Content -Raw $shadowFile|ConvertFrom-Json)}catch{}};return $null}
+function Test-TcpDataPlane([string]$Address,[int]$Port=443,[int]$TimeoutMs=900){
+ $sw=[Diagnostics.Stopwatch]::StartNew();$client=[Net.Sockets.TcpClient]::new();$ok=$false
+ try{$task=$client.ConnectAsync($Address,$Port);$ok=($task.Wait($TimeoutMs) -and $client.Connected)}catch{$ok=$false}finally{$sw.Stop();$client.Dispose()}
+ return [pscustomobject]@{Ok=[bool]$ok;ElapsedMs=[int]$sw.ElapsedMilliseconds}
+}
+function Wait-NativeDataPlane([int]$Seconds=6){
+ $shadow=Get-ShadowState;if(-not $shadow){throw 'Physical shadow is required for isolated tunnel data-plane validation.'}
+ $native=@(Get-NetRoute -AddressFamily IPv4 -ErrorAction SilentlyContinue|Where-Object {$_.DestinationPrefix -in @('0.0.0.0/1','128.0.0.0/1') -and $_.InterfaceIndex -ne [int]$shadow.interfaceIndex})
+ if($native.Count -ne 2){return [pscustomobject]@{Ready=$false;Reason='NATIVE_ROUTE_PAIR_MISSING';Attempts=@()}}
+ $tap=$native|Select-Object -First 1;$idx=[int]$tap.InterfaceIndex;$hop=[string]$tap.NextHop;$probe='1.0.0.1/32'
+ if(@(Get-NetRoute -AddressFamily IPv4 -DestinationPrefix $probe -ErrorAction SilentlyContinue).Count -gt 0){return [pscustomobject]@{Ready=$false;Reason='PROBE_ROUTE_ALREADY_EXISTS';Attempts=@()}}
+ New-NetRoute -DestinationPrefix $probe -InterfaceIndex $idx -NextHop $hop -RouteMetric 1 -PolicyStore ActiveStore -ErrorAction Stop|Out-Null
+ $attempts=@();$ready=$false;$until=(Get-Date).AddSeconds($Seconds)
+ try{
+   do{
+     $tcp=Test-TcpDataPlane '1.0.0.1' 443 900
+     $attempts+=,[ordered]@{at=(Get-Date).ToString('o');ok=[bool]$tcp.Ok;elapsedMs=[int]$tcp.ElapsedMs}
+     if($tcp.Ok){$ready=$true;break}
+     Start-Sleep -Milliseconds 250
+   }while((Get-Date)-lt $until)
+ }finally{
+   @(Get-NetRoute -AddressFamily IPv4 -DestinationPrefix $probe -ErrorAction SilentlyContinue|Where-Object {$_.InterfaceIndex -eq $idx -and $_.NextHop -eq $hop})|Remove-NetRoute -Confirm:$false -ErrorAction SilentlyContinue
+ }
+ return [pscustomobject]@{Ready=[bool]$ready;Reason=$(if($ready){'PASS'}else{'TCP_PROBE_TIMEOUT'});Probe='1.0.0.1:443';InterfaceIndex=$idx;NextHop=$hop;Attempts=$attempts}
+}
+
+function Remove-PhysicalShadows {
+ $s=Get-ShadowState;if(-not $s){return}
+ $idx=[int]$s.interfaceIndex;$hop=[string]$s.nextHop
+ foreach($prefix in @('0.0.0.0/1','128.0.0.0/1')){@(Get-NetRoute -AddressFamily IPv4 -DestinationPrefix $prefix -ErrorAction SilentlyContinue|Where-Object {$_.InterfaceIndex -eq $idx -and $_.NextHop -eq $hop})|Remove-NetRoute -Confirm:$false -ErrorAction SilentlyContinue}
+ Remove-Item $shadowFile -Force -ErrorAction SilentlyContinue
+}
+function Read-ServiceLogDelta([long]$Offset){
+ if(-not(Test-Path $serviceLog)){return ''}
+ $fs=[IO.File]::Open($serviceLog,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::ReadWrite)
+ try{if($Offset -gt $fs.Length){$Offset=0};[void]$fs.Seek($Offset,[IO.SeekOrigin]::Begin);$sr=[IO.StreamReader]::new($fs);try{return $sr.ReadToEnd()}finally{$sr.Dispose()}}finally{$fs.Dispose()}
+}
+function Wait-NativeReady($c,[long]$LogOffset,[int]$Seconds=18){
+ $until=(Get-Date).AddSeconds($Seconds);$connectedNeedle='EVENT: CONNECTED '+[string]$c.IP+':'+[string]$c.Port
+ do{
+   $shadow=Get-ShadowState;if(-not $shadow){throw 'Physical shadow disappeared before native readiness.'}
+   $delta=Read-ServiceLogDelta $LogOffset
+   $event=($delta.Contains($connectedNeedle));$wfp=($delta.Contains('allow IPv4 traffic from TAP'))
+   $native=@(Get-NetRoute -AddressFamily IPv4 -ErrorAction SilentlyContinue|Where-Object {$_.DestinationPrefix -in @('0.0.0.0/1','128.0.0.0/1') -and $_.InterfaceIndex -ne [int]$shadow.interfaceIndex})
+   if($event -and $wfp -and $native.Count -eq 2){
+     $routeEvidence=@();foreach($r in @(Get-NetRoute -AddressFamily IPv4 -ErrorAction SilentlyContinue|Where-Object {$_.DestinationPrefix -in @('0.0.0.0/1','128.0.0.0/1')})){try{$im=[int](Get-NetIPInterface -AddressFamily IPv4 -InterfaceIndex $r.InterfaceIndex).InterfaceMetric}catch{$im=99999};$routeEvidence+=,[ordered]@{prefix=$r.DestinationPrefix;interface=$r.InterfaceAlias;interfaceIndex=[int]$r.InterfaceIndex;nextHop=$r.NextHop;routeMetric=[int]$r.RouteMetric;interfaceMetric=$im;effectiveMetric=([int]$r.RouteMetric+$im)}}
+     return [pscustomobject]@{Ready=$true;Event=$event;Wfp=$wfp;NativeRoutes=$native.Count;Routes=$routeEvidence;LogDeltaTail=(($delta -split "`r?`n")|Select-Object -Last 80)}
+   }
+   $svc=Get-Service $service -ErrorAction SilentlyContinue;if($svc -and $svc.Status -eq [ServiceProcess.ServiceControllerStatus]::Stopped){return [pscustomobject]@{Ready=$false;Reason='SERVICE_STOPPED';Event=$event;Wfp=$wfp;NativeRoutes=$native.Count}}
+   Start-Sleep -Milliseconds 150
+ }while((Get-Date)-lt $until)
+ return [pscustomobject]@{Ready=$false;Reason='NATIVE_READY_TIMEOUT';Event=$event;Wfp=$wfp;NativeRoutes=$native.Count}
+}
+function Stop-Connector {
+ $shadow=Get-ShadowState
+ try{[void](Invoke-Connector @('stop') 20000 -IgnoreExit)}catch{}
+ try{Stop-Service $service -Force -ErrorAction SilentlyContinue}catch{}
+ if($shadow){$until=(Get-Date).AddSeconds(6);do{$native=@(Get-NetRoute -AddressFamily IPv4 -ErrorAction SilentlyContinue|Where-Object {$_.DestinationPrefix -in @('0.0.0.0/1','128.0.0.0/1') -and $_.InterfaceIndex -ne [int]$shadow.interfaceIndex});if($native.Count -eq 0){break};Start-Sleep -Milliseconds 100}while((Get-Date)-lt $until);Remove-PhysicalShadows}
+ [void](Wait-Health $false 20)
+}
+
 function Stop-ServiceForConfig {
  $svc=Get-Service $service -ErrorAction SilentlyContinue
  if(-not $svc){return}
@@ -235,11 +323,6 @@ function Ensure-ServiceInstalled {
  [void](Invoke-Connector @('set-config','allow-local-dns','false') 12000)
  [void](Invoke-Connector @('set-config','google-dns-fallback','true') 12000)
 }
-function Stop-Connector {
- try{[void](Invoke-Connector @('stop') 20000 -IgnoreExit)}catch{}
- try{Stop-Service $service -Force -ErrorAction SilentlyContinue}catch{}
- [void](Wait-Health $false 20)
-}
 function Schedule-ManualServiceMode {
  $cmd = "Start-Sleep -Seconds 8; sc.exe config OVPNConnectorService start= demand | Out-Null"
  Start-Process -FilePath 'pwsh.exe' -WindowStyle Hidden -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-Command',$cmd) | Out-Null
@@ -254,11 +337,20 @@ function Try-Candidate($c){
  Copy-Item -LiteralPath $profile -Destination $serviceProfile -Force
  if((Get-FileHash -Algorithm SHA256 $serviceProfile).Hash.ToLowerInvariant() -ne $sha){throw 'ProgramData profile copy hash mismatch.'}
  [void](Invoke-Connector @('set-config','profile',$serviceProfile) 12000)
+ $shadow=Add-PhysicalShadows
+ $logOffset=0;if(Test-Path $serviceLog){$logOffset=(Get-Item $serviceLog).Length}
  try{[void](Invoke-Connector @('start') 20000)}catch{
-   Record-Failure $c 'START_FAIL';return $null
+   Record-Failure $c 'START_FAIL';Stop-Connector;return $null
  }
+ $native=Wait-NativeReady $c $logOffset 18
+ if(-not $native.Ready){Write-ShadowEvidence ([ordered]@{at=(Get-Date).ToString('o');result='NATIVE_NOT_READY';candidate=[string]$c.SHA256;native=$native;shadow=$shadow});Record-Failure $c 'NATIVE_READY_FAIL';Stop-Connector;return $null}
+ $dataPlane=Wait-NativeDataPlane 6
+ if(-not $dataPlane.Ready){Write-ShadowEvidence ([ordered]@{at=(Get-Date).ToString('o');result='DATAPLANE_NOT_READY';candidate=[string]$c.SHA256;native=$native;dataPlane=$dataPlane;shadow=$shadow});Record-Failure $c 'DATAPLANE_READY_FAIL';Stop-Connector;return $null}
+ Write-ShadowEvidence ([ordered]@{at=(Get-Date).ToString('o');result='DATAPLANE_READY';candidate=[string]$c.SHA256;native=$native;dataPlane=$dataPlane;shadow=$shadow})
+ Remove-PhysicalShadows
  $h=Wait-Health $true 14 ([string]$c.Country)
- if(-not $h.Healthy){Record-Failure $c 'LIVE_FAIL';Stop-Connector;return $null}
+ if(-not $h.Healthy){$fallback=Add-PhysicalShadows;Write-ShadowEvidence ([ordered]@{at=(Get-Date).ToString('o');result='POST_TAKEOVER_HEALTH_FAIL';candidate=[string]$c.SHA256;health=$h;fallback=$fallback;native=$native});Record-Failure $c 'LIVE_FAIL';Stop-Connector;return $null}
+ Write-ShadowEvidence ([ordered]@{at=(Get-Date).ToString('o');result='PASS';candidate=[string]$c.SHA256;health=$h;native=$native;dataPlane=$dataPlane})
  Record-Success $c $h
  Schedule-ManualServiceMode
  $state=[ordered]@{at=(Get-Date).ToString('o');engine='OVPNConnectorService';service=$service;host=$c.Host;serverIP=$c.IP;port=$c.Port;protocol=$c.Protocol;configuredCountry=[string]$c.Country;countryName=[string]$c.CountryName;profile=$profile;serviceProfile=$serviceProfile;sha256=$sha;observedIP=$h.IP;country=$h.Country;dns=$h.DNS}
