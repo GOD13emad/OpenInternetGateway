@@ -201,3 +201,14 @@ Limitations: Windows artifact remains publicly unsigned (`Authenticode=NotSigned
 Confidence/Status: HIGH / WINDOWS v2.5.17 FUNCTIONAL+PACKAGE+INSTALL+LIVE PASS.
 Reuse Targets: final release evidence, architecture, release notes, troubleshooting, maintenance guide.
 Exact Next Action: reconcile cross-platform authority/publication state; do not change Windows networking again unless a new release gate requires it.
+
+
+## 2026-10-01 — v2.5.17 clean-root release-seed gate PASS
+Context: v2.5.17 tagging remained blocked because the exact `release.yml` seed command had previously failed in a clean root. After Windows handover acceptance, the shared feature authority `7fdbf97b5eb6b4d052c310226b17e027879a19c0` was fast-forwarded to Linux and rechecked before main/tag promotion.
+Claim/Decision: The historical release-seed blocker is RESOLVED for the tested authority. A clean snapshot created with `git archive 7fdbf97...` contained no pre-existing `app/common/runtime/udp-cache/index.json`. The exact workflow sequence `config_factory.py refresh --common app/common`, `status`, index existence check, and >=6 `.ovpn` check exited 0.
+Evidence: clean-root seed produced pool=29, validated=0, standby=29, quarantined=0, metadataComplete=true, protocols UDP=1/TCP=28, countries JP=24/KR=3/US=1/HK=1, elapsed=6305 ms. `app/common/runtime/udp-cache/index.json` SHA256=`b0e23d4ffce0ab51d3e23b4de901dc8a7619ee8ae6fccab5870e3cc17b9075ce`. Evidence outputs included `mirror-refresh-last.json` and `vpngate-mirror-api.csv`. Note: release seed creates a fallback pool; validated=0 at this stage is not a failure and the workflow requirement is pool file presence plus >=6 profiles.
+Cross-platform verification: Linux repo fast-forwarded cleanly to `7fdbf97...`; delta from prior Linux authority `f9505ed...` was only Project Knowledge, Windows Headless-Control, and tests. Linux runtime-relevant files were unchanged. Linux ran 67/67 tests PASS, lint PASS, production audit=0, Bash/Python static checks PASS.
+Repository state: feature branch was pushed to GitHub at `7fdbf97...`. Existing PR #1 had already merged the earlier candidate at `8288ab3...`; no newer PR existed at the time of this audit.
+Confidence/Status: HIGH / RELEASE SEED PASS for `7fdbf97...`; MAIN/TAG PROMOTION PENDING.
+Reuse Targets: release evidence, CI/release engineering, final handoff.
+Exact Next Action: commit this evidence-only record, push feature branch, re-run the clean-root seed on that exact final evidence commit (functional files unchanged), then open/merge the delta PR only after GitHub checks are acceptable.
