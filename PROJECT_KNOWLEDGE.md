@@ -212,3 +212,19 @@ Repository state: feature branch was pushed to GitHub at `7fdbf97...`. Existing 
 Confidence/Status: HIGH / RELEASE SEED PASS for `7fdbf97...`; MAIN/TAG PROMOTION PENDING.
 Reuse Targets: release evidence, CI/release engineering, final handoff.
 Exact Next Action: commit this evidence-only record, push feature branch, re-run the clean-root seed on that exact final evidence commit (functional files unchanged), then open/merge the delta PR only after GitHub checks are acceptable.
+
+
+## 2026-10-01 — v2.5.17 public release publication PASS
+Context: PR #2 was merged after GitHub CI passed, tag `v2.5.17` was created on the tree-exact main merge authority, and the tag-triggered release workflow was allowed to complete before publication was accepted.
+Claim/Decision: PUBLICATION PASS. Release `OpenInternetGateway v2.5.17` exists on GitHub, is `draft=false` and `prerelease=false`, and was published by the release workflow. Tag `v2.5.17` dereferences to main merge commit `a0d841d467e767978bbf88a909bb22110b130a49`; its tree `261315cc23a55707679c3993513bc85b845704c1` is exactly the tested feature-head tree.
+CI/Release evidence: PR #2 build run `36795941856` completed test/windows/linux jobs successfully. Tag release run #21, id `36796342176`, completed `seed`, `test`, `windows`, `linux`, and `publish` all with conclusion=success; publish steps included artifact downloads, checksum generation, and GitHub Release creation.
+Published assets and authoritative SHA-256:
+- `OpenInternetGateway-Setup-2.5.17.exe` — `63a1122c1c7986ae8f8b03d90f3d1e3fa44cdc2650c7d8731e8662bd1f5f2335` — 112040805 bytes.
+- `OpenInternetGateway-2.5.17-x86_64.AppImage` — `320a93522f526edaff14bc5efe762614bf53f4c92a98b91f445d3b3161458df7` — 125793851 bytes.
+- `OpenInternetGateway-2.5.17-amd64.deb` — `2af72c43eae33ea3c9d01ca281d160fbe333c80cf4f78c43d19c92bf60a10f14` — 91357612 bytes.
+- `SHA256SUMS.txt` — `2f18ad55793f6dc949bb440bad2e1889d8a2390b56d84719346a8e30ed564768` — 315 bytes.
+Checksum cross-check: the downloaded public `SHA256SUMS.txt` contains exactly the same three binary SHA-256 values as GitHub release asset metadata. This independently confirms the workflow-generated checksum file matches the published binary digests.
+Release authority note: the locally built Windows acceptance setup had a different SHA-256 because the public release workflow injects the clean release seed into packaging; this is expected. The published Windows asset SHA above is the release authority.
+Limitations: Windows public artifact remains unsigned with Authenticode publisher trust not established; this is an external/deferred signing-credential gap and not claimed fixed.
+Status: FINAL PUBLIC RELEASE PASS / v2.5.17. Do not move or recreate this tag for documentation-only changes.
+Reuse Targets: final release record, handoff, release notes, maintenance guide, incident audit.
