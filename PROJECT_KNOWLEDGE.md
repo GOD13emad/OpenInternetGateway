@@ -189,3 +189,15 @@ Evidence/Provenance: v2517-shadow-v2-exact-monitor.log SHA256=ad5a798750dbedda33
 Confidence/Status: HIGH / SOURCE+LIVE ACCEPTED; packaged/install parity for this handover is PENDING rebuild.
 Reuse Targets: Windows architecture, release notes, failure-prevention section, maintenance guide, final evidence.
 Exact Next Action: commit this accepted source delta, rebuild the Windows 2.5.17 installer from that authority, verify package parity, install per-user with desired=off, then run installed-runtime continuity regression and restore off.
+
+
+## 2026-10-01 — Windows v2.5.17 packaged/installed zero-blackhole acceptance
+Context: The accepted native-shadow handover at functional source authority `4bf59b61cf4fd35367b68153c33663fbd403fa11` was rebuilt, installed as the same per-user version, and revalidated from the installed runtime.
+Claim/Decision: Windows v2.5.17 handover is PACKAGED + INSTALLED + LIVE ACCEPTED. Fresh NSIS build exited 0. Artifact `OpenInternetGateway-Setup-2.5.17.exe` SHA256=`7b04a28380843aca5abdfbc6942a719ac82617e8ab8765fb2251d8b7e28afbbb`, 111652180 bytes, version 2.5.17. Package→installed EXE/app.asar/Headless-Control parity is exact; source/package/installed/runtime Headless-Control SHA256 is `0e0405a218267b9fb98a3d884c92a7eeedea58784e91ef0b9c5952ccf33a8452`.
+Installed runtime evidence: launched from a non-admin user context; one main Electron instance, renderer sandbox enabled, no exact `--no-sandbox`, no remote-debug. Installed adaptive connect exited 0. Continuity monitor observed 46 samples across physical-shadow hold, native TAP route creation, isolated TAP probe, and final takeover with `TCP_FAIL=0`; shadow was observed for 20 samples, probe route for 9 samples, simultaneous physical+TAP /1 routes for 11 samples, and TAP-only final state for 8 samples. Handover evidence result=PASS; health Healthy=true, JP egress 59.138.16.13, clean DNS, FullRoutes=2.
+Final poststate after explicit disconnect: desired=off; OVPNConnectorService stopped/manual; full /1 routes=0; probe route=0; physical shadow state absent; default route Ethernet 3 via 192.168.20.1; AutoRecovery Ready.
+Evidence/Provenance: `%LOCALAPPDATA%\OpenInternetGateway\evidence\v2517-windows-handover-final-acceptance-20261001.json` SHA256=`e37498cdb29d8b3b22893b6c37e6fbcca9179b6d14a5edd6a35533a46c2796eb`; installed continuity monitor SHA256=`3af121abd486e4f9f28fc16227147179ffe6d78bf93316b89c7a5e6ab4f5610b`; installed result SHA256=`11f6a806124b799858da8f19520ee6c5b8c06a3b9ee78ca95f59e69a66c7e1c3`; final handover evidence SHA256=`e585a1b27a4093386c0555a0fbd802b77622d3b738487098f65a86a82a637ef6`.
+Limitations: Windows artifact remains publicly unsigned (`Authenticode=NotSigned`); this is the pre-existing external publisher-trust gap and is not claimed fixed.
+Confidence/Status: HIGH / WINDOWS v2.5.17 FUNCTIONAL+PACKAGE+INSTALL+LIVE PASS.
+Reuse Targets: final release evidence, architecture, release notes, troubleshooting, maintenance guide.
+Exact Next Action: reconcile cross-platform authority/publication state; do not change Windows networking again unless a new release gate requires it.
