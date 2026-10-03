@@ -7,6 +7,18 @@ $exact=Join-Path $Root 'state\exact-profile.request'
 $current=Join-Path $Root 'state\current-openvpn-profile.json'
 New-Item -ItemType Directory -Force -Path (Join-Path $Root 'state')|Out-Null
 
+$connector='C:\Program Files\OpenVPN Connect\ovpnconnector.exe'
+if(-not(Test-Path -LiteralPath $connector)){
+ throw 'OpenVPN Connect 3.x is required. Open Internet Gateway could not find the verified connector engine after prerequisite setup.'
+}
+$taskName='OpenInternetGateway-AutoRecovery'
+$task=Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+if(-not $task -or -not [bool]$task.Settings.Enabled){
+ & (Join-Path $PSScriptRoot 'Install-AutoRecovery.ps1')
+ $task=Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+ if(-not $task -or -not [bool]$task.Settings.Enabled){throw 'Open Internet Gateway recovery task could not be installed. Administrator approval is required once for first-time setup.'}
+}
+
 $expectedSha=([string]$ProfileSha).Trim().ToLowerInvariant()
 if(-not $expectedSha -and (Test-Path -LiteralPath $exact)){
  try{$expectedSha=([string](Get-Content -LiteralPath $exact -Raw -Encoding UTF8|ConvertFrom-Json).sha256).Trim().ToLowerInvariant()}catch{}
@@ -20,7 +32,6 @@ if($expectedSha){Remove-Item -LiteralPath $exact -Force -ErrorAction SilentlyCon
 
 [ordered]@{desired='on';at=(Get-Date).ToString('o')}|ConvertTo-Json|Set-Content -Encoding UTF8 $desired
 
-$taskName='OpenInternetGateway-AutoRecovery'
 $idleUntil=(Get-Date).AddSeconds(90)
 do{
  $task=Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue

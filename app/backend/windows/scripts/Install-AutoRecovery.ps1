@@ -8,13 +8,18 @@ function Test-Admin {
  $p=New-Object Security.Principal.WindowsPrincipal($id)
  return $p.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 }
+$pwsh=Join-Path $PSHOME 'pwsh.exe'
+if(-not(Test-Path -LiteralPath $pwsh)){$pwsh=(Get-Command pwsh.exe -ErrorAction Stop).Source}
 if(-not(Test-Admin)){
- Start-Process pwsh.exe -Verb RunAs -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-File',$PSCommandPath)
- Write-Host 'ELEVATION STARTED'
+ try{$p=Start-Process -FilePath $pwsh -Verb RunAs -Wait -PassThru -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-File',$PSCommandPath)}
+ catch{throw ('Administrator approval is required once to install Open Internet Gateway recovery: '+$_.Exception.Message)}
+ if(-not $p -or $p.ExitCode -ne 0){throw ('Elevated Auto-Recovery setup failed with exit code '+$(if($p){$p.ExitCode}else{'unknown'}))}
+ $task=Get-ScheduledTask -TaskName 'OpenInternetGateway-AutoRecovery' -ErrorAction SilentlyContinue
+ if(-not $task){throw 'Elevated Auto-Recovery setup returned without creating the recovery task.'}
+ Write-Host 'AUTO-RECOVERY INSTALLED'
  exit 0
 }
 
-$pwsh=(Get-Command pwsh.exe -ErrorAction Stop).Source
 $user=[Security.Principal.WindowsIdentity]::GetCurrent().Name
 $ensure=Join-Path $PSScriptRoot 'Ensure-OpenInternet.ps1'
 if(-not(Test-Path $ensure)){throw "Ensure script missing: $ensure"}

@@ -1,6 +1,6 @@
 {
   "name": "open-internet-gateway",
-  "version": "2.5.17",
+  "version": "2.5.18",
   "description": "Cross-platform censorship-resilient Internet gateway with headless OpenVPN, anti-flap recovery, and a self-healing configuration factory.",
   "main": "src/main/main.js",
   "author": {
@@ -13,7 +13,7 @@
     "lint": "node tools/validate.js",
     "test": "node --test tests/*.test.js",
     "dist": "electron-builder",
-    "dist:win": "electron-builder --win nsis --publish never",
+    "dist:win": "node tools/prepareWindowsPwsh.js && electron-builder --win nsis --publish never",
     "dist:linux": "electron-builder --linux AppImage deb --publish never"
   },
   "devDependencies": {
@@ -51,6 +51,10 @@
         {
           "from": "common",
           "to": "backend/common"
+        },
+        {
+          "from": "vendor/pwsh",
+          "to": "pwsh"
         }
       ],
       "requestedExecutionLevel": "asInvoker"

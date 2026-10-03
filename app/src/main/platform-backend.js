@@ -5,6 +5,13 @@ const os = require('os');
 const https = require('https');
 const crypto = require('crypto');
 
+const WINDOWS_OPENVPN_CONNECT = Object.freeze({
+  version: '3.9.0.5008',
+  fileName: 'openvpn-connect-3.9.0.5008_signed.msi',
+  url: 'https://swupdate.openvpn.net/downloads/connect/openvpn-connect-3.9.0.5008_signed.msi',
+  sha256: '31347812dd37dbbb69bc47de842eb179827266e9dfb45e7f6ce10c5d71a5bad6'
+});
+
 function stripAnsi(value) {
   return String(value || '').replace(/\x1B\[[0-?]*[ -\/]*[@-~]/g, '');
 }
@@ -194,12 +201,161 @@ class Backend {
       arch: os.arch(),
       hostname: os.hostname(),
       backendRoot: this.backendRoot,
-      sandboxHardening: this.sandboxHardening
+      sandboxHardening: this.sandboxHardening,
+      windowsPrerequisites: this.platform === 'win32' ? this._windowsPrerequisiteStatus() : null
     };
+  }
+
+  _windowsPwshPath() {
+    if (this.platform !== 'win32') return '';
+    const candidates = [];
+    if (this.resourcesPath) candidates.push(path.join(this.resourcesPath, 'pwsh', 'pwsh.exe'));
+    if (process.env.ProgramFiles) candidates.push(path.join(process.env.ProgramFiles, 'PowerShell', '7', 'pwsh.exe'));
+    if (process.env['ProgramFiles(x86)']) candidates.push(path.join(process.env['ProgramFiles(x86)'], 'PowerShell', '7', 'pwsh.exe'));
+    for (const dir of String(process.env.PATH || '').split(path.delimiter).filter(Boolean)) candidates.push(path.join(dir, 'pwsh.exe'));
+    return candidates.find(candidate => { try { return fs.existsSync(candidate); } catch { return false; } }) || '';
+  }
+
+  _requireWindowsPwsh() {
+    const pwsh = this._windowsPwshPath();
+    if (!pwsh) throw new Error('PowerShell 7 runtime is unavailable. Reinstall Open Internet Gateway 2.5.18 or newer so its bundled Windows runtime is restored.');
+    return pwsh;
+  }
+
+  _windowsConnectorPath() {
+    return path.join(process.env.ProgramFiles || 'C:\\Program Files', 'OpenVPN Connect', 'ovpnconnector.exe');
+  }
+
+  _windowsPrerequisiteStatus() {
+    if (this.platform !== 'win32') return null;
+    const pwsh = this._windowsPwshPath();
+    const connector = this._windowsConnectorPath();
+    return {
+      powerShell7: { ready: !!pwsh, path: pwsh || '' },
+      openVpnConnect: { ready: fs.existsSync(connector), path: connector, bootstrapVersion: WINDOWS_OPENVPN_CONNECT.version }
+    };
+  }
+
+  _sha256File(file) {
+    const hash = crypto.createHash('sha256');
+    const fd = fs.openSync(file, 'r');
+    try {
+      const buffer = Buffer.allocUnsafe(1024 * 1024);
+      let read = 0;
+      do {
+        read = fs.readSync(fd, buffer, 0, buffer.length, null);
+        if (read) hash.update(buffer.subarray(0, read));
+      } while (read);
+    } finally { fs.closeSync(fd); }
+    return hash.digest('hex').toLowerCase();
+  }
+
+  _downloadHttpsFile(url, destination, redirects = 5) {
+    fs.mkdirSync(path.dirname(destination), { recursive: true });
+    const partial = destination + '.partial';
+    try { fs.unlinkSync(partial); } catch {}
+    return new Promise((resolve, reject) => {
+      const req = https.get(url, { headers: { 'User-Agent': 'OpenInternetGateway/' + (this.version || 'unknown') } }, res => {
+        const code = Number(res.statusCode || 0);
+        if ([301,302,303,307,308].includes(code) && res.headers.location && redirects > 0) {
+          res.resume();
+          const next = new URL(res.headers.location, url).toString();
+          this._downloadHttpsFile(next, destination, redirects - 1).then(resolve, reject);
+          return;
+        }
+        if (code < 200 || code >= 300) {
+          res.resume();
+          reject(new Error('Prerequisite download failed with HTTP ' + code + '.'));
+          return;
+        }
+        const out = fs.createWriteStream(partial, { flags: 'w' });
+        const hash = crypto.createHash('sha256');
+        let bytes = 0;
+        let settled = false;
+        const fail = error => {
+          if (settled) return;
+          settled = true;
+          try { out.destroy(); } catch {}
+          try { fs.unlinkSync(partial); } catch {}
+          reject(error);
+        };
+        res.on('data', chunk => { hash.update(chunk); bytes += chunk.length; });
+        res.on('error', fail);
+        out.on('error', fail);
+        out.on('finish', () => {
+          if (settled) return;
+          out.close(() => {
+            if (settled) return;
+            try {
+              fs.renameSync(partial, destination);
+              settled = true;
+              resolve({ sha256: hash.digest('hex').toLowerCase(), bytes });
+            } catch (error) { fail(error); }
+          });
+        });
+        res.pipe(out);
+      });
+      req.setTimeout(30000, () => req.destroy(new Error('Prerequisite download timed out.')));
+      req.on('error', error => {
+        try { fs.unlinkSync(partial); } catch {}
+        reject(error);
+      });
+    });
+  }
+
+  async _ensureWindowsConnector() {
+    const connector = this._windowsConnectorPath();
+    if (fs.existsSync(connector)) return { ready: true, installed: false, path: connector };
+    const dir = path.join(this.backendRoot, 'updates', 'prerequisites');
+    const msi = path.join(dir, WINDOWS_OPENVPN_CONNECT.fileName);
+    let sha256 = '';
+    if (fs.existsSync(msi)) {
+      try { sha256 = this._sha256File(msi); } catch {}
+      if (sha256 !== WINDOWS_OPENVPN_CONNECT.sha256) {
+        try { fs.unlinkSync(msi); } catch {}
+        sha256 = '';
+      }
+    }
+    if (!sha256) {
+      this.emit({ type: 'progress', action: 'connect', message: 'Downloading the verified OpenVPN Connect engine for first-time setup…' });
+      const downloaded = await this._downloadHttpsFile(WINDOWS_OPENVPN_CONNECT.url, msi);
+      sha256 = downloaded.sha256;
+      if (sha256 !== WINDOWS_OPENVPN_CONNECT.sha256) {
+        try { fs.unlinkSync(msi); } catch {}
+        throw new Error('OpenVPN Connect prerequisite SHA-256 did not match the official OpenVPN release checksum. Setup was refused.');
+      }
+    }
+    this.emit({ type: 'progress', action: 'connect', message: 'Installing OpenVPN Connect once. Windows will ask for administrator approval…' });
+    const pwsh = this._requireWindowsPwsh();
+    const escapedMsi = msi.replace(/'/g, "''");
+    const elevate = [
+      "$ErrorActionPreference='Stop'",
+      "$msi='" + escapedMsi + "'",
+      "$msiArgs='/i \"' + $msi + '\" /passive /norestart'",
+      "try {",
+      "  $p=Start-Process -FilePath 'msiexec.exe' -Verb RunAs -Wait -PassThru -ArgumentList $msiArgs",
+      "  exit $p.ExitCode",
+      "} catch { Write-Error $_.Exception.Message; exit 1223 }"
+    ].join(';');
+    const install = await run(pwsh, ['-NoProfile','-Command',elevate], { timeout: 300000, allowFailure: true });
+    if (![0, 3010, 1641].includes(Number(install.code))) {
+      throw new Error('OpenVPN Connect prerequisite installation failed or administrator approval was cancelled (Windows Installer exit ' + install.code + '). Administrator approval is required once.');
+    }
+    const deadline = Date.now() + 30000;
+    while (!fs.existsSync(connector) && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 500));
+    if (!fs.existsSync(connector)) throw new Error('OpenVPN Connect installation completed but ovpnconnector.exe is still missing. Restart Open Internet Gateway and retry.');
+    return { ready: true, installed: true, path: connector, installerSha256: sha256, exitCode: install.code };
+  }
+
+  async _ensureWindowsRuntimePrerequisites() {
+    const pwsh = this._requireWindowsPwsh();
+    const openVpn = await this._ensureWindowsConnector();
+    return { powerShell7: { ready: true, path: pwsh }, openVpnConnect: openVpn };
   }
 
   async _windows(action, extraArgs = []) {
     const main = path.join(this.backendRoot, 'OpenInternetGateway.ps1');
+    const pwsh = this._requireWindowsPwsh();
     const map = {
       connect: 'Connect',
       disconnect: 'Disconnect',
@@ -234,7 +390,7 @@ class Backend {
         "$probeDegraded=$false;if(-not $loc -and $managedActive -and $routes.Count -ge 2 -and -not($dns -contains '10.10.34.35') -and $profileCountry){$loc=$profileCountry;if(-not $ip){$ip=$profileIP};$probeDegraded=$true}",
         "[ordered]@{connected=($routes.Count -ge 2 -and $managedActive -and $loc -and $loc -ne 'IR' -and -not($dns -contains '10.10.34.35'));ip=$ip.Trim();country=$loc.Trim();dns=$dns;poison=($dns -contains '10.10.34.35');fullRoutes=$routes.Count;relay=$relay;autoRecovery=[bool]$task;autoRecoveryState=$(if(-not $task){'Missing'}elseif(-not [bool]$task.Settings.Enabled){'Disabled'}else{[string]$task.State});interface=($routes|Select-Object -First 1 -ExpandProperty InterfaceAlias -ErrorAction SilentlyContinue);engine=$(if($svc){'HeadlessConnector'}else{'Missing'});connectorService=$(if($svc){[string]$svc.Status}else{'Missing'});managedTunnelActive=[bool]$managedActive;healthProbeDegraded=[bool]$probeDegraded;desiredState=$desired;failureStreak=$(if($guard){[int]$guard.failureStreak}else{0});rotations24h=$(if($guard){@($guard.rotations).Count}else{0})}|ConvertTo-Json -Compress"
       ].join(';');
-      const r = await run('pwsh.exe', ['-NoProfile','-Command',script], { timeout: 12000 });
+      const r = await run(pwsh, ['-NoProfile','-Command',script], { timeout: 12000 });
       return JSON.parse(r.stdout || '{}');
     }
 
@@ -243,13 +399,14 @@ class Backend {
     const elevated = ['console-enable','console-disable'].includes(action);
     if (elevated) {
       const escapedMain = main.replace(/'/g, "''");
+      const escapedPwsh = pwsh.replace(/'/g, "''");
       const inner = "& '" + escapedMain + "' -Action " + mapped;
-      const outer = "$p=Start-Process pwsh.exe -Verb RunAs -Wait -PassThru -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-Command'," + JSON.stringify(inner) + "); exit $p.ExitCode";
-      const r = await run('pwsh.exe', ['-NoProfile','-Command',outer], { timeout: 180000 });
+      const outer = "$p=Start-Process -FilePath '" + escapedPwsh + "' -Verb RunAs -Wait -PassThru -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-Command'," + JSON.stringify(inner) + "); exit $p.ExitCode";
+      const r = await run(pwsh, ['-NoProfile','-Command',outer], { timeout: 180000 });
       return { ok: true, output: r.stdout };
     }
 
-    const r = await run('pwsh.exe', ['-NoProfile','-ExecutionPolicy','Bypass','-File',main,'-Action',mapped,...extraArgs], {
+    const r = await run(pwsh, ['-NoProfile','-ExecutionPolicy','Bypass','-File',main,'-Action',mapped,...extraArgs], {
       cwd: this.backendRoot,
       timeout: 240000
     });
@@ -516,7 +673,7 @@ class Backend {
         "if(-not $ip){throw 'Physical Internet adapter has no IPv4 address.'}",
         "[ordered]@{interface=[string]$a.Name;index=[int]$r.InterfaceIndex;ip=[string]$ip.IPAddress;gateway=[string]$r.NextHop}|ConvertTo-Json -Compress"
       ].join(';');
-      const r = await run('pwsh.exe', ['-NoProfile','-Command',script], { timeout: 5000 });
+      const r = await run(this._requireWindowsPwsh(), ['-NoProfile','-Command',script], { timeout: 5000 });
       const info = JSON.parse(r.stdout || '{}');
       return {
         interface: String(info.interface || ''),
@@ -1051,23 +1208,25 @@ try {
 }
 `;
       fs.writeFileSync(helper, script, 'utf8');
-      const wrapper = path.join(updateDir, 'apply-update.cmd');
       const startedFile = resultFile + '.started';
       const launchLog = path.join(updateDir, 'apply-update-launch.log');
       for (const stale of [resultFile, startedFile, launchLog]) {
         try { fs.unlinkSync(stale); } catch {}
       }
-      const wrapperScript = String.raw`@echo off
-setlocal
-where.exe pwsh.exe >nul 2>nul
-if errorlevel 1 (
-  > "%~dp0apply-update-launch.log" echo pwsh.exe was not found.
-  exit /b 127
-)
-pwsh.exe %* > "%~dp0apply-update-launch.log" 2>&1
-exit /b %errorlevel%
-`;
-      fs.writeFileSync(wrapper, wrapperScript, 'utf8');
+      let updatePwsh = this._requireWindowsPwsh();
+      const bundledPwshRoot = path.join(this.resourcesPath || '', 'pwsh');
+      const relativePwsh = path.relative(bundledPwshRoot, updatePwsh);
+      const pwshIsBundled = bundledPwshRoot
+        && relativePwsh
+        && !relativePwsh.startsWith('..')
+        && !path.isAbsolute(relativePwsh);
+      if (pwshIsBundled) {
+        const helperRuntime = path.join(updateDir, 'pwsh-helper');
+        fs.rmSync(helperRuntime, { recursive: true, force: true });
+        copyDir(bundledPwshRoot, helperRuntime);
+        updatePwsh = path.join(helperRuntime, 'pwsh.exe');
+        if (!fs.existsSync(updatePwsh)) throw new Error('Copied Windows update PowerShell runtime is incomplete.');
+      }
       const pwshArgs = [
         '-NoProfile','-WindowStyle','Hidden','-ExecutionPolicy','Bypass','-File',helper,
         '-Installer',downloaded.path,
@@ -1078,8 +1237,10 @@ exit /b %errorlevel%
         '-Fallback',String(currentExecutable || ''),
         '-ResultFile',resultFile
       ];
-      const child = spawn(process.env.ComSpec || 'cmd.exe', ['/d','/c',wrapper,...pwshArgs], {
-        detached: true, windowsHide: true, stdio: 'ignore'
+      const child = spawn(updatePwsh, pwshArgs, {
+        detached: true,
+        windowsHide: true,
+        stdio: ['ignore', 'ignore', 'ignore']
       });
       await new Promise((resolve, reject) => {
         child.once('spawn', resolve);
@@ -1091,9 +1252,7 @@ exit /b %errorlevel%
         await new Promise(resolve => setTimeout(resolve, 50));
       }
       if (!fs.existsSync(startedFile)) {
-        let detail = '';
-        try { detail = fs.readFileSync(launchLog, 'utf8').trim(); } catch {}
-        throw new Error('Windows update helper failed to start.' + (detail ? ' ' + detail : ''));
+        throw new Error('Windows update helper failed to start with the verified PowerShell runtime.');
       }
       return { ok: true, applying: true, restart: true, installScope: 'current-user', resultFile, target };
     }
@@ -1288,6 +1447,9 @@ exit 0
     this.emit({ type: 'busy', action, busy: true });
     try {
       let result;
+      if (this.platform === 'win32' && (action === 'connect' || action === 'connect-profile')) {
+        await this._ensureWindowsRuntimePrerequisites();
+      }
       if (action === 'connect-profile') result = await this.connectProfile(options.sha256);
       else if (action === 'benchmark-active') result = await this.benchmarkActive();
       else if (action === 'benchmark-direct-internet') result = await this.benchmarkDirectInternet();

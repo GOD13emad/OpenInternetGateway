@@ -50,7 +50,7 @@ test('desktop app enforces single-instance tray UX',()=>{
   assert.match(main,/if \(gotSingleInstanceLock\) \{/);
   assert.match(main,/second-instance/);
   assert.match(main,/additionalData\?\.intent/);
-  assert.match(main,/mainWindow\.show\(\)/);
+  assert.match(main,/function showDashboard\(\)/);
   const guarded=main.slice(main.indexOf('if (gotSingleInstanceLock) {'));
   assert.match(guarded,/app\.whenReady\(\)/);
   assert.match(guarded,/startLinuxExitWatchdog\(\)/);
@@ -152,8 +152,8 @@ test('Linux close-to-dock and desktop Quit lifecycle are explicit',()=>{
   const main=fs.readFileSync(path.join(root,'src/main/main.js'),'utf8');
   const backend=fs.readFileSync(path.join(root,'src/main/platform-backend.js'),'utf8');
   const afterInstall=fs.readFileSync(path.join(root,'build/linux-after-install.sh'),'utf8');
-  assert.match(main,/mainWindow\.on\('close'/);
-  assert.match(main,/mainWindow\.hide\(\)/);
+  assert.match(main,/win\.on\('close'/);
+  assert.match(main,/win\.hide\(\)/);
   assert.match(main,/argv\.includes\('--quit'\)/);
   assert.match(main,/quitRequestedAtLaunch/);
   assert.doesNotMatch(main,/process\.platform === 'linux'\) requestQuit/);
@@ -168,9 +168,9 @@ test('Linux close-to-dock and desktop Quit lifecycle are explicit',()=>{
 test('tray app survives last window destruction until explicit Quit',()=>{
   const main=fs.readFileSync(path.join(root,'src/main/main.js'),'utf8');
   assert.match(main,/app\.on\('window-all-closed', \(\) => \{\}\)/);
-  assert.match(main,/mainWindow\.on\('closed'/);
-  assert.match(main,/mainWindow = null/);
-  assert.match(main,/mainWindow && !mainWindow\.isDestroyed\(\)/);
+  assert.match(main,/win\.on\('closed'/);
+  assert.match(main,/if \(mainWindow === win\) mainWindow = null/);
+  assert.match(main,/function isLiveWindow/);
 });
 
 test('Linux independent exit watchdog enforces disconnect safely',()=>{
@@ -541,8 +541,9 @@ test('GitHub updater checks latest release and verifies published SHA-256',()=>{
   assert.match(backend,/async launchDownloadedUpdate/);
   assert.match(backend,/installScope: 'current-user'/);
   assert.ok(backend.includes("Programs', 'open-internet-gateway', 'Open Internet Gateway.exe'"));
-  assert.match(backend,/apply-update\.cmd/);
-  assert.ok(backend.includes("process.env.ComSpec || 'cmd.exe'"));
+  assert.match(backend,/pwsh-helper/);
+  assert.match(backend,/copyDir\(bundledPwshRoot, helperRuntime\)/);
+  assert.match(backend,/spawn\(updatePwsh, pwshArgs/);
   assert.match(backend,/resultFile \+ '\.started'/);
   assert.match(backend,/Windows update helper failed to start/);
   assert.doesNotMatch(backend,/spawn\('pwsh\.exe'/);
@@ -582,6 +583,8 @@ test('GitHub workflows use current hosted-runner actions and Node LTS',()=>{
     assert.doesNotMatch(wf,/actions\/setup-node@v4/);
     assert.doesNotMatch(wf,/node-version:\s*['"]22['"]/);
     assert.match(wf,/actions\/checkout@v7/);
+    assert.match(wf,/npm audit --omit=dev --audit-level=high/);
+    assert.match(wf,/npm audit --audit-level=critical/);
   }
   assert.match(build,/actions\/setup-node@v7/);
   assert.match(build,/actions\/upload-artifact@v7/);
@@ -1024,4 +1027,99 @@ test('Windows shadow takeover preserves native profile bytes and fails closed un
   const stop=headless.slice(headless.indexOf('function Stop-Connector'),headless.indexOf('function Stop-ServiceForConfig'));
   assert.match(stop,/Get-ShadowState/);
   assert.ok(stop.indexOf("Invoke-Connector @('stop')") < stop.indexOf('Remove-PhysicalShadows'));
+});
+
+test('Tray dashboard lifecycle never dereferences a destroyed or null BrowserWindow',()=>{
+  const main=fs.readFileSync(path.join(root,'src/main/main.js'),'utf8').replace(/\r\n/g,'\n');
+  const show=main.slice(main.indexOf('function showDashboard'),main.indexOf('function renderTray'));
+  assert.match(show,/quitInProgress \|\| allowQuit \|\| app\.isQuitting/);
+  assert.match(show,/!isLiveWindow\(mainWindow\)[\s\S]*createWindow\(\{ showWhenReady: true \}\)/);
+  assert.match(show,/mainWindow\.isMinimized\(\)[\s\S]*mainWindow\.show\(\)[\s\S]*mainWindow\.focus\(\)/);
+  assert.match(main,/Open Dashboard', click: showDashboard/);
+  assert.match(main,/tray\.on\('double-click', showDashboard\)/);
+  assert.doesNotMatch(main,/click: \(\) => \{ mainWindow\.show\(\)/);
+  assert.doesNotMatch(main,/double-click', \(\) => \{ mainWindow\.show\(\)/);
+  assert.match(main,/win\.on\('closed',[\s\S]*if \(mainWindow === win\) mainWindow = null/);
+});
+
+test('Windows clean-machine disconnect treats missing connector service as already off and does not require recovery task',()=>{
+  const disconnect=fs.readFileSync(path.join(root,'backend/windows/scripts/Disconnect-OpenInternet.ps1'),'utf8').replace(/\r\n/g,'\n');
+  const routeAt=disconnect.indexOf("$routes=@(Get-NetRoute");
+  const alreadyAt=disconnect.indexOf("if($routes.Count -eq 0 -and (-not $svc -or $svc.Status -eq 'Stopped'))",routeAt);
+  const taskAt=disconnect.indexOf("Get-ScheduledTask -TaskName 'OpenInternetGateway-AutoRecovery'",alreadyAt);
+  const runAt=disconnect.indexOf('schtasks.exe /Run',taskAt);
+  assert.ok(routeAt >= 0 && alreadyAt > routeAt && taskAt > alreadyAt && runAt > taskAt);
+  assert.match(disconnect.slice(alreadyAt,taskAt),/DISCONNECTED - ALREADY OFF[\s\S]*exit 0/);
+  assert.match(disconnect,/recovery task is missing while a managed tunnel may still be active/);
+});
+
+test('Windows first Connect bootstraps verified prerequisites before desired-state mutation',()=>{
+  const connect=fs.readFileSync(path.join(root,'backend/windows/scripts/Connect-OpenInternet.ps1'),'utf8').replace(/\r\n/g,'\n');
+  const connectorAt=connect.indexOf("$connector='C:\\Program Files\\OpenVPN Connect\\ovpnconnector.exe'");
+  const taskAt=connect.indexOf("$taskName='OpenInternetGateway-AutoRecovery'");
+  const installAt=connect.indexOf("Install-AutoRecovery.ps1",taskAt);
+  const desiredAt=connect.indexOf("desired='on'");
+  assert.ok(connectorAt >= 0 && taskAt > connectorAt && installAt > taskAt && desiredAt > installAt);
+  assert.match(connect,/Administrator approval is required once for first-time setup/);
+  const installer=fs.readFileSync(path.join(root,'backend/windows/scripts/Install-AutoRecovery.ps1'),'utf8');
+  assert.match(installer,/Join-Path \$PSHOME 'pwsh\.exe'/);
+  assert.match(installer,/Start-Process -FilePath \$pwsh -Verb RunAs -Wait -PassThru/);
+  assert.match(installer,/Elevated Auto-Recovery setup returned without creating the recovery task/);
+});
+
+test('Windows backend installer has no dead Install-Launcher reference',()=>{
+  const install=fs.readFileSync(path.join(root,'backend/windows/Install.ps1'),'utf8');
+  assert.doesNotMatch(install,/Install-Launcher\.ps1/);
+  assert.match(install,/Install-AutoRecovery\.ps1/);
+  assert.ok(fs.existsSync(path.join(root,'backend/windows/scripts/Install-AutoRecovery.ps1')));
+});
+
+test('Windows 2.5.18 package bundles verified portable PowerShell 7',()=>{
+  const pkg=JSON.parse(fs.readFileSync(path.join(root,'package.json'),'utf8'));
+  assert.equal(pkg.version,'2.5.18');
+  assert.match(pkg.scripts['dist:win'],/prepareWindowsPwsh\.js/);
+  assert.ok(pkg.build.win.extraResources.some(x=>x.from==='vendor/pwsh'&&x.to==='pwsh'));
+  const prep=fs.readFileSync(path.join(root,'tools/prepareWindowsPwsh.js'),'utf8');
+  assert.match(prep,/const VERSION = '7\.5\.4'/);
+  assert.match(prep,/PowerShell-\$\{VERSION\}-win-x64\.zip/);
+  assert.match(prep,/b40d192ae95ba6ccc4cc362ff4e1b18ca6fb5055bebbcd3920684e12701fa8f6/);
+  assert.match(prep,/const PWSH_URL = `https:\/\/github\.com\/PowerShell\/PowerShell\/releases\/download\/v\$\{VERSION\}/);
+  assert.doesNotMatch(prep,/const URL =/);
+  assert.match(prep,/SHA-256 mismatch/);
+  assert.match(prep,/pwsh\.exe/);
+});
+
+test('Windows first-connect OpenVPN prerequisite is pinned, verified and installed through Windows Installer',()=>{
+  const backend=fs.readFileSync(path.join(root,'src/main/platform-backend.js'),'utf8').replace(/\r\n/g,'\n');
+  assert.match(backend,/openvpn-connect-3\.9\.0\.5008_signed\.msi/);
+  assert.match(backend,/31347812dd37dbbb69bc47de842eb179827266e9dfb45e7f6ce10c5d71a5bad6/);
+  assert.match(backend,/https:\/\/swupdate\.openvpn\.net\/downloads\/connect\/openvpn-connect-3\.9\.0\.5008_signed\.msi/);
+  const ensure=backend.slice(backend.indexOf('async _ensureWindowsConnector'),backend.indexOf('async _ensureWindowsRuntimePrerequisites'));
+  assert.match(ensure,/downloaded\.sha256/);
+  assert.match(ensure,/WINDOWS_OPENVPN_CONNECT\.sha256/);
+  assert.match(ensure,/Start-Process -FilePath 'msiexec\.exe' -Verb RunAs -Wait -PassThru/);
+  assert.match(ensure,/\$msi='" \+ escapedMsi \+ "'/);
+  assert.match(ensure,/\$msiArgs='\/i \\"' \+ \$msi \+ '\\" \/passive \/norestart'/);
+  assert.match(ensure,/ArgumentList \$msiArgs/);
+  assert.match(ensure,/run\(pwsh, \['-NoProfile','-Command',elevate\]/);
+  assert.match(ensure,/administrator approval was cancelled/);
+  assert.match(ensure,/ovpnconnector\.exe is still missing/);
+  const actionStart=backend.indexOf('async action(action, options = {})');
+  const action=backend.slice(actionStart,backend.indexOf('\n  async diagnostics()',actionStart));
+  const pre=action.indexOf('await this._ensureWindowsRuntimePrerequisites()');
+  const bench=action.indexOf('await this.benchmarkAllFast()');
+  assert.ok(pre >= 0 && bench > pre);
+  assert.match(action,/action === 'connect' \|\| action === 'connect-profile'/);
+});
+
+test('Windows update helper uses an isolated copy of bundled PowerShell instead of PATH lookup',()=>{
+  const backend=fs.readFileSync(path.join(root,'src/main/platform-backend.js'),'utf8').replace(/\r\n/g,'\n');
+  const start=backend.indexOf('async launchDownloadedUpdate');
+  const end=backend.indexOf("if (this.platform === 'linux')",start);
+  const block=backend.slice(start,end);
+  assert.match(block,/const bundledPwshRoot = path\.join\(this\.resourcesPath \|\| '', 'pwsh'\)/);
+  assert.match(block,/copyDir\(bundledPwshRoot, helperRuntime\)/);
+  assert.match(block,/updatePwsh = path\.join\(helperRuntime, 'pwsh\.exe'\)/);
+  assert.match(block,/spawn\(updatePwsh, pwshArgs/);
+  assert.doesNotMatch(block,/where\.exe pwsh\.exe|process\.env\.ComSpec|apply-update\.cmd/);
 });

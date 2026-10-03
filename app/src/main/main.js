@@ -23,8 +23,12 @@ function asset(name) {
   return path.join(__dirname, '..', '..', 'assets', name);
 }
 
-function createWindow() {
-  mainWindow = new BrowserWindow({
+function isLiveWindow(win = mainWindow) {
+  return !!win && !win.isDestroyed();
+}
+
+function createWindow({ showWhenReady = !startInBackground } = {}) {
+  const win = new BrowserWindow({
     width: 1180,
     height: 760,
     minWidth: 980,
@@ -40,14 +44,16 @@ function createWindow() {
       sandbox: true
     }
   });
-  mainWindow.removeMenu();
-  mainWindow.loadFile(path.join(__dirname, '..', 'renderer', 'index.html'));
-  mainWindow.once('ready-to-show', async () => {
-    if (!startInBackground) mainWindow.show();
-    if (process.env.OIG_CAPTURE_PATH) {
+  mainWindow = win;
+  win.removeMenu();
+  win.loadFile(path.join(__dirname, '..', 'renderer', 'index.html'));
+  win.once('ready-to-show', () => {
+    if (showWhenReady && !app.isQuitting && isLiveWindow(win)) win.show();
+    if (process.env.OIG_CAPTURE_PATH && isLiveWindow(win)) {
       setTimeout(async () => {
         try {
-          const image = await mainWindow.webContents.capturePage();
+          if (!isLiveWindow(win) || win.webContents.isDestroyed()) return;
+          const image = await win.webContents.capturePage();
           fs.writeFileSync(process.env.OIG_CAPTURE_PATH, image.toPNG());
         } finally {
           if (process.env.OIG_CAPTURE_ONLY === '1') {
@@ -55,30 +61,41 @@ function createWindow() {
             app.quit();
           }
         }
-      }, 1800);
+      }, 350);
     }
   });
-  mainWindow.on('close', (event) => {
+  win.on('close', event => {
     if (app.isQuitting) return;
     event.preventDefault();
-    // Keep the app represented by its desktop/dock icon. Wayland does not
-    // reliably support programmatic minimize, while hiding keeps it live.
-    mainWindow.hide();
+    if (isLiveWindow(win)) win.hide();
   });
-  mainWindow.on('closed', () => {
-    mainWindow = null;
+  win.on('closed', () => {
+    if (mainWindow === win) mainWindow = null;
   });
+  return win;
+}
+
+function showDashboard() {
+  if (quitInProgress || allowQuit || app.isQuitting) return false;
+  if (!isLiveWindow(mainWindow)) {
+    createWindow({ showWhenReady: true });
+    return true;
+  }
+  if (mainWindow.isMinimized()) mainWindow.restore();
+  mainWindow.show();
+  mainWindow.focus();
+  return true;
 }
 
 function renderTray(status = lastStatus) {
-  if (!tray) return;
+  if (!tray || (typeof tray.isDestroyed === 'function' && tray.isDestroyed())) return;
   const connected = !!status?.connected;
   const country = status?.country || '';
   const ip = status?.ip || '';
   const stateText = connected ? ('Connected' + (country ? ' • ' + country : '')) : 'Disconnected';
   tray.setToolTip('OpenInternetGateway — ' + stateText);
   tray.setContextMenu(Menu.buildFromTemplate([
-    { label: 'Open Dashboard', click: () => { mainWindow.show(); mainWindow.focus(); } },
+    { label: 'Open Dashboard', click: showDashboard },
     { label: stateText + (ip ? ' • ' + ip : ''), enabled: false },
     { type: 'separator' },
     { label: 'Connect', enabled: !connected, click: async () => { try { await backend.action('connect'); } finally { refreshTrayStatus(); } } },
@@ -105,7 +122,7 @@ function createTray() {
   const img = nativeImage.createFromPath(asset(process.platform === 'win32' ? 'icon.ico' : 'icon.png'));
   tray = new Tray(img.resize({ width: 20, height: 20 }));
   renderTray({ connected: false });
-  tray.on('double-click', () => { mainWindow.show(); mainWindow.focus(); });
+  tray.on('double-click', showDashboard);
   refreshTrayStatus();
   trayPoll = setInterval(refreshTrayStatus, 15000);
 }
@@ -202,10 +219,7 @@ async function requestQuit() {
     console.error('OpenInternetGateway refused to quit before tunnel disconnect:', error);
     quitInProgress = false;
     app.isQuitting = false;
-    if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.show();
-      mainWindow.focus();
-    }
+    showDashboard();
   }
 }
 
@@ -224,13 +238,7 @@ if (gotSingleInstanceLock) {
 app.on('second-instance', (_event, argv, _workingDirectory, additionalData) => {
     const intent = additionalData?.intent || (argv.includes('--quit') ? 'quit' : 'show');
     if (intent === 'quit') { requestQuit(); return; }
-    if (!mainWindow || mainWindow.isDestroyed()) {
-      createWindow();
-      return;
-    }
-    if (mainWindow.isMinimized()) mainWindow.restore();
-    mainWindow.show();
-    mainWindow.focus();
+    showDashboard();
   });
   
   app.whenReady().then(async () => {
@@ -280,8 +288,7 @@ app.on('second-instance', (_event, argv, _workingDirectory, additionalData) => {
   });
   
   app.on('activate', () => {
-    if (mainWindow && !mainWindow.isDestroyed()) { mainWindow.show(); mainWindow.focus(); }
-    else createWindow();
+    showDashboard();
   });
 
   // Tray-style desktop apps must stay alive when the last BrowserWindow is
