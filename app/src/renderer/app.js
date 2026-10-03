@@ -23,7 +23,7 @@ function userErrorMessage(error, fallback = 'Action failed.') {
     !/^[A-Z]:\\.*\.ps1:\s*line\s+\d+/i.test(line) &&
     !/^\+\s*(CategoryInfo|FullyQualifiedErrorId)/i.test(line)
   );
-  const semantic = cleaned.find(line => /^(Selected relay|Selected profile|Profile |Previous relay|No physical|Direct ISP|Real download|Real upload|Connect a relay|The active relay|Unable|Could not)/i.test(line));
+  const semantic = cleaned.find(line => /^(Selected relay|Selected profile|Profile |Previous relay|No physical|Direct ISP|Real download|Real upload|Connect a relay|The active relay|OpenVPN Connect|PowerShell 7|Administrator approval|Open Internet Gateway recovery|Unable|Could not)/i.test(line));
   return semantic || cleaned[0] || fallback;
 }
 
@@ -158,7 +158,7 @@ async function runAction(action, message, options = {}) {
     showToast(message || 'Action completed.');
     return result;
   } catch (e) {
-    showToast(e.message || 'Action failed.', true);
+    showToast(userErrorMessage(e, 'Action failed.'), true);
   } finally {
     setBusy(false);
   }

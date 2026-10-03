@@ -5,7 +5,7 @@ $Source=$PSScriptRoot
 $srcFull=[IO.Path]::GetFullPath($Source).TrimEnd('\')
 $dstFull=[IO.Path]::GetFullPath($InstallRoot).TrimEnd('\')
 if($srcFull -ieq $dstFull){
-  & (Join-Path $InstallRoot 'scripts\Install-Launcher.ps1')
+  & (Join-Path $InstallRoot 'scripts\Install-AutoRecovery.ps1')
   if($LASTEXITCODE -ne 0){throw 'Launcher/Auto-Recovery setup failed.'}
   Write-Host ('INSTALLED '+$InstallRoot)
   exit 0
@@ -61,7 +61,7 @@ foreach($n in @('auto-recovery-last.json','connect-last-success.json')){
 }
 
 & (Join-Path $InstallRoot 'scripts\Config-Factory.ps1') -Action Status | Out-Null
-& (Join-Path $InstallRoot 'scripts\Install-Launcher.ps1')
+& (Join-Path $InstallRoot 'scripts\Install-AutoRecovery.ps1')
 if($LASTEXITCODE -ne 0){throw 'Launcher/Auto-Recovery setup failed after install promotion.'}
 [ordered]@{
  at=(Get-Date).ToString('o')

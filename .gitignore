@@ -1,5 +1,6 @@
 # Dependencies / build output
 app/node_modules/
+app/vendor/
 app/dist/
 release/
 release-assets/
@@ -51,6 +52,7 @@ app/tools/*
 !app/tools/validate.js
 !app/tools/afterPack.js
 !app/tools/afterAllArtifactBuild.js
+!app/tools/prepareWindowsPwsh.js
 
 # Electron archives and local build helpers
 app/electron-v*.zip
