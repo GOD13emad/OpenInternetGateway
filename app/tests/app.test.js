@@ -583,6 +583,8 @@ test('GitHub workflows use current hosted-runner actions and Node LTS',()=>{
     assert.doesNotMatch(wf,/actions\/setup-node@v4/);
     assert.doesNotMatch(wf,/node-version:\s*['"]22['"]/);
     assert.match(wf,/actions\/checkout@v7/);
+    assert.match(wf,/npm audit --omit=dev --audit-level=high/);
+    assert.match(wf,/npm audit --audit-level=critical/);
   }
   assert.match(build,/actions\/setup-node@v7/);
   assert.match(build,/actions\/upload-artifact@v7/);
