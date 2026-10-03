@@ -578,6 +578,18 @@ test('Linux Chromium sandbox hardening is fail-safe and update-persistent',()=>{
   assert.doesNotMatch(helper,/sysctl|apparmor_parser|sudo|pkexec/);
 });
 
+test('Linux sandbox hardening mutation forces one clean restart',()=>{
+  const backend=fs.readFileSync(path.join(root,'src/main/platform-backend.js'),'utf8');
+  assert.match(backend,/restartRequired:\s*!!parsed\.hardened\s*&& \(!!parsed\.changed \|\| currentProcessNoSandbox\)\s*&& process\.env\.OIG_SANDBOX_RESTARTED !== '1'/);
+  const restartRequired=(parsed,currentProcessNoSandbox,restarted)=>!!parsed.hardened
+    && (!!parsed.changed || currentProcessNoSandbox)
+    && restarted!=='1';
+  assert.equal(restartRequired({hardened:true,changed:true},false,undefined),true);
+  assert.equal(restartRequired({hardened:true,changed:false},true,undefined),true);
+  assert.equal(restartRequired({hardened:true,changed:false},false,undefined),false);
+  assert.equal(restartRequired({hardened:true,changed:true},false,'1'),false);
+});
+
 test('GitHub workflows use current hosted-runner actions and Node LTS',()=>{
   const build=fs.readFileSync(path.resolve(root,'..','.github','workflows','build.yml'),'utf8');
   const release=fs.readFileSync(path.resolve(root,'..','.github','workflows','release.yml'),'utf8');
