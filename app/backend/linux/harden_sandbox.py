@@ -5,13 +5,22 @@ import os
 import sys
 
 MARKER = "# OIG sandbox hardening: prefer a compatible root-owned setuid helper."
+EXPORT_MARKER = "CHROME_DEVEL_SANDBOX"
 NEEDLE = """if [ $HAVE_NO_SANDBOX -eq 0 ] && ! unshare -Ur true 2>/dev/null ; then
   NO_SANDBOX=(--no-sandbox)
+fi"""
+LEGACY_REPLACEMENT = """if [ $HAVE_NO_SANDBOX -eq 0 ]; then
+  # OIG sandbox hardening: prefer a compatible root-owned setuid helper.
+  if [ "$(stat -Lc '%u:%g:%a' "$APPDIR/chrome-sandbox" 2>/dev/null || true)" = "0:0:4755" ]; then
+    :
+  elif ! unshare -Ur true 2>/dev/null ; then
+    NO_SANDBOX=(--no-sandbox)
+  fi
 fi"""
 REPLACEMENT = """if [ $HAVE_NO_SANDBOX -eq 0 ]; then
   # OIG sandbox hardening: prefer a compatible root-owned setuid helper.
   if [ "$(stat -Lc '%u:%g:%a' "$APPDIR/chrome-sandbox" 2>/dev/null || true)" = "0:0:4755" ]; then
-    :
+    export CHROME_DEVEL_SANDBOX="$(readlink -f "$APPDIR/chrome-sandbox")"
   elif ! unshare -Ur true 2>/dev/null ; then
     NO_SANDBOX=(--no-sandbox)
   fi
@@ -96,12 +105,21 @@ def main():
 
         with open(app_run, "r", encoding="utf-8") as f:
             text = f.read()
+        patched = text
         if MARKER not in text:
             if NEEDLE not in text:
                 result["reason"] = "AppRun sandbox heuristic does not match the expected electron-builder template."
                 emit(result)
                 return 0
             patched = text.replace(NEEDLE, REPLACEMENT, 1)
+        elif EXPORT_MARKER not in text:
+            if LEGACY_REPLACEMENT not in text:
+                result["reason"] = "Existing AppRun sandbox patch does not match the supported legacy template."
+                emit(result)
+                return 0
+            patched = text.replace(LEGACY_REPLACEMENT, REPLACEMENT, 1)
+
+        if patched != text:
             tmp_run = app_run + f".oig-patch-{os.getpid()}"
             mode = os.stat(app_run).st_mode & 0o777
             with open(tmp_run, "w", encoding="utf-8", newline="\n") as f:

@@ -572,6 +572,9 @@ test('Linux Chromium sandbox hardening is fail-safe and update-persistent',()=>{
   assert.match(helper,/0o4755/);
   assert.match(helper,/hash-compatible root-owned setuid Chromium sandbox/);
   assert.match(helper,/OIG sandbox hardening: prefer a compatible root-owned setuid helper/);
+  assert.match(helper,/CHROME_DEVEL_SANDBOX/);
+  assert.match(helper,/readlink -f .*chrome-sandbox/);
+  assert.match(helper,/LEGACY_REPLACEMENT/);
   assert.doesNotMatch(helper,/sysctl|apparmor_parser|sudo|pkexec/);
 });
 
@@ -1074,9 +1077,8 @@ test('Windows backend installer has no dead Install-Launcher reference',()=>{
   assert.ok(fs.existsSync(path.join(root,'backend/windows/scripts/Install-AutoRecovery.ps1')));
 });
 
-test('Windows 2.5.18 package bundles verified portable PowerShell 7',()=>{
+test('Windows package bundles verified portable PowerShell 7',()=>{
   const pkg=JSON.parse(fs.readFileSync(path.join(root,'package.json'),'utf8'));
-  assert.equal(pkg.version,'2.5.18');
   assert.match(pkg.scripts['dist:win'],/prepareWindowsPwsh\.js/);
   assert.ok(pkg.build.win.extraResources.some(x=>x.from==='vendor/pwsh'&&x.to==='pwsh'));
   const prep=fs.readFileSync(path.join(root,'tools/prepareWindowsPwsh.js'),'utf8');
