@@ -1,6 +1,6 @@
 {
   "name": "open-internet-gateway",
-  "version": "2.5.19",
+  "version": "2.5.20",
   "description": "Cross-platform censorship-resilient Internet gateway with headless OpenVPN, anti-flap recovery, and a self-healing configuration factory.",
   "main": "src/main/main.js",
   "author": {

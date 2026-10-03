@@ -96,7 +96,7 @@ class Backend {
         runtimeRoot,
         currentProcessNoSandbox,
         restartRequired: !!parsed.hardened
-          && currentProcessNoSandbox
+          && (!!parsed.changed || currentProcessNoSandbox)
           && process.env.OIG_SANDBOX_RESTARTED !== '1',
         version: this.version,
         at: new Date().toISOString()
