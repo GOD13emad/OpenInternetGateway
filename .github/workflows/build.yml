@@ -61,6 +61,24 @@ jobs:
           cache-dependency-path: app/package-lock.json
       - run: npm ci
       - run: npm run dist:linux
+      - name: Verify security source bytes inside both distributed Linux formats
+        run: |
+          set -euo pipefail
+          mapfile -t debs < <(find dist -maxdepth 1 -type f -name '*.deb' -print)
+          mapfile -t appimages < <(find dist -maxdepth 1 -type f -name '*.AppImage' -print)
+          test "${#debs[@]}" -eq 1
+          test "${#appimages[@]}" -eq 1
+          scratch="$RUNNER_TEMP/oig-verified-packages"
+          mkdir -p "$scratch/deb" "$scratch/appimage"
+          dpkg-deb -x "${debs[0]}" "$scratch/deb"
+          image="$(realpath "${appimages[0]}")"
+          chmod +x "$image"
+          (cd "$scratch/appimage" && "$image" --appimage-extract >/dev/null)
+          mapfile -t deb_asars < <(find "$scratch/deb" -type f -name app.asar -print)
+          mapfile -t image_asars < <(find "$scratch/appimage" -type f -name app.asar -print)
+          test "${#deb_asars[@]}" -eq 1
+          test "${#image_asars[@]}" -eq 1
+          node tests/packaged-security-parity.cjs "${deb_asars[0]}" "${image_asars[0]}"
       - uses: actions/upload-artifact@v7
         with:
           name: linux-packages
