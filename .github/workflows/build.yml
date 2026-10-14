@@ -41,6 +41,17 @@ jobs:
           cache: npm
           cache-dependency-path: app/package-lock.json
       - run: npm ci
+      - name: Windows native sandboxed IPC smoke (mocked backend)
+        if: github.event_name == 'pull_request'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          node node_modules/electron/install.js
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $exe = Join-Path $PWD 'node_modules/electron/dist/electron.exe'
+          if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) { throw 'ELECTRON_WINDOWS_BINARY_MISSING' }
+          $proc = Start-Process -FilePath $exe -ArgumentList @('tests/native-electron-ipc-smoke.cjs') -NoNewWindow -Wait -PassThru
+          if ($proc.ExitCode -ne 0) { throw "ELECTRON_WINDOWS_IPC_SMOKE_EXIT_$($proc.ExitCode)" }
       - run: npm run dist:win
       - uses: actions/upload-artifact@v7
         with:
@@ -61,9 +72,64 @@ jobs:
           cache-dependency-path: app/package-lock.json
       - run: npm ci
       - run: npm run dist:linux
+      - name: Verify security source bytes inside both distributed Linux formats
+        run: |
+          set -euo pipefail
+          mapfile -t debs < <(find dist -maxdepth 1 -type f -name '*.deb' -print)
+          mapfile -t appimages < <(find dist -maxdepth 1 -type f -name '*.AppImage' -print)
+          test "${#debs[@]}" -eq 1
+          test "${#appimages[@]}" -eq 1
+          scratch="$RUNNER_TEMP/oig-verified-packages"
+          mkdir -p "$scratch/deb" "$scratch/appimage"
+          dpkg-deb -x "${debs[0]}" "$scratch/deb"
+          image="$(realpath "${appimages[0]}")"
+          chmod +x "$image"
+          (cd "$scratch/appimage" && "$image" --appimage-extract >/dev/null)
+          mapfile -t deb_asars < <(find "$scratch/deb" -type f -name app.asar -print)
+          mapfile -t image_asars < <(find "$scratch/appimage" -type f -name app.asar -print)
+          test "${#deb_asars[@]}" -eq 1
+          test "${#image_asars[@]}" -eq 1
+          node tests/packaged-security-parity.cjs "${deb_asars[0]}" "${image_asars[0]}"
       - uses: actions/upload-artifact@v7
         with:
           name: linux-packages
           path: |
             app/dist/*.AppImage
             app/dist/*.deb
+
+  electron-sandbox-ipc:
+    # This job only runs on the PR candidate, never on a production release.
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    defaults:
+      run:
+        working-directory: app
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+      - run: npm ci --no-audit --no-fund
+      - name: Install Electron's verified Linux binary if npm deferred its install script
+        run: node node_modules/electron/install.js
+      - name: Configure only the ephemeral runner's Electron sandbox helper
+        run: |
+          set -euo pipefail
+          helper=node_modules/electron/dist/chrome-sandbox
+          test -f "$helper"
+          test ! -L "$helper"
+          sudo chown root:root "$helper"
+          sudo chmod 4755 "$helper"
+          test "$(stat -c %u "$helper")" = 0
+          test "$(stat -c %a "$helper")" = 4755
+      - name: Real Electron IPC smoke with Chromium sandbox enabled
+        run: |
+          set -euo pipefail
+          command -v xvfb-run
+          test -x node_modules/electron/dist/electron
+          xvfb-run -a -s "-screen 0 1280x800x24" timeout 35s \
+            node_modules/electron/dist/electron --disable-gpu \
+            tests/native-electron-ipc-smoke.cjs
