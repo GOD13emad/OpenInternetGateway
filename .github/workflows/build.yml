@@ -67,3 +67,38 @@ jobs:
           path: |
             app/dist/*.AppImage
             app/dist/*.deb
+
+  electron-sandbox-ipc:
+    # This job only runs on the PR candidate, never on a production release.
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    defaults:
+      run:
+        working-directory: app
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+      - run: npm ci --no-audit --no-fund
+      - name: Configure only the ephemeral runner's Electron sandbox helper
+        run: |
+          set -euo pipefail
+          helper=node_modules/electron/dist/chrome-sandbox
+          test -f "$helper"
+          test ! -L "$helper"
+          sudo chown root:root "$helper"
+          sudo chmod 4755 "$helper"
+          test "$(stat -c %u "$helper")" = 0
+          test "$(stat -c %a "$helper")" = 4755
+      - name: Real Electron IPC smoke with Chromium sandbox enabled
+        run: |
+          set -euo pipefail
+          command -v xvfb-run
+          test -x node_modules/electron/dist/electron
+          xvfb-run -a -s "-screen 0 1280x800x24" timeout 35s \
+            node_modules/electron/dist/electron --disable-gpu \
+            tests/native-electron-ipc-smoke.cjs
