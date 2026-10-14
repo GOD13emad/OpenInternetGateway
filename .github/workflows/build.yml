@@ -84,6 +84,8 @@ jobs:
           cache: npm
           cache-dependency-path: app/package-lock.json
       - run: npm ci --no-audit --no-fund
+      - name: Install Electron's verified Linux binary if npm deferred its install script
+        run: node node_modules/electron/install.js
       - name: Configure only the ephemeral runner's Electron sandbox helper
         run: |
           set -euo pipefail
