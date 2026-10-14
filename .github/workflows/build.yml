@@ -41,6 +41,17 @@ jobs:
           cache: npm
           cache-dependency-path: app/package-lock.json
       - run: npm ci
+      - name: Windows native sandboxed IPC smoke (mocked backend)
+        if: github.event_name == 'pull_request'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          node node_modules/electron/install.js
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $exe = Join-Path $PWD 'node_modules/electron/dist/electron.exe'
+          if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) { throw 'ELECTRON_WINDOWS_BINARY_MISSING' }
+          $proc = Start-Process -FilePath $exe -ArgumentList @('tests/native-electron-ipc-smoke.cjs') -NoNewWindow -Wait -PassThru
+          if ($proc.ExitCode -ne 0) { throw "ELECTRON_WINDOWS_IPC_SMOKE_EXIT_$($proc.ExitCode)" }
       - run: npm run dist:win
       - uses: actions/upload-artifact@v7
         with:
