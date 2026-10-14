@@ -105,5 +105,8 @@
   "bugs": {
     "url": "https://github.com/GOD13emad/OpenInternetGateway/issues"
   },
-  "desktopName": "OpenInternetGateway.desktop"
+  "desktopName": "OpenInternetGateway.desktop",
+  "overrides": {
+    "global-agent": "4.1.3"
+  }
 }
