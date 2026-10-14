@@ -1,6 +1,8 @@
 const { app, BrowserWindow, ipcMain, Menu, Tray, nativeImage, shell, nativeTheme } = require('electron');
 const { spawn } = require('child_process');
 const path = require('path');
+const { pathToFileURL } = require('node:url');
+const { protectDashboardNavigation, assertDashboardIpcSender } = require('./dashboard-security');
 const fs = require('fs');
 const Backend = require('./platform-backend');
 
@@ -18,6 +20,9 @@ const quitRequestedAtLaunch = process.argv.includes('--quit');
 const launchIntent = quitRequestedAtLaunch ? 'quit' : 'show';
 const gotSingleInstanceLock = app.requestSingleInstanceLock({ intent: launchIntent });
 if (!gotSingleInstanceLock) app.quit();
+
+const dashboardFile = path.join(__dirname, '..', 'renderer', 'index.html');
+const dashboardFileUrl = pathToFileURL(dashboardFile).href;
 
 function asset(name) {
   return path.join(__dirname, '..', '..', 'assets', name);
@@ -46,7 +51,8 @@ function createWindow({ showWhenReady = !startInBackground } = {}) {
   });
   mainWindow = win;
   win.removeMenu();
-  win.loadFile(path.join(__dirname, '..', 'renderer', 'index.html'));
+  protectDashboardNavigation(win.webContents);
+  win.loadFile(dashboardFile);
   win.once('ready-to-show', () => {
     if (showWhenReady && !app.isQuitting && isLiveWindow(win)) win.show();
     if (process.env.OIG_CAPTURE_PATH && isLiveWindow(win)) {
@@ -128,15 +134,19 @@ function createTray() {
 }
 
 function registerIpc() {
-  ipcMain.handle('gateway:status', () => backend.status());
-  ipcMain.handle('gateway:profiles', () => backend.profiles());
-  ipcMain.handle('gateway:action', (_e, action, options) => backend.action(action, options));
-  ipcMain.handle('gateway:diagnostics', () => backend.diagnostics());
-  ipcMain.handle('gateway:activity', () => backend.activity());
-  ipcMain.handle('gateway:platform', () => backend.platformInfo());
-  ipcMain.handle('gateway:openLogs', async () => shell.openPath(await backend.logsPath()));
-  ipcMain.handle('gateway:updateInfo', (_e, force) => backend.updateInfo(!!force));
-  ipcMain.handle('gateway:installUpdate', async () => {
+  const handleDashboardIpc = (channel, handler) => ipcMain.handle(channel, (event, ...args) => {
+    assertDashboardIpcSender(event, mainWindow, dashboardFileUrl);
+    return handler(event, ...args);
+  });
+  handleDashboardIpc('gateway:status', () => backend.status());
+  handleDashboardIpc('gateway:profiles', () => backend.profiles());
+  handleDashboardIpc('gateway:action', (_e, action, options) => backend.action(action, options));
+  handleDashboardIpc('gateway:diagnostics', () => backend.diagnostics());
+  handleDashboardIpc('gateway:activity', () => backend.activity());
+  handleDashboardIpc('gateway:platform', () => backend.platformInfo());
+  handleDashboardIpc('gateway:openLogs', async () => shell.openPath(await backend.logsPath()));
+  handleDashboardIpc('gateway:updateInfo', (_e, force) => backend.updateInfo(!!force));
+  handleDashboardIpc('gateway:installUpdate', async () => {
     const result = await backend.downloadUpdate();
     if (result.alreadyCurrent || !result.path) return { ...result, applying: false };
     const launched = await backend.launchDownloadedUpdate(result, {
@@ -157,13 +167,13 @@ function registerIpc() {
     }
     return { ...result, ...launched };
   });
-  ipcMain.handle('gateway:openRelease', async () => {
+  handleDashboardIpc('gateway:openRelease', async () => {
     let url = 'https://github.com/GOD13emad/OpenInternetGateway/releases/latest';
     try { url = (await backend.updateInfo(false)).releaseUrl || url; } catch {}
     await shell.openExternal(url);
     return { ok: true, url };
   });
-  ipcMain.handle('gateway:setTheme', (_e, theme) => {
+  handleDashboardIpc('gateway:setTheme', (_e, theme) => {
     nativeTheme.themeSource = ['light', 'dark', 'system'].includes(theme) ? theme : 'system';
     return { ok: true, theme: nativeTheme.themeSource };
   });
