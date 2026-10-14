@@ -696,11 +696,16 @@ class Backend {
       const line = String(route.stdout || '').trim();
       const iface = (line.match(/\bdev\s+(\S+)/) || [])[1] || '';
       const gateway = (line.match(/\bvia\s+(\S+)/) || [])[1] || '';
-      if (!iface || /^(tun|tap|wg|tailscale|ppp|zt|vpn)/i.test(iface)) {
-        throw new Error('No physical IPv4 Internet route was found.');
+      // Linux network interface names are kernel-bounded (IFNAMSIZ: 15 bytes).
+      // Reject option-like and shell metacharacters before using the selected NIC.
+      if (!/^[A-Za-z0-9_][A-Za-z0-9_.:-]{0,14}$/.test(iface)
+          || /^(tun|tap|wg|tailscale|ppp|zt|vpn)/i.test(iface)) {
+        throw new Error('No safe physical IPv4 Internet route was found.');
       }
-      const addr = await run('/bin/bash', ['-lc', "ip -4 -o addr show dev " + JSON.stringify(iface) + " | awk '{print $4}' | cut -d/ -f1 | head -n1"], { timeout: 5000 });
-      const localIP = String(addr.stdout || '').trim();
+      // Pass the NIC as a literal argv element: never interpolate an interface
+      // name into bash -lc (where quote/substitution syntax can be reinterpreted).
+      const addr = await run('ip', ['-4','-o','addr','show','dev',iface], { timeout: 5000 });
+      const localIP = (String(addr.stdout || '').match(/\binet\s+((?:\d{1,3}\.){3}\d{1,3})\/\d{1,2}\b/) || [])[1] || '';
       if (!localIP) throw new Error('Physical Internet interface has no IPv4 address.');
       return {
         interface: iface,
