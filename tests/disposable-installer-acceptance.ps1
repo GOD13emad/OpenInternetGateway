@@ -44,7 +44,7 @@ function Installed([string]$label) {
   return [pscustomobject]@{App=$app;AsarSHA=$hash}
 }
 function Check-Asar([string]$file,[bool]$expectedGuard) {
-  $js="const a=require('@electron/asar');const s=a.extractFile(process.argv[1],'src/main/platform-backend.js').toString('utf8');const guard=s.includes('PATH can include user-writable directories');const risk=s.includes('for (const dir of String(process.env.PATH ||');if(guard!==Boolean(Number(process.argv[2]))||risk===guard)process.exit(17);console.log('PACKAGED_PWSH_RESOLVER_PASS');"
+  $js="const a=require('@electron/asar');const hits=a.listPackage(process.argv[1]).filter(p=>p.endsWith('src/main/platform-backend.js'));if(hits.length!==1){console.error('ASAR_SOURCE_PATH_AMBIGUOUS_OR_MISSING',JSON.stringify(hits));process.exit(18)}const asarPath=hits[0].startsWith('/')?hits[0].slice(1):hits[0];const s=a.extractFile(process.argv[1],asarPath).toString('utf8');const guard=s.includes('PATH can include user-writable directories');const risk=s.includes('for (const dir of String(process.env.PATH ||');if(guard!==Boolean(Number(process.argv[2]))||risk===guard)process.exit(17);console.log('PACKAGED_PWSH_RESOLVER_PASS');"
   Push-Location (Join-Path $PSScriptRoot '..\app')
   try {
     & node -e $js $file ([string][int]$expectedGuard)
