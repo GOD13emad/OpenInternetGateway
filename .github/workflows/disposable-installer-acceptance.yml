@@ -1,0 +1,85 @@
+name: Isolated NSIS install, replacement and rollback audit
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/disposable-installer-acceptance.yml'
+      - 'tests/disposable-installer-acceptance.ps1'
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  isolated-windows:
+    if: ${{ github.event.pull_request.head.repo.full_name == github.repository && github.head_ref == 'audit/disposable-installer-acceptance' }}
+    runs-on: windows-2025
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 2
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+      - name: Refuse unpinned or untrusted audit source
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $expected='05a15ba7f64c6ab570cad110a1af45c6f6a16fd1'
+          $parent=(git rev-parse HEAD^).Trim()
+          if($parent -ne $expected){throw "SOURCE_CANDIDATE_CHANGED_$parent"}
+          if($env:RUNNER_ENVIRONMENT -ne 'github-hosted'){throw 'HOSTED_RUNNER_REQUIRED'}
+      - name: Download only pinned successful CI candidate and checksum-pinned stable
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference='Stop'
+          $run=38721014237
+          $repo='GOD13emad/OpenInternetGateway'
+          $ci=gh api "repos/$repo/actions/runs/$run" | ConvertFrom-Json
+          if($LASTEXITCODE -ne 0 -or $ci.head_sha -ne '05a15ba7f64c6ab570cad110a1af45c6f6a16fd1' -or $ci.conclusion -ne 'success'){
+            throw 'PINNED_SOURCE_CI_NOT_ACCEPTED'
+          }
+          $artifact=gh api "repos/$repo/actions/runs/$run/artifacts" | ConvertFrom-Json
+          if($LASTEXITCODE -ne 0){throw 'CANDIDATE_ARTIFACT_DISCOVERY_FAILED'}
+          $matches=@($artifact.artifacts | Where-Object { $_.id -eq 11966335035 -and $_.name -eq 'windows-installer' -and !$_.expired })
+          if($matches.Count -ne 1){throw 'PINNED_SOURCE_ARTIFACT_UNAVAILABLE'}
+          $root=Join-Path $env:RUNNER_TEMP 'oig-disposable-installer'
+          $cand=Join-Path $root 'candidate'
+          $stable=Join-Path $root 'stable'
+          New-Item -ItemType Directory -Force -Path $cand,$stable | Out-Null
+          gh run download $run -R $repo -n windows-installer -D $cand
+          if($LASTEXITCODE -ne 0){throw 'CANDIDATE_DOWNLOAD_FAILED'}
+          gh release download v2.5.19 -R $repo -p OpenInternetGateway-Setup-2.5.19.exe -p SHA256SUMS.txt -D $stable
+          if($LASTEXITCODE -ne 0){throw 'STABLE_RELEASE_DOWNLOAD_FAILED'}
+          Write-Output 'PINNED_SOURCE_AND_RELEASE_ARTIFACTS_DOWNLOADED'
+      - name: Install local ASAR read-only inspection dependency
+        shell: pwsh
+        working-directory: app
+        run: |
+          $ErrorActionPreference='Stop'
+          npm ci --ignore-scripts --no-audit --no-fund
+          if($LASTEXITCODE -ne 0){throw 'INSPECTION_DEPENDENCIES_FAILED'}
+          node -e "require('@electron/asar'); console.log('ASAR_INSPECTOR_READY')"
+          if($LASTEXITCODE -ne 0){throw 'ASAR_INSPECTOR_UNAVAILABLE'}
+      - name: Native silent stable to candidate to stable rollback in disposable runner
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $root=Join-Path $env:RUNNER_TEMP 'oig-disposable-installer'
+          $receipt=Join-Path $root 'acceptance-receipt.json'
+          ./tests/disposable-installer-acceptance.ps1 -StableDir (Join-Path $root 'stable') -CandidateDir (Join-Path $root 'candidate') -ReceiptPath $receipt
+          if(!(Test-Path -LiteralPath $receipt -PathType Leaf)){throw 'RECEIPT_MISSING'}
+          $r=Get-Content -LiteralPath $receipt -Raw | ConvertFrom-Json
+          if($r.status -ne 'PASS' -or !$r.stableRestoredByteExact -or !$r.uninstalled){throw 'RECEIPT_GATE_FAIL'}
+      - uses: actions/upload-artifact@v7
+        if: success()
+        with:
+          name: oig-disposable-windows-acceptance-receipt
+          path: ${{ runner.temp }}/oig-disposable-installer/acceptance-receipt.json
+          retention-days: 14
+          if-no-files-found: error
