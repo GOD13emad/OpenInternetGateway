@@ -76,7 +76,18 @@ $uninstaller=@(Get-ChildItem -LiteralPath $rollback.App.Root -File -Filter 'Unin
 if ($uninstaller.Count -ne 1) { throw 'UNINSTALLER_NOT_IDENTIFIED' }
 Stop-Only-Owned-App $rollback.App.Exe
 Run-Silent $uninstaller[0].FullName 'DISPOSABLE_CLEANUP'
-if ($null -ne (Find-OIG)) { throw 'CLEANUP_FAILED' }
+$cleanupDeadline=(Get-Date).AddSeconds(30)
+while ((Find-OIG) -and (Get-Date) -lt $cleanupDeadline) { Start-Sleep -Milliseconds 500 }
+$leftover=Find-OIG
+if ($null -ne $leftover) {
+  $live=@(Get-Process -ErrorAction SilentlyContinue | Where-Object {
+    try {$_.Path -and [string]::Equals($_.Path,$leftover.Exe,[StringComparison]::OrdinalIgnoreCase)} catch {$false}
+  })
+  Write-Output ('UNINSTALL_REMAINS_EXE='+$leftover.Exe)
+  Write-Output ('UNINSTALL_REMAINS_ASAR='+[bool](Test-Path -LiteralPath $leftover.Asar))
+  Write-Output ('UNINSTALL_REMAINS_PROCESS_COUNT='+$live.Count)
+  throw 'UNINSTALL_CLEANUP_FAILED_AFTER_BOUNDED_WAIT'
+}
 $receipt=[ordered]@{
   schema='oig-disposable-installer-acceptance-v1';status='PASS';sourceSHA=$expectedCommit
   sourceRun=38721014237;stableTag='v2.5.19'
