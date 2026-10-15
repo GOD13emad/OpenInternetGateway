@@ -19,7 +19,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           ref: ${{ github.event.pull_request.head.sha }}
-          fetch-depth: 2
+          fetch-depth: 0
           persist-credentials: false
       - uses: actions/setup-node@v7
         with:
@@ -29,8 +29,13 @@ jobs:
         run: |
           $ErrorActionPreference='Stop'
           $expected='05a15ba7f64c6ab570cad110a1af45c6f6a16fd1'
-          $parent=(git rev-parse HEAD^).Trim()
-          if($parent -ne $expected){throw "SOURCE_CANDIDATE_CHANGED_$parent"}
+          git cat-file -e "$expected^{commit}"
+          if($LASTEXITCODE -ne 0){throw 'PINNED_CANDIDATE_COMMIT_MISSING'}
+          git merge-base --is-ancestor $expected HEAD
+          if($LASTEXITCODE -ne 0){throw 'CANDIDATE_NOT_AUDIT_ANCESTOR'}
+          $allowed=@('.github/workflows/disposable-installer-acceptance.yml','tests/disposable-installer-acceptance.ps1')
+          $diff=@(git diff --name-only $expected HEAD)
+          if($diff.Count -ne 2 -or @($diff|Where-Object {$_ -notin $allowed}).Count){throw 'AUDIT_BRANCH_CONTAINS_PRODUCT_CHANGES'}
           if($env:RUNNER_ENVIRONMENT -ne 'github-hosted'){throw 'HOSTED_RUNNER_REQUIRED'}
       - name: Download only pinned successful CI candidate and checksum-pinned stable
         shell: pwsh
