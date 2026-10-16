@@ -158,7 +158,7 @@ See [SECURITY.md](SECURITY.md).
 
 Every published release includes `SHA256SUMS.txt`. The in-app updater verifies the selected release asset against both GitHub's published digest and `SHA256SUMS.txt`, re-hashes the downloaded bytes, then applies the user-space update and restarts the dashboard.
 
-No publicly trusted Authenticode signing credential is configured for v2.5.16, so Windows users installing manually should verify the published checksum. The in-app updater verifies GitHub digest + `SHA256SUMS.txt` + the downloaded bytes before applying an update.
+A publicly trusted Windows Authenticode publisher signature is **not evidenced** for the current published installer; inspect each exact binary's signature and verify its matching SHA-256. GitHub checksums and updater integrity checks do not establish Windows publisher trust. See the [Code signing policy](CODE_SIGNING.md) for the current status, compliance restrictions and conditions for a future newly versioned signed release.
 
 ## Scope
 
