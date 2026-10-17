@@ -266,6 +266,27 @@ jobs:
               installerExists=(Test-Path (Join-Path $folder 'OpenInternetGateway-Setup-2.5.19.exe') -PathType Leaf)
               installedProductVersion=(Get-Item $exe).VersionInfo.ProductVersion
             }
+            # Read-only deep triage for an updater helper that never produced its startup receipt.
+            $isolated=Join-Path $folder 'pwsh-helper\pwsh.exe'
+            if(Test-Path $isolated -PathType Leaf) {
+              $diag['bundledVsCopiedPwshShaMatch']=((Get-FileHash $pwsh -Algorithm SHA256).Hash -eq (Get-FileHash $isolated -Algorithm SHA256).Hash)
+              $sw=[Diagnostics.Stopwatch]::StartNew()
+              $version=& $isolated -NoProfile -WindowStyle Hidden -Command '$PSVersionTable.PSVersion.ToString()' 2>&1
+              $sw.Stop()
+              $diag['copiedPwshExitCode']=$LASTEXITCODE
+              $diag['copiedPwshStartMs']=$sw.ElapsedMilliseconds
+              $diag['copiedPwshVersionOrError']=[string]($version|Select-Object -First 1)
+            }
+            $scriptFile=Join-Path $folder 'apply-update.ps1'
+            if(Test-Path $scriptFile -PathType Leaf) {
+              $tokens=$null;$errors=$null
+              [void][Management.Automation.Language.Parser]::ParseFile($scriptFile,[ref]$tokens,[ref]$errors)
+              $diag['generatedHelperParseErrorCount']=@($errors).Count
+              if(@($errors).Count){$diag['firstParseError']=$errors[0].Message}
+            }
+            $diag['activeHelperPwshProcesses']=@((Get-CimInstance Win32_Process -Filter "Name='pwsh.exe'" -ErrorAction SilentlyContinue |
+              Where-Object { $_.ExecutablePath -like '*pwsh-helper*' } |
+              Select-Object ProcessId,ExecutablePath))
             if(Test-Path $result -PathType Leaf){
               try{ $diag['lateResult']=(Get-Content -Raw $result|ConvertFrom-Json|Select-Object ok,error,version,installScope) }catch{}
             }
