@@ -1,0 +1,116 @@
+name: Disposable Windows first-Connect fix validation
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/hosted-first-connect-acceptance.yml'
+      - 'app/backend/windows/scripts/Ensure-OpenInternet.ps1'
+      - 'app/backend/windows/scripts/Connect-OpenInternet.ps1'
+      - 'app/backend/windows/scripts/Headless-Control.ps1'
+      - 'app/src/main/platform-backend.js'
+      - 'app/tests/app.test.js'
+      - 'app/tests/openvpn-gui-exclusivity.test.js'
+      - 'app/tests/headless-cancel-and-status-safety.test.js'
+      - 'app/tests/first-connect-bootstrap-continuation.test.js'
+      - 'app/tests/first-connect-start-diagnostic.test.js'
+      - 'app/tests/hosted-first-connect.cjs'
+      - 'app/tests/hosted-first-connect.ps1'
+
+permissions:
+  contents: read
+
+jobs:
+  seed:
+    if: ${{ github.event.pull_request.head.repo.full_name == github.repository && github.head_ref == 'fix/first-connect-bootstrap-continuation' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Produce public OpenVPN seed using release method
+        run: |
+          python3 app/backend/linux/config_factory.py refresh --common app/common
+          python3 app/backend/linux/config_factory.py status --common app/common
+          test -f app/common/runtime/udp-cache/index.json
+          test "$(find app/common/runtime/udp-cache -maxdepth 1 -name '*.ovpn' | wc -l)" -ge 6
+      - uses: actions/upload-artifact@v7
+        with:
+          name: firstconnect-candidate-seed
+          path: |
+            app/common/runtime/udp-cache
+            app/common/evidence
+          if-no-files-found: error
+          retention-days: 5
+
+  first-connect:
+    needs: seed
+    if: ${{ github.event.pull_request.head.repo.full_name == github.repository && github.head_ref == 'fix/first-connect-bootstrap-continuation' }}
+    runs-on: windows-2025
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+      - name: Confirm disposable Windows scope and fixed source
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          if($env:RUNNER_ENVIRONMENT -ne 'github-hosted'){throw 'HOSTED_RUNNER_REQUIRED'}
+          if($env:GITHUB_REPOSITORY -ne 'GOD13emad/OpenInternetGateway'){throw 'REPO_MISMATCH'}
+          $base='4c34996ef615afa7b515ac0f84e6a18b9ddcb5cf'
+          git merge-base --is-ancestor $base HEAD
+          if($LASTEXITCODE -ne 0){throw 'BASE_SHA_NOT_ANCESTOR'}
+          $expected=@('.github/workflows/hosted-first-connect-acceptance.yml','app/backend/windows/scripts/Ensure-OpenInternet.ps1','app/backend/windows/scripts/Connect-OpenInternet.ps1','app/backend/windows/scripts/Headless-Control.ps1','app/src/main/platform-backend.js','app/tests/app.test.js','app/tests/openvpn-gui-exclusivity.test.js','app/tests/headless-cancel-and-status-safety.test.js','app/tests/first-connect-bootstrap-continuation.test.js','app/tests/first-connect-start-diagnostic.test.js','app/tests/hosted-first-connect.cjs','app/tests/hosted-first-connect.ps1')
+          $actual=@(git diff --name-only $base HEAD)
+          if($actual.Count -ne 12 -or @($actual|Where-Object {$_ -notin $expected}).Count){throw 'UNEXPECTED_PRODUCT_SCOPE'}
+      - uses: actions/download-artifact@v8
+        with:
+          name: firstconnect-candidate-seed
+          path: app/common
+      - name: Seed bundled Windows backend, build exact candidate and run tests
+        shell: pwsh
+        working-directory: app
+        run: |
+          $ErrorActionPreference='Stop'
+          New-Item -ItemType Directory -Force -Path backend/windows/runtime/udp-cache,backend/windows/evidence | Out-Null
+          Copy-Item common/runtime/udp-cache/* backend/windows/runtime/udp-cache -Force
+          if(Test-Path common/evidence/vpngate-mirror-api.csv){Copy-Item common/evidence/vpngate-mirror-api.csv backend/windows/evidence/vpngate-mirror-api.csv -Force}
+          npm ci --no-audit --no-fund
+          if($LASTEXITCODE -ne 0){throw 'NPM_CI_FAILED'}
+          npm run lint
+          if($LASTEXITCODE -ne 0){throw 'LINT_FAILED'}
+          npm test
+          if($LASTEXITCODE -ne 0){throw 'SOURCE_TEST_FAILED'}
+          npm run dist:win
+          if($LASTEXITCODE -ne 0){throw 'WINDOWS_PACKAGE_FAILED'}
+          $exe='dist/OpenInternetGateway-Setup-2.5.19.exe'
+          if(!(Test-Path -LiteralPath $exe)){throw 'CANDIDATE_NOT_BUILT'}
+          $sha=(Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash.ToLowerInvariant()
+          Write-Output ('CANDIDATE_SHA256='+$sha)
+      - name: First live Connect, diagnostics, and bounded rollback on disposable runner
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $exe=Join-Path (Get-Location) 'app/dist/OpenInternetGateway-Setup-2.5.19.exe'
+          $sha=(Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash.ToLowerInvariant()
+          $receipt=Join-Path $env:RUNNER_TEMP 'oig-first-connect-receipt.json'
+          ./app/tests/hosted-first-connect.ps1 -Installer $exe -Receipt $receipt -ExpectedSha256 $sha
+          if($LASTEXITCODE -ne 0){throw 'FIRST_CONNECT_NOT_ACCEPTED'}
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: firstconnect-candidate-hosted-evidence
+          path: |
+            ${{ runner.temp }}/oig-first-connect-receipt.json
+            ${{ runner.temp }}/oig-first-connect.stdout.log
+            ${{ runner.temp }}/oig-first-connect.stderr.log
+          retention-days: 7
+          if-no-files-found: warn

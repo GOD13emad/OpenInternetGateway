@@ -86,6 +86,12 @@ function Wait-Health([bool]$Want,[int]$Seconds,[string]$ExpectedCountry=''){
  }while((Get-Date)-lt $until)
  return (Get-Health $ExpectedCountry)
 }
+# An explicit Disconnect cancels an in-flight scan of relay candidates.
+function Test-DesiredOn {
+ if(-not(Test-Path -LiteralPath $desiredFile)){return $false}
+ try{return ([string](Get-Content -LiteralPath $desiredFile -Raw|ConvertFrom-Json).desired -eq 'on')}
+ catch{return $false}
+}
 function Save-Desired([string]$Value){
  [ordered]@{desired=$Value;at=(Get-Date).ToString('o')}|ConvertTo-Json|Set-Content -Encoding UTF8 $desiredFile
 }
@@ -316,6 +322,7 @@ function Ensure-ServiceInstalled {
  }
  Stop-ServiceForConfig
  [void](Invoke-Connector @('set-config','profile',$serviceProfile) 12000)
+ if(-not(Test-DesiredOn)){Stop-Connector;return $null}
  [void](Invoke-Connector @('set-config','log',$serviceLog) 12000)
  [void](Invoke-Connector @('set-config','dco','false') 12000)
  [void](Invoke-Connector @('set-config','security-level','legacy') 12000)
@@ -329,27 +336,45 @@ function Schedule-ManualServiceMode {
 }
 
 function Try-Candidate($c){
+ if(-not(Test-DesiredOn)){return $null}
  $profile=Resolve-ProfilePath $c
  if(-not(Test-Path $profile)){Record-Failure $c 'PROFILE_MISSING';return $null}
  $sha=(Get-FileHash -Algorithm SHA256 $profile).Hash.ToLowerInvariant()
  if($c.SHA256 -and $sha -ne ([string]$c.SHA256).ToLowerInvariant()){Record-Failure $c 'HASH_MISMATCH';return $null}
+ # Guard the race after frontend preflight. Never terminate a user's own GUI.
+ if(Get-Process -Name 'OpenVPNConnect' -ErrorAction SilentlyContinue){
+   throw 'OpenVPN Connect GUI is already running; headless service cannot coexist. Close the independent app manually before retrying.'
+ }
  Stop-Connector
+ if(-not(Test-DesiredOn)){return $null}
  Copy-Item -LiteralPath $profile -Destination $serviceProfile -Force
  if((Get-FileHash -Algorithm SHA256 $serviceProfile).Hash.ToLowerInvariant() -ne $sha){throw 'ProgramData profile copy hash mismatch.'}
  [void](Invoke-Connector @('set-config','profile',$serviceProfile) 12000)
+ if(-not(Test-DesiredOn)){Stop-Connector;return $null}
  $shadow=Add-PhysicalShadows
  $logOffset=0;if(Test-Path $serviceLog){$logOffset=(Get-Item $serviceLog).Length}
  try{[void](Invoke-Connector @('start') 20000)}catch{
+   # Record a bounded diagnostic; previously every start failure was collapsed
+   # to START_FAIL with no explanation for clean-machine installation failures.
+   $startError=[string]$_.Exception.Message
+   $startError=[regex]::Replace($startError,'(?i)(password|token|secret|key)\s*[=:]\s*\S+','$1=[redacted]')
+   $startError=[regex]::Replace($startError,'[A-Za-z0-9+/]{64,}={0,2}','[redacted]')
+   if($startError.Length -gt 400){$startError=$startError.Substring(0,400)}
+   Write-ShadowEvidence ([ordered]@{at=(Get-Date).ToString('o');result='START_REJECTED';error=$startError;candidate=[string]$c.SHA256})
    Record-Failure $c 'START_FAIL';Stop-Connector;return $null
  }
+ if(-not(Test-DesiredOn)){Stop-Connector;return $null}
  $native=Wait-NativeReady $c $logOffset 18
  if(-not $native.Ready){Write-ShadowEvidence ([ordered]@{at=(Get-Date).ToString('o');result='NATIVE_NOT_READY';candidate=[string]$c.SHA256;native=$native;shadow=$shadow});Record-Failure $c 'NATIVE_READY_FAIL';Stop-Connector;return $null}
+ if(-not(Test-DesiredOn)){Stop-Connector;return $null}
  $dataPlane=Wait-NativeDataPlane 6
  if(-not $dataPlane.Ready){Write-ShadowEvidence ([ordered]@{at=(Get-Date).ToString('o');result='DATAPLANE_NOT_READY';candidate=[string]$c.SHA256;native=$native;dataPlane=$dataPlane;shadow=$shadow});Record-Failure $c 'DATAPLANE_READY_FAIL';Stop-Connector;return $null}
+ if(-not(Test-DesiredOn)){Stop-Connector;return $null}
  Write-ShadowEvidence ([ordered]@{at=(Get-Date).ToString('o');result='DATAPLANE_READY';candidate=[string]$c.SHA256;native=$native;dataPlane=$dataPlane;shadow=$shadow})
  Remove-PhysicalShadows
  $h=Wait-Health $true 14 ([string]$c.Country)
  if(-not $h.Healthy){$fallback=Add-PhysicalShadows;Write-ShadowEvidence ([ordered]@{at=(Get-Date).ToString('o');result='POST_TAKEOVER_HEALTH_FAIL';candidate=[string]$c.SHA256;health=$h;fallback=$fallback;native=$native});Record-Failure $c 'LIVE_FAIL';Stop-Connector;return $null}
+ if(-not(Test-DesiredOn)){Stop-Connector;return $null}
  Write-ShadowEvidence ([ordered]@{at=(Get-Date).ToString('o');result='PASS';candidate=[string]$c.SHA256;health=$h;native=$native;dataPlane=$dataPlane})
  Record-Success $c $h
  Schedule-ManualServiceMode
@@ -405,13 +430,22 @@ try{
  $connected=$null
  $maxCycles=$(if([string]::IsNullOrWhiteSpace($ProfileSha)){2}else{1})
  for($cycle=0;$cycle -lt $maxCycles -and -not $connected;$cycle++){
+   if(-not(Test-DesiredOn)){break}
    foreach($c in @(Get-Candidates $ProfileSha)){
+     if(-not(Test-DesiredOn)){break}
      $connected=Try-Candidate $c
+     if(-not(Test-DesiredOn)){break}
      if($connected){break}
    }
+   if(-not(Test-DesiredOn)){break}
    if(-not $connected -and $cycle -eq 0 -and [string]::IsNullOrWhiteSpace($ProfileSha)){
      try{& (Join-Path $PSScriptRoot 'Config-Factory.ps1') -Action Refresh|Out-Null}catch{}
    }
+ }
+ if(-not(Test-DesiredOn)){
+   Stop-Connector
+   Write-Host 'CONNECT CANCELLED - DESIRED OFF'
+   exit 0
  }
  if(-not $connected){
    if($ProfileSha){
