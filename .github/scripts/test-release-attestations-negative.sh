@@ -40,13 +40,11 @@ reject() {
       return
     fi
   fi
-  # Do not count any arbitrary HTTP/auth or CLI error as a true negative.
-  if ! grep -Eiq 'No attestations found for subject|no matching attestations|no verified attestations|source digest|policy criteria.*not met|verification failed|failed to verify' "$out"; then
-    echo "INCONCLUSIVE_NEGATIVE:$case_id" >&2
-    tail -n 12 "$out" >&2
-    exit 1
-  fi
-  echo "EXPECTED_REJECTION:$case_id"
+  # A mismatching result is accepted only with the exact case-specific
+  # cryptographic reason checked above; never accept a generic API failure.
+  echo "INCONCLUSIVE_NEGATIVE:$case_id" >&2
+  tail -n 12 "$out" >&2
+  exit 1
 }
 
 tampered="$scratch/OpenInternetGateway-Setup-tampered.exe"
