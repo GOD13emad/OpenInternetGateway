@@ -1454,10 +1454,12 @@ exit 0
 
   async downloadUpdate() {
     const info = await this.updateInfo(true);
-    if (!info.asset?.url || !info.asset?.name) throw new Error('No compatible update asset was published for this platform.');
+    // Being current requires no downloadable installer. Check update status
+    // before requiring a platform-specific asset from the published release.
     if (!info.updateAvailable) {
       return { ok: true, alreadyCurrent: true, info, path: null };
     }
+    if (!info.asset?.url || !info.asset?.name) throw new Error('No compatible update asset was published for this platform.');
     if (!info.asset.sha256) throw new Error('GitHub release asset has no SHA-256 digest; refusing an unverifiable update.');
 
     if (info.checksumsUrl) {

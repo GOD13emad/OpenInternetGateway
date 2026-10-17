@@ -835,6 +835,36 @@ test('updater rejects assets named for a different release on Windows and Linux'
     {name:'OpenInternetGateway-2.5.18-amd64.deb'}
   ],'2.5.19'),null,'do not replace the installed AppImage with a different release');
 });
+test('up-to-date releases never require platform assets or try download', async()=>{
+  const Backend=require(path.join(root,'src/main/platform-backend.js'));
+  const os=require('node:os');
+  const tmp=fs.mkdtempSync(path.join(os.tmpdir(),'oig-no-new-release-asset-'));
+  try{
+    const backend=new Backend({version:'2.5.19',resourcesPath:tmp,appPath:tmp,userData:tmp,emit:()=>{}});
+    backend.backendRoot=tmp;
+    let calls=0;
+    backend._githubJson=async()=>{calls++;return {tag_name:'v2.5.19',assets:[],published_at:'2026-10-18T00:00:00Z'};};
+    backend._curlText=async()=>{throw new Error('no checksum request for an already-current release');};
+    backend._downloadWithSha256=async()=>{throw new Error('no installer download for an already-current release');};
+    for(const platform of ['win32','linux']){
+      backend.platform=platform;
+      const result=await backend.downloadUpdate();
+      assert.equal(result.ok,true);
+      assert.equal(result.alreadyCurrent,true);
+      assert.equal(result.info.upToDate,true);
+      assert.equal(result.info.updateAvailable,false);
+      assert.equal(result.info.asset,null);
+      assert.equal(result.path,null);
+    }
+    assert.equal(calls,2,'a fresh version check should still occur for each platform');
+    backend.platform='win32';
+    backend._githubJson=async()=>({tag_name:'v2.5.20',assets:[]});
+    await assert.rejects(backend.downloadUpdate(),/compatible update asset/i,
+      'missing installer for an actual newer version must still fail closed');
+  }finally{
+    fs.rmSync(tmp,{recursive:true,force:true});
+  }
+});
 test('updater streams checksum calculation and never promotes a hash-mismatched installer', {timeout:30000}, async()=>{
   const Backend=require(path.join(root,'src/main/platform-backend.js'));
   const os=require('node:os');
