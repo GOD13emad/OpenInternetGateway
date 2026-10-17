@@ -122,6 +122,19 @@ jobs:
           test "${#deb_asars[@]}" -eq 1
           test "${#image_asars[@]}" -eq 1
           node tests/packaged-security-parity.cjs "${deb_asars[0]}" "${image_asars[0]}"
+          # Verify that Linux installs execute a shipped trusted helper in
+          # both formats instead of the mutable per-user runtime copy.
+          mapfile -t deb_helpers < <(find "$scratch/deb" -type f -path '*/resources/backend/linux/harden_sandbox.py' -print)
+          mapfile -t appimage_helpers < <(find "$scratch/appimage" -type f -path '*/resources/backend/linux/harden_sandbox.py' -print)
+          test "${#deb_helpers[@]}" -eq 1
+          test "${#appimage_helpers[@]}" -eq 1
+          for shipped in "${deb_helpers[0]}" "${appimage_helpers[0]}"; do
+            test ! -L "$shipped"
+            cmp -s backend/linux/harden_sandbox.py "$shipped"
+            python3 -I "$shipped" "$scratch/not-a-runtime" |
+              python3 -I -c 'import json,sys; r=json.load(sys.stdin); assert not r["supported"] and not r["changed"]'
+          done
+          echo 'LINUX_PACKAGED_ISOLATED_HELPER_PARITY_PASS'
       - uses: actions/upload-artifact@v7
         with:
           name: linux-packages

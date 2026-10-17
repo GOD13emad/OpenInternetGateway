@@ -566,6 +566,11 @@ test('Linux Chromium sandbox hardening is fail-safe and update-persistent',()=>{
   const helper=fs.readFileSync(path.join(root,'backend/linux/harden_sandbox.py'),'utf8');
   assert.match(backend,/_hardenLinuxChromiumSandbox/);
   assert.match(backend,/linux-sandbox-hardening.json/);
+  assert.match(backend,/path.join\(this.resourcesPath, 'backend', 'linux', 'harden_sandbox.py'\)/);
+  assert.match(backend,/path.join\(this.appPath, 'backend', 'linux', 'harden_sandbox.py'\)/);
+  assert.doesNotMatch(backend,/path.join\(this.backendRoot, 'linux', 'harden_sandbox.py'\)/);
+  assert.match(backend,/path.isAbsolute\(candidate\) && fs.statSync\(candidate\).isFile\(\)/);
+  assert.match(backend,/run\('python3', \['-I', helperScript, runtimeRoot\]/);
   assert.match(backend,/sandboxHardened/);
   assert.match(backend,/resources\/backend\/linux\/harden_sandbox\.py/);
   assert.match(main,/OIG_SANDBOX_RESTARTED/);
@@ -1126,4 +1131,71 @@ test('Windows update helper uses an isolated copy of bundled PowerShell instead 
   assert.match(block,/updatePwsh = path\.join\(helperRuntime, 'pwsh\.exe'\)/);
   assert.match(block,/spawn\(updatePwsh, pwshArgs/);
   assert.doesNotMatch(block,/where\.exe pwsh\.exe|process\.env\.ComSpec|apply-update\.cmd/);
+});
+
+test('Linux sandbox helper executes packaged Python in isolated mode without shell interpretation', async () => {
+  const vm = require('node:vm');
+  const os = require('node:os');
+  const {EventEmitter} = require('node:events');
+  const {PassThrough} = require('node:stream');
+  const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'oig-helper-argv-'));
+  try {
+    const runtime = path.join(workspace, 'AppDir ; path with spaces');
+    const packages = path.join(workspace, 'packaged resources');
+    const dev = path.join(workspace, 'development');
+    const stable = path.join(workspace, 'writable state');
+    const pkgHelper = path.join(packages, 'backend', 'linux', 'harden_sandbox.py');
+    const devHelper = path.join(dev, 'backend', 'linux', 'harden_sandbox.py');
+    const replaced = path.join(stable, 'linux', 'harden_sandbox.py');
+    for (const item of [runtime, path.dirname(pkgHelper), path.dirname(devHelper), path.dirname(replaced)]) {
+      fs.mkdirSync(item, {recursive:true});
+    }
+    fs.writeFileSync(path.join(runtime, 'AppRun'), '#!/bin/sh\n', 'utf8');
+    fs.writeFileSync(pkgHelper, 'print("packaged")\n', 'utf8');
+    fs.writeFileSync(devHelper, 'print("development")\n', 'utf8');
+    fs.writeFileSync(replaced, 'print("UNTRUSTED")\n', 'utf8');
+    const calls=[];
+    const fakeSpawn=(file,args,options)=>{
+      calls.push({file,args,options});
+      const child=new EventEmitter();
+      child.stdout=new PassThrough();
+      child.stderr=new PassThrough();
+      child.kill=()=>true;
+      process.nextTick(()=>{
+        child.stdout.end('{"supported":true,"hardened":false,"reason":"test"}\n');
+        child.stderr.end();
+        child.emit('close',0);
+      });
+      return child;
+    };
+    const module={exports:{}};
+    const source=fs.readFileSync(path.join(root, 'src/main/platform-backend.js'),'utf8');
+    vm.runInNewContext(source,{
+      module,exports:module.exports,
+      require:(name)=>name==='child_process'?{spawn:fakeSpawn}:require(name),
+      process:{platform:'linux',execPath:path.join(runtime,'open-internet-gateway'),pid:process.pid,env:{}},
+      setTimeout,clearTimeout,Buffer,console
+    },{filename:'platform-backend.js',timeout:1000});
+    const Backend=module.exports;
+    const backend=new Backend({version:'test',resourcesPath:packages,appPath:dev,userData:workspace});
+    backend.backendRoot=stable;
+    backend._writeJson=()=>{};
+    const result=await backend._hardenLinuxChromiumSandbox();
+    assert.equal(result.supported,true);
+    assert.equal(calls.length,1);
+    assert.equal(calls[0].file,'python3');
+    assert.deepEqual(Array.from(calls[0].args),['-I',pkgHelper,runtime]);
+    assert.equal(calls[0].options.shell,false);
+    assert.ok(!calls[0].args.includes(replaced));
+    fs.unlinkSync(pkgHelper);
+    await backend._hardenLinuxChromiumSandbox();
+    assert.equal(calls.length,2);
+    assert.deepEqual(Array.from(calls[1].args),['-I',devHelper,runtime]);
+    fs.unlinkSync(devHelper);
+    const failClosed=await backend._hardenLinuxChromiumSandbox();
+    assert.equal(calls.length,2);
+    assert.equal(failClosed.supported,false);
+  } finally {
+    fs.rmSync(workspace,{recursive:true,force:true});
+  }
 });

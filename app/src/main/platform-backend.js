@@ -78,12 +78,23 @@ class Backend {
     if (process.platform !== 'linux' || !this.backendRoot) return base;
     const runtimeRoot = path.dirname(process.execPath || '');
     const appRun = path.join(runtimeRoot, 'AppRun');
-    const helperScript = path.join(this.backendRoot, 'linux', 'harden_sandbox.py');
-    if (!runtimeRoot || !fs.existsSync(appRun) || !fs.existsSync(helperScript)) {
+    // Execute the versioned helper from packaged resources, not its
+    // user-writable runtime copy. Prefer shipped code; use the app source
+    // directory only when the packaged resources are unavailable.
+    const packagedScript = this.resourcesPath
+      ? path.join(this.resourcesPath, 'backend', 'linux', 'harden_sandbox.py') : '';
+    const developmentScript = this.appPath
+      ? path.join(this.appPath, 'backend', 'linux', 'harden_sandbox.py') : '';
+    const helperScript = [packagedScript, developmentScript].find(candidate => {
+      try { return !!candidate && path.isAbsolute(candidate) && fs.statSync(candidate).isFile(); }
+      catch { return false; }
+    }) || '';
+    if (!runtimeRoot || !fs.existsSync(appRun) || !helperScript) {
       return { ...base, runtimeRoot };
     }
     try {
-      const r = await run('python3', [helperScript, runtimeRoot], { timeout: 10000 });
+      // Isolated Python ignores PYTHONPATH, PYTHONHOME and user site-packages.
+      const r = await run('python3', ['-I', helperScript, runtimeRoot], { timeout: 10000 });
       const parsed = JSON.parse(String(r.stdout || '{}').trim() || '{}');
       let currentProcessNoSandbox = false;
       try {
