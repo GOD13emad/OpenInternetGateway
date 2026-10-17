@@ -351,17 +351,23 @@ class Backend {
 
   async _ensureWindowsRuntimePrerequisites() {
     const pwsh = this._requireWindowsPwsh();
+    // The interactive OpenVPN Connect GUI and headless connector are exclusive.
+    // Check before downloading/installing the MSI (not just before connecting).
+    // Never stop another application's process or modify its independent tunnel.
+    const assertGuiClosed = async () => {
+      const interactive = await run(pwsh, [
+        '-NoProfile', '-NonInteractive', '-Command',
+        "if (Get-Process -Name 'OpenVPNConnect' -ErrorAction SilentlyContinue) { exit 17 } else { exit 0 }"
+      ], { timeout: 10000, allowFailure: true });
+      if (interactive.code === 17) {
+        throw new Error('OpenVPN Connect is already running. Disconnect and close it before connecting through Open Internet Gateway. No OpenVPN process was closed.');
+      }
+      if (interactive.code !== 0) throw new Error('Cannot confirm OpenVPN Connect is closed; refusing a competing VPN operation.');
+    };
+    await assertGuiClosed();
     const openVpn = await this._ensureWindowsConnector();
-    // Never shut down somebody's independently running OpenVPN Connect GUI.
-    // The vendor's interactive application and headless service are exclusive.
-    const interactive = await run(pwsh, [
-      '-NoProfile', '-NonInteractive', '-Command',
-      "if (Get-Process -Name 'OpenVPNConnect' -ErrorAction SilentlyContinue) { exit 17 } else { exit 0 }"
-    ], { timeout: 10000, allowFailure: true });
-    if (interactive.code === 17) {
-      throw new Error('OpenVPN Connect is already running. Disconnect and close it before connecting through Open Internet Gateway. No OpenVPN process was closed.');
-    }
-    if (interactive.code !== 0) throw new Error('Cannot confirm OpenVPN Connect is closed; refusing a competing VPN operation.');
+    // Verify again after installation in case the MSI or another app opened the GUI.
+    await assertGuiClosed();
     return { powerShell7: { ready: true, path: pwsh }, openVpnConnect: openVpn };
   }
 
