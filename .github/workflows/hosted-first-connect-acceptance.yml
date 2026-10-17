@@ -1,0 +1,77 @@
+name: Disposable Windows OpenVPN first-connect acceptance
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/hosted-first-connect-acceptance.yml'
+      - 'app/tests/hosted-first-connect.cjs'
+      - 'app/tests/hosted-first-connect.ps1'
+
+permissions:
+  contents: read
+
+jobs:
+  first-connect:
+    if: ${{ github.event.pull_request.head.repo.full_name == github.repository && github.head_ref == 'audit/hosted-first-connect-20261017' }}
+    runs-on: windows-2025
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+      - name: Verify first-connect audit scope
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          if($env:RUNNER_ENVIRONMENT -ne 'github-hosted'){throw 'NOT_DISPOSABLE'}
+          if($env:GITHUB_REPOSITORY -ne 'GOD13emad/OpenInternetGateway'){throw 'NOT_SOURCE_REPO'}
+          $base='4c34996ef615afa7b515ac0f84e6a18b9ddcb5cf'
+          git merge-base --is-ancestor $base HEAD
+          if($LASTEXITCODE -ne 0){throw 'AUDIT_ANCESTRY_MISMATCH'}
+          $expected=@('.github/workflows/hosted-first-connect-acceptance.yml','app/tests/hosted-first-connect.cjs','app/tests/hosted-first-connect.ps1')
+          $changed=@(git diff --name-only $base HEAD)
+          if($changed.Count -ne 3 -or @($changed|Where-Object {$_ -notin $expected}).Count){throw 'NON_AUDIT_SOURCE_DELTA'}
+      - name: Download exact public release to disposable runner
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference='Stop'
+          $out=Join-Path $env:RUNNER_TEMP 'oig-public-release'
+          New-Item -ItemType Directory -Force -Path $out | Out-Null
+          gh release download v2.5.19 -R GOD13emad/OpenInternetGateway -p OpenInternetGateway-Setup-2.5.19.exe -D $out
+          if($LASTEXITCODE -ne 0){throw 'PINNED_RELEASE_DOWNLOAD_FAILED'}
+          $exe=Join-Path $out 'OpenInternetGateway-Setup-2.5.19.exe'
+          $sha=(Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash.ToLowerInvariant()
+          if($sha -ne '761637b5d49f37858973300ec2e9b1bb2b32c684ebabe86f1e8718b4480685db'){throw 'PINNED_RELEASE_MISMATCH'}
+          Write-Output ('VERIFIED_PUBLIC_SETUP_SHA='+$sha)
+      - name: Install ASAR inspector without running application
+        working-directory: app
+        shell: pwsh
+        run: |
+          npm ci --ignore-scripts --no-audit --no-fund
+          if($LASTEXITCODE -ne 0){throw 'ASAR_DEPS_INSTALL_FAILED'}
+          node -e "require('@electron/asar');console.log('ASAR_READY')"
+          if($LASTEXITCODE -ne 0){throw 'ASAR_DEPS_MISSING'}
+      - name: First connection and bounded native rollback
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $exe=Join-Path $env:RUNNER_TEMP 'oig-public-release\OpenInternetGateway-Setup-2.5.19.exe'
+          $receipt=Join-Path $env:RUNNER_TEMP 'oig-first-connect-receipt.json'
+          ./app/tests/hosted-first-connect.ps1 -Installer $exe -Receipt $receipt
+          if($LASTEXITCODE -ne 0){throw 'FIRST_CONNECT_HARNESS_FAILED'}
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: disposable-first-connect-evidence
+          path: |
+            ${{ runner.temp }}/oig-first-connect-receipt.json
+            ${{ runner.temp }}/oig-first-connect.stdout.log
+            ${{ runner.temp }}/oig-first-connect.stderr.log
+          if-no-files-found: warn
+          retention-days: 7
