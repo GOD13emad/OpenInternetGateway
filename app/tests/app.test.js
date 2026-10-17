@@ -835,6 +835,40 @@ test('updater rejects assets named for a different release on Windows and Linux'
     {name:'OpenInternetGateway-2.5.18-amd64.deb'}
   ],'2.5.19'),null,'do not replace the installed AppImage with a different release');
 });
+test('updater streams checksum calculation and never promotes a hash-mismatched installer', {timeout:30000}, async()=>{
+  const Backend=require(path.join(root,'src/main/platform-backend.js'));
+  const os=require('node:os');
+  const crypto=require('node:crypto');
+  const {pathToFileURL}=require('node:url');
+  const tmp=fs.mkdtempSync(path.join(os.tmpdir(),'oig-update-hash-before-rename-'));
+  try{
+    const backend=new Backend({version:'2.5.18',resourcesPath:tmp,appPath:tmp,userData:tmp,emit:()=>{}});
+    const source=path.join(tmp,'source installer with spaces.exe');
+    const target=path.join(tmp,'verified','OpenInternetGateway-Setup-2.5.19.exe');
+    // Real local-file curl exercises the downloaded .partial path without
+    // external network access or touching an installed app.
+    const payload=Buffer.alloc(8*1024*1024,0x6d);
+    fs.writeFileSync(source,payload);
+    const expected=crypto.createHash('sha256').update(payload).digest('hex');
+    const url=pathToFileURL(source).href;
+    await assert.rejects(backend._downloadWithSha256(url,target,'0'.repeat(64)),
+      /SHA-256|digest|hash/i,
+      'bad download must be rejected before the final filename exists');
+    assert.equal(fs.existsSync(target),false);
+    assert.equal(fs.existsSync(target+'.partial'),false);
+    const result=await backend._downloadWithSha256(url,target,expected);
+    assert.equal(result.sha256,expected);
+    assert.equal(result.bytes,payload.length);
+    assert.equal(fs.existsSync(target),true);
+    assert.equal(fs.existsSync(target+'.partial'),false);
+    assert.equal(await backend._fileSha256(target),expected);
+    assert.equal(await backend._fileSha256(source),expected);
+    const backendSource=fs.readFileSync(path.join(root,'src/main/platform-backend.js'),'utf8');
+    assert.doesNotMatch(backendSource,/fs\.readFileSync\((?:partial|destination)\)/);
+  }finally{
+    fs.rmSync(tmp,{recursive:true,force:true});
+  }
+});
 test('Linux OpenVPN quality engine uses multi-source refresh and safe public-profile filtering',()=>{
   const factory=fs.readFileSync(path.join(root,'backend/linux/config_factory.py'),'utf8');
   assert.match(factory,/https:\/\/www\.vpngate\.net/);

@@ -1170,7 +1170,22 @@ class Backend {
     return String(r.stdout || '');
   }
 
-  async _downloadWithSha256(url, destination) {
+  async _fileSha256(file) {
+    const hash = crypto.createHash('sha256');
+    await new Promise((resolve, reject) => {
+      const stream = fs.createReadStream(file);
+      stream.on('data', chunk => hash.update(chunk));
+      stream.once('error', reject);
+      stream.once('end', resolve);
+    });
+    return hash.digest('hex').toLowerCase();
+  }
+
+  async _downloadWithSha256(url, destination, expectedSha256) {
+    const expected = String(expectedSha256 || '').toLowerCase();
+    if (!/^[a-f0-9]{64}$/.test(expected)) {
+      throw new Error('Downloaded update requires a verified SHA-256 digest.');
+    }
     fs.mkdirSync(path.dirname(destination), { recursive: true });
     const partial = destination + '.partial';
     try { fs.unlinkSync(partial); } catch {}
@@ -1180,7 +1195,12 @@ class Backend {
         '--retry','2','--retry-delay','1','-sS','-o',partial,url
       ], { timeout: 310000 });
       const bytes = fs.statSync(partial).size;
-      const sha256 = crypto.createHash('sha256').update(fs.readFileSync(partial)).digest('hex').toLowerCase();
+      // Stream rather than allocating the entire 200+ MB installer in the
+      // Electron main process. Do not expose a final filename until verified.
+      const sha256 = await this._fileSha256(partial);
+      if (sha256 !== expected) {
+        throw new Error('Downloaded update SHA-256 does not match the published GitHub release digest.');
+      }
       fs.renameSync(partial, destination);
       return { sha256, bytes };
     } catch (error) {
@@ -1450,12 +1470,12 @@ exit 0
 
     const destination = path.join(this.backendRoot, 'updates', 'v' + info.latestVersion, info.asset.name);
     if (fs.existsSync(destination)) {
-      const existing = crypto.createHash('sha256').update(fs.readFileSync(destination)).digest('hex').toLowerCase();
+      const existing = await this._fileSha256(destination);
       if (existing === info.asset.sha256) return { ok: true, cached: true, info, path: destination, sha256: existing };
       try { fs.unlinkSync(destination); } catch {}
     }
 
-    const downloaded = await this._downloadWithSha256(info.asset.url, destination);
+    const downloaded = await this._downloadWithSha256(info.asset.url, destination, info.asset.sha256);
     if (downloaded.sha256 !== info.asset.sha256) {
       try { fs.unlinkSync(destination); } catch {}
       throw new Error('Downloaded update SHA-256 does not match the published GitHub release digest.');
