@@ -785,6 +785,56 @@ test('automatic updater prefers user-space assets and avoids elevation paths',()
   fs.rmSync(tmp,{recursive:true,force:true});
 });
 
+test('updater ignores cached release results from a previous installed version', async()=>{
+  const Backend=require(path.join(root,'src/main/platform-backend.js'));
+  const os=require('node:os');
+  const tmp=fs.mkdtempSync(path.join(os.tmpdir(),'oig-update-post-upgrade-'));
+  try{
+    const statePath=path.join(tmp,'state','github-update.json');
+    fs.mkdirSync(path.dirname(statePath),{recursive:true});
+    fs.writeFileSync(statePath,JSON.stringify({
+      checkedAt:new Date().toISOString(),currentVersion:'2.5.18',
+      latestVersion:'2.5.19',updateAvailable:true,upToDate:false,
+      asset:{name:'OpenInternetGateway-Setup-2.5.19.exe'}
+    }));
+    const backend=new Backend({version:'2.5.19',resourcesPath:tmp,appPath:tmp,userData:tmp,emit:()=>{}});
+    backend.platform='win32';
+    backend.backendRoot=tmp;
+    let requests=0;
+    backend._githubJson=async()=>{
+      requests++;
+      return {
+        tag_name:'v2.5.19',
+        assets:[{name:'OpenInternetGateway-Setup-2.5.19.exe',
+          digest:'sha256:'+'a'.repeat(64),browser_download_url:'https://github.com/example/asset'}]
+      };
+    };
+    const refreshed=await backend.updateInfo(false);
+    assert.equal(requests,1,'a newer installed app must not reuse an older currentVersion cache');
+    assert.equal(refreshed.currentVersion,'2.5.19');
+    assert.equal(refreshed.updateAvailable,false);
+    assert.equal(refreshed.upToDate,true);
+    const cached=await backend.updateInfo(false);
+    assert.equal(requests,1,'matching-version cache must still avoid a redundant release fetch');
+    assert.equal(cached.currentVersion,'2.5.19');
+  }finally{
+    fs.rmSync(tmp,{recursive:true,force:true});
+  }
+});
+
+test('updater rejects assets named for a different release on Windows and Linux',()=>{
+  const Backend=require(path.join(root,'src/main/platform-backend.js'));
+  const backend=new Backend({version:'2.5.18',resourcesPath:'',appPath:'',userData:'',emit:()=>{}});
+  backend.platform='win32';
+  assert.equal(backend._selectUpdateAsset([
+    {name:'OpenInternetGateway-Setup-2.5.18.exe',digest:'sha256:'+'a'.repeat(64)}
+  ],'2.5.19'),null,'do not install an older Windows EXE under a new version label');
+  backend.platform='linux';
+  assert.equal(backend._selectUpdateAsset([
+    {name:'OpenInternetGateway-2.5.18-x86_64.AppImage',digest:'sha256:'+'a'.repeat(64)},
+    {name:'OpenInternetGateway-2.5.18-amd64.deb'}
+  ],'2.5.19'),null,'do not replace the installed AppImage with a different release');
+});
 test('Linux OpenVPN quality engine uses multi-source refresh and safe public-profile filtering',()=>{
   const factory=fs.readFileSync(path.join(root,'backend/linux/config_factory.py'),'utf8');
   assert.match(factory,/https:\/\/www\.vpngate\.net/);

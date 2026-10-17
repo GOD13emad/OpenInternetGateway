@@ -1108,15 +1108,14 @@ class Backend {
   _selectUpdateAsset(assets, version) {
     const list = Array.isArray(assets) ? assets : [];
     if (this.platform === 'win32') {
-      return list.find(a => a.name === 'OpenInternetGateway-Setup-' + version + '.exe')
-        || list.find(a => /^OpenInternetGateway-Setup-.*\.exe$/i.test(a.name || ''));
+      // The fallback must never choose an older (or differently named)
+      // installer from the latest release assets.
+      return list.find(a => a.name === 'OpenInternetGateway-Setup-' + version + '.exe') || null;
     }
     if (this.platform === 'linux') {
-      // Automatic Linux updates must remain user-space and never invoke apt/dpkg/sudo.
-      // Prefer the AppImage release asset; the DEB remains available for manual/system installs.
-      return list.find(a => a.name === 'OpenInternetGateway-' + version + '-x86_64.AppImage')
-        || list.find(a => /^OpenInternetGateway-.*-x86_64\.AppImage$/i.test(a.name || ''))
-        || list.find(a => /\.AppImage$/i.test(a.name || ''));
+      // AppImage is the only user-space auto-update format. Do not accept a
+      // previous version, a DEB, or an unexpected architecture by fallback.
+      return list.find(a => a.name === 'OpenInternetGateway-' + version + '-x86_64.AppImage') || null;
     }
     return null;
   }
@@ -1126,7 +1125,11 @@ class Backend {
     if (!force) {
       const cached = this._readJson(stateFile, null);
       const checked = cached?.checkedAt ? Date.parse(cached.checkedAt) : 0;
-      if (checked && Date.now() - checked < 5 * 60 * 1000) return cached;
+      // Cached update availability is valid only for the exact installed
+      // app version. It must be refreshed after NSIS/AppImage upgrades.
+      const now = Date.now();
+      if (cached?.currentVersion === this.version
+          && checked > 0 && checked <= now && now - checked < 5 * 60 * 1000) return cached;
     }
 
     const release = await this._githubJson('https://api.github.com/repos/GOD13emad/OpenInternetGateway/releases/latest');
