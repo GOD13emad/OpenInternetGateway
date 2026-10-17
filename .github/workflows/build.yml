@@ -191,7 +191,7 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version: '24'
-      - name: Real published old installed app Update button and online installer
+      - name: Diagnose authentic public v2.5.18 updater (real UI, fail-closed classification)
         shell: pwsh
         working-directory: app
         timeout-minutes: 13

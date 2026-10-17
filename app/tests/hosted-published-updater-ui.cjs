@@ -121,4 +121,27 @@ while(Date.now()<t){
   await sleep(200);
 }
 throw Error('PUBLISHED_OLD_UPDATER_DID_NOT_EXIT_OR_SHOW_APPLYING');
-})().catch(e=>{console.error('REAL_INSTALLED_OLD_UI_DRIVER_FAILED', e.stack||String(e));process.exitCode=1});
+})().catch(e=>{
+  const reason=String(e?.stack||e);
+  const clicked=fs.existsSync(receiptPath);
+  const known=clicked && reason.includes('Windows update helper failed to start with the verified PowerShell runtime.');
+  if (known) {
+    const negative={
+      schema:'oig-published-2518-real-update-known-failure-v1',
+      actualPublic2518Installed:true,
+      realInstalledRendererUpdateButtonClicked:true,
+      mockedBackend:false,
+      actualPublishedOldUpdaterSucceeded:false,
+      classification:'LEGACY_WINDOWS_DETACHED_PWSH_HELPER_START_FAILURE',
+      nativeWindows11X64:false,
+      sourceHead:process.env.GITHUB_SHA,
+      at:new Date().toISOString()
+    };
+    try {fs.writeFileSync(require('node:path').join(require('node:path').dirname(receiptPath),'legacy-updater-failure-result.json'),JSON.stringify(negative,null,2)+'\n',{flag:'wx'});}
+    catch(err) {fs.writeSync(2,'LEGACY_DIAGNOSTIC_RECEIPT_WRITE_FAIL '+String(err)+'\n');}
+  }
+  fs.writeSync(2,'REAL_INSTALLED_OLD_UI_DRIVER_FAILED '+reason.slice(0,650)+'\n');
+  // Close the remote-debugging WebSocket by terminating the diagnostic
+  // Node process; the prior test leaked an open WS and hit the job timeout.
+  process.exit(known?42:1);
+});

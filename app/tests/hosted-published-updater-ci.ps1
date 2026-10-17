@@ -56,9 +56,54 @@ $child=Start-Process -FilePath $exe -WorkingDirectory (Split-Path $exe -Parent) 
 if(!$child -or $child.Id -le 0){throw 'INSTALLED_OLD_ELECTRON_PROCESS_NOT_CREATED'}
 Write-Host "AUTHENTIC_2518_INSTALLED_APP_GUI_LAUNCHED_PID=$($child.Id)"
 node tests/hosted-published-updater-ui.cjs "$port" (Join-Path $folder 'real-ui-click-receipt.json')
-if($LASTEXITCODE -ne 0){throw 'AUTHENTIC_OLD_INSTALLED_UI_UPDATE_BUTTON_FAILED'}
+$driverExit=$LASTEXITCODE
 $receipt=Join-Path $root 'updates\v2.5.19\apply-result.json'
 $started=$receipt+'.started'
+if($driverExit -eq 42){
+  $negFile=Join-Path $folder 'legacy-updater-failure-result.json'
+  $click=Join-Path $folder 'real-ui-click-receipt.json'
+  if(!(Test-Path $negFile -PathType Leaf) -or !(Test-Path $click -PathType Leaf)){throw 'EXPECTED_LEGACY_FAILURE_MISSING_PROVENANCE'}
+  $neg=Get-Content -Raw $negFile|ConvertFrom-Json
+  $clicked=Get-Content -Raw $click|ConvertFrom-Json
+  if($neg.classification -ne 'LEGACY_WINDOWS_DETACHED_PWSH_HELPER_START_FAILURE' -or
+     $neg.actualPublishedOldUpdaterSucceeded -ne $false -or
+     $neg.realInstalledRendererUpdateButtonClicked -ne $true -or
+     $clicked.mockedBackend -ne $false -or
+     $clicked.publishedInstalledVersion -ne '2.5.18' -or
+     $clicked.publicTarget -ne '2.5.19'){throw 'LEGACY_FAILURE_CLASSIFICATION_UNTRUSTED'}
+  Start-Sleep -Seconds 8
+  Assert-Offline
+  if((Get-Item $exe).VersionInfo.ProductVersion -notlike '2.5.18*' -or
+     (Get-Content -Raw $marker) -ne $mark -or
+     (Test-Path $started -PathType Leaf) -or
+     (Test-Path $receipt -PathType Leaf)){throw 'LEGACY_FAILED_CLOSED_INVARIANTS_NOT_PROVEN'}
+  $proof=[ordered]@{
+    schema='oig-real-published-2518-installed-legacy-update-compatibility-v1'
+    status='FAIL_REAL_PUBLISHED_2518_AUTOMATIC_UPDATE'
+    testDetector='PASS_REPRODUCED_AND_FAILED_CLOSED'
+    installedOldPublic2518=$true
+    originalOldReleaseUnmodified=$true
+    realUiButtonClicked=$true
+    mockedBackend=$false
+    publishedUpdateTo2519Succeeded=$false
+    errorClassification=$neg.classification
+    initialVersion='2.5.18'
+    stillInstalledVersion='2.5.18'
+    expectedTargetVersion='2.5.19'
+    userStatePreserved=$true
+    desiredVpnOff=$true
+    protectedRoutesAfter=0
+    helperStarted=$false
+    realClickReceiptSha256=(Get-FileHash $click -Algorithm SHA256).Hash
+    negativeReceiptSha256=(Get-FileHash $negFile -Algorithm SHA256).Hash
+    sourceGitSha=$env:GITHUB_SHA
+    scope='Disposable GitHub Windows Server 2025 x64, NOT native Windows 11 x64'
+  }
+  [IO.File]::WriteAllText((Join-Path $folder 'published-old-real-update-e2e-result.json'),($proof|ConvertTo-Json -Depth 4)+[Environment]::NewLine,[Text.UTF8Encoding]::new($false))
+  Write-Host ('NEGATIVE_CONTROL_DETECTOR_PASS_PRODUCT_LEGACY_AUTO_UPDATE_FAIL='+($proof|ConvertTo-Json -Depth 4 -Compress))
+  return
+}
+if($driverExit -ne 0){throw ('AUTHENTIC_OLD_GUI_DRIVER_INFRASTRUCTURE_FAILURE_'+$driverExit)}
 $deadline=(Get-Date).AddMinutes(5)
 while(!(Test-Path $receipt -PathType Leaf) -and (Get-Date) -lt $deadline){Start-Sleep -Seconds 1}
 $observed=[ordered]@{
