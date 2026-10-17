@@ -1,4 +1,4 @@
-const { spawn } = require('child_process');
+const { spawn, execFile } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
@@ -93,9 +93,14 @@ class Backend {
       return { ...base, runtimeRoot };
     }
     try {
-      // Isolated Python ignores PYTHONPATH, PYTHONHOME and user site-packages.
-      const r = await run('python3', ['-I', helperScript, runtimeRoot], { timeout: 10000 });
-      const parsed = JSON.parse(String(r.stdout || '{}').trim() || '{}');
+      // execFile directly accepts an argument array and never invokes a shell;
+      // isolated Python ignores PYTHONPATH, PYTHONHOME and user site-packages.
+      const stdout = await new Promise((resolve, reject) => {
+        execFile('python3', ['-I', helperScript, runtimeRoot], {
+          timeout: 10000, shell: false, windowsHide: true, maxBuffer: 1024 * 1024
+        }, (error, output) => error ? reject(error) : resolve(output));
+      });
+      const parsed = JSON.parse(String(stdout || '{}').trim() || '{}');
       let currentProcessNoSandbox = false;
       try {
         const argv = fs.readFileSync('/proc/' + String(process.pid) + '/cmdline', 'utf8').split('\0').filter(Boolean);

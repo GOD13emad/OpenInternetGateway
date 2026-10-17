@@ -570,7 +570,7 @@ test('Linux Chromium sandbox hardening is fail-safe and update-persistent',()=>{
   assert.match(backend,/path.join\(this.appPath, 'backend', 'linux', 'harden_sandbox.py'\)/);
   assert.doesNotMatch(backend,/path.join\(this.backendRoot, 'linux', 'harden_sandbox.py'\)/);
   assert.match(backend,/path.isAbsolute\(candidate\) && fs.statSync\(candidate\).isFile\(\)/);
-  assert.match(backend,/run\('python3', \['-I', helperScript, runtimeRoot\]/);
+  assert.match(backend,/execFile\('python3', \['-I', helperScript, runtimeRoot\]/);
   assert.match(backend,/sandboxHardened/);
   assert.match(backend,/resources\/backend\/linux\/harden_sandbox\.py/);
   assert.match(main,/OIG_SANDBOX_RESTARTED/);
@@ -1155,24 +1155,17 @@ test('Linux sandbox helper executes packaged Python in isolated mode without she
     fs.writeFileSync(devHelper, 'print("development")\n', 'utf8');
     fs.writeFileSync(replaced, 'print("UNTRUSTED")\n', 'utf8');
     const calls=[];
-    const fakeSpawn=(file,args,options)=>{
+    const fakeSpawn=()=>{throw new Error('unexpected spawned process');};
+    const fakeExecFile=(file,args,options,callback)=>{
       calls.push({file,args,options});
-      const child=new EventEmitter();
-      child.stdout=new PassThrough();
-      child.stderr=new PassThrough();
-      child.kill=()=>true;
-      process.nextTick(()=>{
-        child.stdout.end('{"supported":true,"hardened":false,"reason":"test"}\n');
-        child.stderr.end();
-        child.emit('close',0);
-      });
-      return child;
+      process.nextTick(()=>callback(null,'{"supported":true,"hardened":false,"reason":"test"}\n',''));
+      return {kill:()=>true};
     };
     const module={exports:{}};
     const source=fs.readFileSync(path.join(root, 'src/main/platform-backend.js'),'utf8');
     vm.runInNewContext(source,{
       module,exports:module.exports,
-      require:(name)=>name==='child_process'?{spawn:fakeSpawn}:require(name),
+      require:(name)=>name==='child_process'?{spawn:fakeSpawn,execFile:fakeExecFile}:require(name),
       process:{platform:'linux',execPath:path.join(runtime,'open-internet-gateway'),pid:process.pid,env:{}},
       setTimeout,clearTimeout,Buffer,console
     },{filename:'platform-backend.js',timeout:1000});
