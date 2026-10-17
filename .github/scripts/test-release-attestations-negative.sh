@@ -34,6 +34,12 @@ reject() {
       return
     fi
   fi
+  if [ "$case_id" = WRONG_SOURCE_DIGEST ]; then
+    if grep -Fq "expected SourceRepositoryDigest to be $wrong_source, got $GITHUB_SHA" "$out"; then
+      echo "EXPECTED_REJECTION:$case_id:EXACT_SOURCE_DIGEST_POLICY"
+      return
+    fi
+  fi
   # Do not count any arbitrary HTTP/auth or CLI error as a true negative.
   if ! grep -Eiq 'No attestations found for subject|no matching attestations|no verified attestations|source digest|policy criteria.*not met|verification failed|failed to verify' "$out"; then
     echo "INCONCLUSIVE_NEGATIVE:$case_id" >&2
