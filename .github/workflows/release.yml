@@ -32,6 +32,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+      - name: Assert push-only publishing boundary
+        run: python3 .github/scripts/test_release_event_gate.py
       - uses: actions/setup-node@v7
         with:
           node-version: '24'
