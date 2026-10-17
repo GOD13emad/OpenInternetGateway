@@ -43,7 +43,17 @@ const b=new Backend({version:'2.5.19',resourcesPath:res,appPath:archive,userData
       ensureError:snap('evidence/ensure-last-error.json',['error']),
       headless:snap('evidence/headless-control-last.json',['result','action']),
       shadow:snap('evidence/shadow-handover-last.json',['result','native','dataPlane']),
-      desired:snap('state/desired-state.json',['desired'])
+      desired:snap('state/desired-state.json',['desired']),
+      candidateFailures:(()=>{
+        try{
+          const file=path.join(b.backendRoot,'runtime/config-factory/failures.json');
+          if(!fs.existsSync(file))return {present:false};
+          const rows=Object.values(JSON.parse(fs.readFileSync(file,'utf8'))||{});
+          const counts={};
+          for(const r of rows){const reason=String(r?.reason||'UNSPECIFIED');counts[reason]=(counts[reason]||0)+1}
+          return {present:true,total:rows.length,reasons:counts};
+        }catch(err){return {present:true,parseError:String(err?.message||err)}}
+      })()
     };
     console.log('FIRST_CONNECT_DIAGNOSTICS='+JSON.stringify(report.diagnostics));
   }
