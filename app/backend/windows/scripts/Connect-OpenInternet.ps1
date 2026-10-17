@@ -62,10 +62,22 @@ do{
  $cf=@(curl.exe -4 --max-time 4 -s https://www.cloudflare.com/cdn-cgi/trace)
  $loc=[string]((($cf|Where-Object{$_ -like 'loc=*'}|Select-Object -First 1)-replace '^loc=',''));$loc=$loc.Trim()
  $svc=Get-Service OVPNConnectorService -ErrorAction SilentlyContinue
- $activeSha=''
- if(Test-Path -LiteralPath $current){try{$activeSha=([string](Get-Content -LiteralPath $current -Raw -Encoding UTF8|ConvertFrom-Json).sha256).Trim().ToLowerInvariant()}catch{}}
+ $intent='off'
+ if(Test-Path -LiteralPath $desired){try{$intent=[string](Get-Content -LiteralPath $desired -Raw -Encoding UTF8|ConvertFrom-Json).desired}catch{}}
+ if($intent -ne 'on'){throw 'Connect cancelled: explicit Disconnect requested desired=off.'}
+ $activeSha='';$activeCountry='';$activeRelay=''
+ if(Test-Path -LiteralPath $current){
+   try{
+     $profile=Get-Content -LiteralPath $current -Raw -Encoding UTF8|ConvertFrom-Json
+     $activeSha=([string]$profile.sha256).Trim().ToLowerInvariant()
+     $activeCountry=[string]$profile.country
+     if(-not $activeCountry){$activeCountry=[string]$profile.configuredCountry}
+     $activeRelay=([string]$profile.serverIP)+':'+([string]$profile.port)
+   }catch{}
+ }
+ $profileOk=($activeSha -match '^[0-9a-f]{64}$' -and $activeRelay -ne ':' -and $activeCountry -and $loc -eq $activeCountry)
  $exactOk=(-not $expectedSha -or ($activeSha -and $activeSha -eq $expectedSha))
- if($routes.Count -ge 2 -and $loc -and $loc -ne 'IR' -and $svc -and $svc.Status -eq 'Running' -and $exactOk){
+ if($routes.Count -ge 2 -and $loc -and $loc -ne 'IR' -and $svc -and $svc.Status -eq 'Running' -and $profileOk -and $exactOk){
    Remove-Item -LiteralPath $exact -Force -ErrorAction SilentlyContinue
    Write-Host $(if($expectedSha){'CONNECTED EXACT'}else{'CONNECTED'})
    exit 0

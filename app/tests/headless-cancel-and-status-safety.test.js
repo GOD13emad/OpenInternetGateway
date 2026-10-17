@@ -39,3 +39,24 @@ test('Windows status cannot label physical shadow routes a VPN without committed
   assert.match(status, /\$relay -and \$relay -ne ':'/);
   assert.match(status, /\$profileCountry -and \$loc -eq \$profileCountry/);
 });
+
+test('foreground Connect only accepts a committed foreign relay, not service plus physical shadow routes',()=>{
+  const src=fs.readFileSync(path.join(root,'backend/windows/scripts/Connect-OpenInternet.ps1'),'utf8').replace(/\r\n/g,'\n');
+  assert.match(src,/Connect cancelled: explicit Disconnect requested desired=off/);
+  assert.match(src,/\$activeSha=\(\[string\]\$profile\.sha256\)/);
+  assert.match(src,/\$profileOk=\(\$activeSha -match '\^\[0-9a-f\]\{64\}\$'/);
+  assert.match(src,/\$loc -eq \$activeCountry/);
+  assert.match(src,/\$routes\.Count -ge 2[\s\S]*\$profileOk -and \$exactOk/);
+});
+
+test('elevated Ensure requires committed SHA and matching foreign location before reporting pass',()=>{
+  const src=fs.readFileSync(path.join(root,'backend/windows/scripts/Ensure-OpenInternet.ps1'),'utf8').replace(/\r\n/g,'\n');
+  const start=src.indexOf("if($desired -eq 'on' -and $svc");
+  const end=src.indexOf("if($desired -ne 'on'",start);
+  const block=src.slice(start,end);
+  assert.ok(start>=0 && end>start);
+  assert.match(block,/current-openvpn-profile\.json/);
+  assert.match(block,/\$activeSha -match '\^\[a-fA-F0-9\]\{64\}\$'/);
+  assert.match(block,/\$observed\.Trim\(\) -eq \$profileCountry/);
+  assert.ok(block.indexOf('$observed.Trim() -eq $profileCountry') < block.indexOf('ELEVATED ENSURE PASS'));
+});

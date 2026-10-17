@@ -33,9 +33,27 @@ if(-not(Test-Admin)){
    $routes=@(Get-NetRoute -AddressFamily IPv4 -ErrorAction SilentlyContinue|Where-Object{$_.DestinationPrefix -in @('0.0.0.0/1','128.0.0.0/1')})
    $svc=Get-Service OVPNConnectorService -ErrorAction SilentlyContinue
    $task=Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+   # Temporary physical shadow routes and an active service do not prove
+   # a completed VPN handover. Require a committed relay plus matching egress.
    if($desired -eq 'on' -and $svc -and $svc.Status -eq 'Running' -and $routes.Count -ge 2){
-     Write-Host 'ELEVATED ENSURE PASS'
-     exit 0
+     $statePath=Join-Path $Root 'state\current-openvpn-profile.json'
+     $activeSha='';$profileCountry=''
+     if(Test-Path -LiteralPath $statePath){
+       try{
+         $profile=Get-Content -LiteralPath $statePath -Raw|ConvertFrom-Json
+         $activeSha=[string]$profile.sha256
+         $profileCountry=[string]$profile.country
+         if(-not $profileCountry){$profileCountry=[string]$profile.configuredCountry}
+       }catch{}
+     }
+     if($activeSha -match '^[a-fA-F0-9]{64}$' -and $profileCountry){
+       $trace=@(curl.exe -4 --max-time 4 -s https://www.cloudflare.com/cdn-cgi/trace)
+       $observed=[string]((($trace|Where-Object{$_ -like 'loc=*'}|Select-Object -First 1)-replace '^loc=',''))
+       if($observed.Trim() -eq $profileCountry){
+         Write-Host 'ELEVATED ENSURE PASS'
+         exit 0
+       }
+     }
    }
    if($desired -ne 'on' -and $routes.Count -eq 0 -and $task -and [string]$task.State -ne 'Running'){
      Write-Host 'ELEVATED ENSURE PASS - DESIRED OFF'
