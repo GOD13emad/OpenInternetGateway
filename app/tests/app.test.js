@@ -1297,6 +1297,27 @@ test('Windows first-connect OpenVPN prerequisite is pinned, verified and install
   assert.match(action,/action === 'connect' \|\| action === 'connect-profile'/);
 });
 
+
+test('public 2.5.18 failed updater has separate verified per-user recovery evidence',()=>{
+  const script=fs.readFileSync(path.join(root,'tests/hosted-published-updater-ci.ps1'),'utf8');
+  const start=script.indexOf('if($driverExit -eq 42){');
+  const end=script.indexOf('if($driverExit -ne 0)',start);
+  assert.ok(start>0 && end>start,'negative-only recovery must stay within classified old-client failure');
+  const negative=script.slice(start,end);
+  assert.match(negative,/FAIL_REAL_PUBLISHED_2518_AUTOMATIC_UPDATE/);
+  assert.match(negative,/legacy-updater-failure-result\.json/);
+  assert.match(negative,/Assert-Offline/);
+  assert.match(negative,/RECOVERY_REFUSES_UNRECOGNIZED_APP_PROCESS/);
+  assert.match(negative,/gh release download v2\.5\.19/);
+  assert.match(negative,/Get-FileHash -LiteralPath \$recoveryInstaller -Algorithm SHA256/);
+  assert.match(negative,/Start-Process -FilePath \$recoveryInstaller -ArgumentList '\/S' -PassThru -Wait/);
+  assert.match(negative,/RECOVERY_USER_DATA_OR_OLD_HELPER_STATE_CHANGED/);
+  assert.match(negative,/oldPublicInAppAutomaticUpdateSucceeded=\$false/);
+  assert.match(negative,/recoveryRequiresOutOfAppAction=\$true/);
+  assert.match(negative,/verified-manual-recovery-result\.json/);
+  assert.match(negative,/DISPOSABLE_WINDOWS_SERVER_X64_ONLY|Assert-Offline/);
+});
+
 test('Windows update helper uses an isolated copy of bundled PowerShell instead of PATH lookup',()=>{
   const backend=fs.readFileSync(path.join(root,'src/main/platform-backend.js'),'utf8').replace(/\r\n/g,'\n');
   const start=backend.indexOf('async launchDownloadedUpdate');

@@ -104,6 +104,67 @@ if($driverExit -eq 42){
   # Clear only the expected sentinel exit 42 after a fully validated negative
   # receipt. GitHub's pwsh wrapper otherwise propagates stale LASTEXITCODE
   # even though this diagnostic script returned successfully.
+  # Separate RECOVERY acceptance: immutable public 2.5.18 auto-update failed above.
+  # The official verified NSIS path is a separate manual recovery, NOT a UI PASS.
+  Assert-Offline
+  $runningOld=@(Get-CimInstance Win32_Process -Filter "Name='Open Internet Gateway.exe'" -ErrorAction SilentlyContinue)
+  foreach($running in $runningOld){
+    if(-not $running.ExecutablePath -or
+       -not [string]::Equals([IO.Path]::GetFullPath($running.ExecutablePath),
+                             [IO.Path]::GetFullPath($exe),
+                             [StringComparison]::OrdinalIgnoreCase)){
+      throw 'RECOVERY_REFUSES_UNRECOGNIZED_APP_PROCESS'
+    }
+  }
+  foreach($running in $runningOld){Stop-Process -Id $running.ProcessId -Force -ErrorAction Stop}
+  $closeDeadline=(Get-Date).AddSeconds(25)
+  do {
+    $stillRunning=@(Get-CimInstance Win32_Process -Filter "Name='Open Internet Gateway.exe'" -ErrorAction SilentlyContinue)
+    if($stillRunning.Count -eq 0){break}
+    Start-Sleep -Milliseconds 250
+  } while((Get-Date) -lt $closeDeadline)
+  if($stillRunning.Count){throw 'RECOVERY_OLD_APP_STILL_RUNNING'}
+  Assert-Offline
+  gh release download v2.5.19 --repo GOD13emad/OpenInternetGateway --pattern 'OpenInternetGateway-Setup-2.5.19.exe' --dir $folder
+  if($LASTEXITCODE -ne 0){throw 'RECOVERY_PUBLIC_TARGET_DOWNLOAD_FAILED'}
+  $recoveryInstaller=Join-Path $folder 'OpenInternetGateway-Setup-2.5.19.exe'
+  if(!(Test-Path -LiteralPath $recoveryInstaller -PathType Leaf) -or
+     (Get-FileHash -LiteralPath $recoveryInstaller -Algorithm SHA256).Hash.ToLowerInvariant() -ne $newHash){
+    throw 'RECOVERY_PUBLIC_TARGET_HASH_MISMATCH'
+  }
+  $recoveryProc=Start-Process -FilePath $recoveryInstaller -ArgumentList '/S' -PassThru -Wait
+  if($recoveryProc.ExitCode -ne 0 -or !(Test-Path -LiteralPath $exe) -or
+     (Get-Item -LiteralPath $exe).VersionInfo.ProductVersion -notlike '2.5.19*'){
+    throw 'RECOVERY_OFFICIAL_PER_USER_INSTALL_FAILED'
+  }
+  Assert-Offline
+  if((Get-Content -Raw -LiteralPath $marker) -ne $mark -or
+     (Get-Content -Raw -LiteralPath $intent | ConvertFrom-Json).desired -ne 'off' -or
+     (Test-Path -LiteralPath $started) -or (Test-Path -LiteralPath $receipt)){
+    throw 'RECOVERY_USER_DATA_OR_OLD_HELPER_STATE_CHANGED'
+  }
+  $recoveryProof=[ordered]@{
+    schema='oig-public-2518-2519-verified-manual-recovery-v1'
+    scope='Disposable GitHub Windows Server 2025 x64, not native Windows 11 x64'
+    oldPublicInAppAutomaticUpdateSucceeded=$false
+    recoveryType='separate verified official current-user NSIS installation'
+    recoveryRequiresOutOfAppAction=$true
+    originalPublicReleasesUnmodified=$true
+    installedBefore='2.5.18'
+    installedAfter='2.5.19'
+    installerSha256=$newHash
+    installerExitCode=$recoveryProc.ExitCode
+    userMarkerPreserved=$true
+    desiredVpnOff=$true
+    protectedRoutesAfter=0
+    legacyUpdaterStarted=$false
+    sourceGitSha=$env:GITHUB_SHA
+    pass=$true
+  }
+  $recoveryFile=Join-Path $folder 'verified-manual-recovery-result.json'
+  [IO.File]::WriteAllText($recoveryFile,($recoveryProof|ConvertTo-Json -Depth 5)+[Environment]::NewLine,[Text.UTF8Encoding]::new($false))
+  Write-Host ('VERIFIED_MANUAL_RECOVERY_PASS_NOT_AUTOMATIC_UPDATE='+($recoveryProof|ConvertTo-Json -Depth 5 -Compress))
+
   $global:LASTEXITCODE=0
   return
 }
