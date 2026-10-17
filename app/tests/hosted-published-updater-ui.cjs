@@ -88,14 +88,41 @@ await send('Runtime.enable');
 await until("!!document.querySelector('.nav-item[data-page=\"updates\"]') && !!window.gateway", 'loaded');
 await evalJs("document.querySelector('.nav-item[data-page=\"updates\"]').click();true");
 await until("document.querySelector('#page-updates').classList.contains('active')", 'updates-page');
-await until("!document.querySelector('#installUpdate').disabled", 'published-available',65000);
-const before=await evalJs("({current:document.querySelector('#updateCurrent').textContent,latest:document.querySelector('#updateLatest').textContent,sha:document.querySelector('#updateChecksum').textContent,enabled:!document.querySelector('#installUpdate').disabled})");
+const releaseLookupTimeout=Date.now()+80000;
+let nextForcedCheck=Date.now()+12000;
+let lookupAttempts=0;
+let before;
+while(Date.now()<releaseLookupTimeout) {
+  before=await evalJs("({current:document.querySelector('#updateCurrent').textContent,latest:document.querySelector('#updateLatest').textContent,sha:document.querySelector('#updateChecksum').textContent,enabled:!document.querySelector('#installUpdate').disabled,state:document.querySelector('#updateState').textContent,toast:document.querySelector('#toast').textContent})");
+  if(before.enabled)break;
+  if(Date.now()>=nextForcedCheck && lookupAttempts<4) {
+    await evalJs("document.querySelector('#checkUpdates').click();true");
+    lookupAttempts++;
+    nextForcedCheck=Date.now()+15000;
+  }
+  await sleep(500);
+}
+if(!before?.enabled) {
+  // GitHub release lookup may be temporarily unavailable on a public CI IP.
+  // Record a distinct infrastructure failure; never accept old self-update.
+  const inconclusive={
+    schema:'oig-disposable-legacy-github-release-lookup-inconclusive-v1',
+    result:'INCONCLUSIVE_GITHUB_RELEASE_LOOKUP_NOT_PRODUCT_PASS',
+    oldInstalledVersion:'2.5.18',
+    realUpdateButtonClicked:false,
+    attemptedForcedReleaseChecks:lookupAttempts,
+    lastState:before,
+    at:new Date().toISOString()
+  };
+  fs.writeFileSync(require('node:path').join(require('node:path').dirname(receiptPath),'release-lookup-inconclusive-result.json'),JSON.stringify(inconclusive,null,2)+'\n',{flag:'wx'});
+  throw Error('AUTHENTIC_PUBLISHED_RELEASE_LOOKUP_UNAVAILABLE');
+}
 assert.equal(before.current,'2.5.18');
 assert.equal(before.latest,'2.5.19');
 assert.equal(String(before.sha).toLowerCase(),'761637b5d49f37858973300ec2e9b1bb2b32c684ebabe86f1e8718b4480685db');
 assert.equal(before.enabled,true);
-await evalJs("document.querySelector('#checkUpdates').click();true");
-await until("document.querySelector('#updateState').textContent==='Update available' && !document.querySelector('#installUpdate').disabled", 'forced-check',30000);
+// Install itself performs a mandatory fresh GitHub lookup; a second
+// unconditional Check now would create a redundant external dependency.
 await evalJs("document.querySelector('#installUpdate').click();true");
 const clicked={schema:'oig-published-old-installed-ui-real-click-v1',
   osScope:'disposable-GitHub-Windows-Server-x64-not-Windows-11-x64',
