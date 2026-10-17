@@ -112,6 +112,9 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      id-token: write
+      attestations: write
+      artifact-metadata: write
     steps:
       - uses: actions/checkout@v7
       - uses: actions/download-artifact@v8
@@ -127,6 +130,10 @@ jobs:
           cd release
           sha256sum OpenInternetGateway-* > SHA256SUMS.txt
           cat SHA256SUMS.txt
+      - name: Attest exact public release artifact bytes
+        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
+        with:
+          subject-path: 'release/OpenInternetGateway-*'
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
