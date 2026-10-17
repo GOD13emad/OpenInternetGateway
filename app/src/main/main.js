@@ -63,8 +63,14 @@ function createWindow({ showWhenReady = !startInBackground } = {}) {
           fs.writeFileSync(process.env.OIG_CAPTURE_PATH, image.toPNG());
         } finally {
           if (process.env.OIG_CAPTURE_ONLY === '1') {
-            app.isQuitting = true;
-            app.quit();
+            // On Windows a direct app.quit() is canceled by before-quit and
+            // its recursive retry can leave Electron running after a capture.
+            // Take the same single-pass safe exit used by the updater.
+            if (process.platform === 'win32') requestProcessExitPreservingTunnel();
+            else {
+              app.isQuitting = true;
+              app.quit();
+            }
           }
         }
       }, 350);

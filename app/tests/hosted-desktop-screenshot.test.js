@@ -33,3 +33,11 @@ test('review-only hosted acceptance runs desktop smoke after native Connect + Di
   assert.match(workflow, /github\.head_ref == 'review\/firstconnect-security-20261017'/);
   assert.match(workflow, /runs-on: windows-2025/);
 });
+
+test('Windows dashboard capture uses a single-pass safe quit instead of recursive before-quit retry', () => {
+  const main=fs.readFileSync(path.join(root,'src/main/main.js'),'utf8');
+  const capture=main.slice(main.indexOf("if (process.env.OIG_CAPTURE_ONLY === '1') {"),main.indexOf("  win.on('close'"));
+  assert.match(capture, /if \(process\.platform === 'win32'\) requestProcessExitPreservingTunnel\(\);/);
+  assert.match(main, /function requestProcessExitPreservingTunnel\(\)/);
+  assert.match(main, /allowQuit = true;\s*app\.quit\(\)/);
+});
