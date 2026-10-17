@@ -148,7 +148,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: bash .github/scripts/verify-release-attestations.sh
-      - name: Negative provenance: reject modified bytes and incorrect source identity
+      - name: "Negative provenance: reject modified bytes and incorrect source identity"
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
