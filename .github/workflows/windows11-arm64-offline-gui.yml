@@ -1,0 +1,109 @@
+name: Windows 11 ARM64 offline installed GUI compatibility
+
+on:
+  pull_request:
+    paths: [.github/workflows/windows11-arm64-offline-gui.yml]
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  windows11-arm64-emulated-x64:
+    if: ${{ github.event.pull_request.head.repo.full_name == github.repository }}
+    runs-on: windows-11-arm
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 2
+
+      - name: Verify exact candidate source and disposable Windows 11 ARM64
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          if ((git rev-parse HEAD^).Trim() -ne 'dab919f66b555a620af8bf7c7716ccd1a33429d7') { throw 'SOURCE_PARENT_CHANGED' }
+          $changed=@(git diff --name-only HEAD^ HEAD)
+          if ($changed.Count -ne 1 -or $changed[0] -ne '.github/workflows/windows11-arm64-offline-gui.yml') { throw 'UNEXPECTED_SOURCE_CHANGE' }
+          $caption=(Get-CimInstance Win32_OperatingSystem).Caption
+          $arch=[System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()
+          if ($caption -notmatch 'Windows 11' -or $arch -ne 'Arm64') { throw 'UNEXPECTED_RUNNER_OS_OR_ARCH' }
+          if ((Get-CimInstance Win32_ComputerSystem).PartOfDomain) { throw 'DOMAIN_JOINED_RUNNER_DENIED' }
+          if (@(Get-NetRoute -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { $_.DestinationPrefix -in @('0.0.0.0/1','128.0.0.0/1') }).Count) { throw 'VPN_ROUTE_PRESENT' }
+          if (Get-Service OVPNConnectorService -ErrorAction SilentlyContinue) { throw 'VPN_SERVICE_PRESENT' }
+          Write-Host "WINDOWS_11_ARM64_EPHEMERAL_PREFLIGHT_PASS $caption $arch"
+
+      - name: Download existing exact-head installer and verify source receipt
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference='Stop'
+          $repo='GOD13emad/OpenInternetGateway'
+          $run=gh api "repos/$repo/actions/runs/39060502419" | ConvertFrom-Json
+          if ($run.head_sha -ne 'dab919f66b555a620af8bf7c7716ccd1a33429d7' -or $run.conclusion -ne 'success') { throw 'SOURCE_RUN_MISMATCH' }
+          $root=Join-Path $env:RUNNER_TEMP 'oig-verified-install'
+          $id=Join-Path $root 'installer'; $proofdir=Join-Path $root 'proof'
+          New-Item -ItemType Directory -Path $id,$proofdir | Out-Null
+          gh run download 39060502419 --repo $repo --name windows-installer --dir $id
+          if ($LASTEXITCODE -ne 0) { throw 'INSTALLER_DOWNLOAD_FAIL' }
+          gh run download 39060502419 --repo $repo --name windows-desktop-smoke-evidence --dir $proofdir
+          if ($LASTEXITCODE -ne 0) { throw 'PRIOR_RECEIPT_DOWNLOAD_FAIL' }
+          $proof=Get-Content (Join-Path $proofdir 'oig-desktop-smoke-receipt.json') -Raw | ConvertFrom-Json
+          $file=Join-Path $id 'OpenInternetGateway-Setup-2.5.19.exe'
+          $sha=(Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($proof.pass -ne $true -or $proof.vpnConnectionsAttempted -ne $false -or
+              $sha -ne $proof.verifiedInstallerSha256.ToLowerInvariant()) { throw 'SOURCE_RECEIPT_DIGEST_INVALID' }
+          Add-Content -Path $env:GITHUB_ENV -Value "OIG_INSTALLER=$file"
+          Add-Content -Path $env:GITHUB_ENV -Value "OIG_SHA=$sha"
+          Write-Host "EXACT_DAB919F_INSTALLER_SHA_VERIFIED $sha"
+
+      - name: Install NSIS and test offline Overview Settings Tray
+        shell: pwsh
+        timeout-minutes: 9
+        run: |
+          $ErrorActionPreference='Stop'
+          $from='disposable-GitHub-hosted-Windows-Server-2025-packaged-dashboard-navigation-tray-render-only'
+          $to='Windows-11-ARM64-x64-emulation-offline-installed-dashboard-navigation-tray-render-only'
+          $original=Get-Content 'app/tests/hosted-desktop-screenshot.ps1' -Raw
+          if ($original.Split($from).Count -ne 2) { throw 'RECEIPT_SCOPE_ANCHOR_CHANGED' }
+          $script=Join-Path $env:RUNNER_TEMP 'oig-arm64-offline-smoke.ps1'
+          [IO.File]::WriteAllText($script,$original.Replace($from,$to),[Text.UTF8Encoding]::new($false))
+          $receipt=Join-Path $env:RUNNER_TEMP 'oig-arm64-gui-receipt.json'
+          & $script -Installer $env:OIG_INSTALLER -ExpectedSha256 $env:OIG_SHA -Receipt $receipt
+          if (-not (Test-Path $receipt)) { throw 'MISSING_OFFLINE_GUI_RECEIPT' }
+          $r=Get-Content $receipt -Raw | ConvertFrom-Json
+          if ($r.pass -ne $true -or $r.scope -ne $to -or
+              $r.verifiedInstallerSha256 -ne $env:OIG_SHA -or
+              $r.disconnectedBeforeAndAfter -ne $true -or
+              $r.vpnConnectionsAttempted -ne $false -or
+              $r.navigationAndTrayProbe.pass -ne $true -or
+              $r.navigationAndTrayProbe.closeToTray -ne $true -or
+              $r.navigationAndTrayProbe.navigation.powerControlInvoked -ne $false) { throw 'WIN11_ARM64_GUI_EVIDENCE_NOT_ACCEPTED' }
+          $meta=[ordered]@{
+            installerSourceCommit='dab919f66b555a620af8bf7c7716ccd1a33429d7'
+            installerSourceRun=39060502419
+            installerSha256=$env:OIG_SHA
+            osCaption=(Get-CimInstance Win32_OperatingSystem).Caption
+            osArchitecture=[System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()
+            scope='Windows 11 ARM64 under x64 emulation, NOT native Windows 11 x64'
+            VPNActionAttempted=$false
+            signedPublisherVerified=$false
+            guiReceiptSha256=(Get-FileHash -LiteralPath $receipt -Algorithm SHA256).Hash
+          }
+          [IO.File]::WriteAllText((Join-Path $env:RUNNER_TEMP 'oig-arm64-provenance.json'),
+              ($meta|ConvertTo-Json -Depth 5)+[Environment]::NewLine,[Text.UTF8Encoding]::new($false))
+          Write-Host 'WIN11_ARM64_EMULATED_X64_OFFLINE_INSTALLED_GUI_PASS'
+
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: win11-arm64-offline-compatibility-evidence
+          path: |
+            ${{ runner.temp }}/oig-arm64-gui-receipt.json
+            ${{ runner.temp }}/oig-arm64-provenance.json
+            ${{ runner.temp }}/oig-installed-dashboard.png
+            ${{ runner.temp }}/oig-desktop-navigation-probe.json
+          retention-days: 7
+          if-no-files-found: warn
