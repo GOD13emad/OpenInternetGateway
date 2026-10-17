@@ -17,7 +17,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           ref: ${{ github.event.pull_request.head.sha }}
-          fetch-depth: 3
+          fetch-depth: 0
 
       - name: Verify exact candidate source and disposable Windows 11 ARM64
         shell: pwsh
@@ -98,6 +98,81 @@ jobs:
               ($meta|ConvertTo-Json -Depth 5)+[Environment]::NewLine,[Text.UTF8Encoding]::new($false))
           Write-Host 'WIN11_ARM64_EMULATED_X64_OFFLINE_INSTALLED_GUI_PASS'
 
+      - name: Verify offline in-place 2.5.18 to 2.5.19 upgrade and state retention
+        shell: pwsh
+        timeout-minutes: 9
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference='Stop'
+          if ($env:RUNNER_ENVIRONMENT -ne 'github-hosted' -or $env:GITHUB_REPOSITORY -ne 'GOD13emad/OpenInternetGateway') { throw 'GITHUB_DISPOSABLE_RUNNER_ONLY' }
+          if ([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString() -ne 'Arm64' -or
+              (Get-CimInstance Win32_OperatingSystem).Caption -notmatch 'Windows 11') { throw 'WIN11_ARM64_REQUIRED' }
+          $app=Join-Path $env:LOCALAPPDATA 'Programs\open-internet-gateway\Open Internet Gateway.exe'
+          $state=Join-Path $env:LOCALAPPDATA 'OpenInternetGateway\state'
+          $intent=Join-Path $state 'desired-state.json'
+          if (!(Test-Path $app) -or !(Test-Path $intent) -or (Get-Item $app).VersionInfo.ProductVersion -notlike '2.5.19*') { throw 'PREVIOUS_GUI_SMOKE_NOT_PRESENT' }
+          if (@(Get-CimInstance Win32_Process -Filter "Name='Open Internet Gateway.exe'" -ErrorAction SilentlyContinue).Count) { throw 'APP_ALREADY_RUNNING' }
+          function Assert-Offline {
+            if (@(Get-NetRoute -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { $_.DestinationPrefix -in @('0.0.0.0/1','128.0.0.0/1') }).Count) { throw 'VPN_ROUTES_PRESENT' }
+            $svc=Get-Service OVPNConnectorService -ErrorAction SilentlyContinue
+            if ($svc -and $svc.Status -ne 'Stopped') { throw 'CONNECTOR_SERVICE_ACTIVE' }
+            if ((Get-Content $intent -Raw|ConvertFrom-Json).desired -ne 'off') { throw 'DESIRED_VPN_STATE_ACTIVE' }
+          }
+          Assert-Offline
+          $tag=gh api repos/GOD13emad/OpenInternetGateway/releases/tags/v2.5.18|ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or $tag.tag_name -ne 'v2.5.18') { throw 'RELEASE_TAG_UNVERIFIED' }
+          $asset=@($tag.assets | Where-Object { $_.name -eq 'OpenInternetGateway-Setup-2.5.18.exe' })
+          $oldHash='ed93dcadde96efec14c8de12b3e0074f12b826b968f4146330c496d816ecdb3d'
+          if ($asset.Count -ne 1 -or $asset[0].digest -ne ('sha256:'+$oldHash) -or $asset[0].size -ne 203778543) { throw 'OLDER_RELEASE_DIGEST_CHANGED' }
+          $dir=Join-Path $env:RUNNER_TEMP 'oig-verified-previous-version'
+          New-Item -ItemType Directory -Path $dir | Out-Null
+          gh release download v2.5.18 --repo GOD13emad/OpenInternetGateway --pattern 'OpenInternetGateway-Setup-2.5.18.exe' --dir $dir
+          if ($LASTEXITCODE -ne 0) { throw 'OLDER_INSTALLER_DOWNLOAD_FAILED' }
+          $old=Join-Path $dir 'OpenInternetGateway-Setup-2.5.18.exe'
+          if ((Get-FileHash $old -Algorithm SHA256).Hash.ToLowerInvariant() -ne $oldHash) { throw 'OLDER_INSTALLER_HASH_MISMATCH' }
+          $p=Start-Process -FilePath $old -ArgumentList '/S' -PassThru -Wait
+          if ($p.ExitCode -ne 0 -or (Get-Item $app).VersionInfo.ProductVersion -notlike '2.5.18*') { throw 'OLDER_VERSION_INSTALL_NOT_PROVEN' }
+          Assert-Offline
+          $marker=Join-Path $state 'ci-upgrade-preservation-marker.json'
+          if (Test-Path $marker) { throw 'PREEXISTING_MARKER_REFUSED' }
+          $mark='{"test":"disposable-arm64-in-place-nsis","preserve":true}'
+          [IO.File]::WriteAllText($marker,$mark,[Text.UTF8Encoding]::new($false))
+          $newHash=(Get-FileHash $env:OIG_INSTALLER -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($newHash -ne $env:OIG_SHA) { throw 'CANDIDATE_HASH_CHANGED' }
+          $p=Start-Process -FilePath $env:OIG_INSTALLER -ArgumentList '/S' -PassThru -Wait
+          if ($p.ExitCode -ne 0 -or (Get-Item $app).VersionInfo.ProductVersion -notlike '2.5.19*') { throw 'UPGRADE_INSTALL_FAILED' }
+          if ((Get-Content -Raw $marker) -ne $mark) { throw 'UPGRADE_LOST_USER_STATE' }
+          Assert-Offline
+          $save=$env:RUNNER_TEMP
+          $post=Join-Path $save 'oig-post-upgrade-probe'
+          New-Item -ItemType Directory -Path $post|Out-Null
+          try {
+            $env:RUNNER_TEMP=$post
+            $receipt=Join-Path $post 'oig-upgrade-gui-receipt.json'
+            & (Join-Path $save 'oig-arm64-offline-smoke.ps1') -Receipt $receipt
+            if (!(Test-Path $receipt)) { throw 'UPGRADED_GUI_RECEIPT_MISSING' }
+            $r=Get-Content -Raw $receipt|ConvertFrom-Json
+            if (!$r.pass -or !$r.navigationAndTrayProbe.pass -or !$r.navigationAndTrayProbe.closeToTray -or
+                $r.vpnConnectionsAttempted -ne $false -or !$r.disconnectedBeforeAndAfter) { throw 'POST_UPGRADE_GUI_NOT_ACCEPTED' }
+          } finally { $env:RUNNER_TEMP=$save }
+          Assert-Offline
+          if ((Get-Content -Raw $marker) -ne $mark) { throw 'MARKER_NOT_PRESERVED_AFTER_GUI' }
+          $proof=[ordered]@{
+            scope='Disposable Windows 11 ARM64 emulated x64 NSIS in-place version transition; NOT application automatic updater'
+            oldVersion='2.5.18'
+            newVersion='2.5.19'
+            oldInstallerSha256=$oldHash
+            newInstallerSha256=$newHash
+            markerPreserved=$true
+            guiAfterUpgrade=$true
+            offlineBeforeAndAfter=$true
+            applicationUpdaterTested=$false
+            ownerWin11X64Acceptance=$false
+            guiReceiptSha256=(Get-FileHash $receipt -Algorithm SHA256).Hash
+          }
+          [IO.File]::WriteAllText((Join-Path $save 'oig-arm64-upgrade-receipt.json'),($proof|ConvertTo-Json -Depth 4)+[Environment]::NewLine,[Text.UTF8Encoding]::new($false))
+          Write-Host 'WIN11_ARM64_OFFLINE_NSIS_2518_TO_2519_UPGRADE_PASS'
       - uses: actions/upload-artifact@v7
         if: always()
         with:
@@ -105,6 +180,7 @@ jobs:
           path: |
             ${{ runner.temp }}/oig-arm64-gui-receipt.json
             ${{ runner.temp }}/oig-arm64-provenance.json
+            ${{ runner.temp }}/oig-arm64-upgrade-receipt.json
             ${{ runner.temp }}/oig-installed-dashboard.png
             ${{ runner.temp }}/oig-desktop-navigation-probe.json
           retention-days: 7
