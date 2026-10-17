@@ -65,7 +65,9 @@ function reply(event, name, ...args) {
     if (name === 'gateway:updateInfo') {
       updateInfoCalls++;
       if (args[0] === true) forcedChecks++;
-      return updateFixture;
+      const safeFixture = JSON.parse(JSON.stringify(updateFixture));
+      structuredClone(safeFixture); // Explicitly require IPC-safe metadata, never functions.
+      return safeFixture;
     }
     if (name === 'gateway:installUpdate') {
       mockInstallCalls++;
