@@ -60,6 +60,7 @@ function createIsolatedWindow() {
 function reply(event, name, ...args) {
   try {
     assertDashboardIpcSender(event, trustedWindow, originalUrl);
+    if (name.startsWith('gateway:update') || name === 'gateway:installUpdate') console.log('UPDATE_IPC_MOCK_ROUTE', name, JSON.stringify(args));
     if (name === 'gateway:action') privilegedActions++;
     if (name === 'gateway:updateInfo') {
       updateInfoCalls++;
@@ -104,6 +105,7 @@ for (const name of names) {
   assert.deepEqual(navigation.pagesVisited, ['settings', 'overview']);
   assert.equal(navigation.powerControlInvoked, false);
   // Real Electron DOM handlers and trusted IPC; responses are mocked and have no OS side effects.
+  console.log('MOCK_UPDATE_UI_BEGIN');
   const updateUi = await trustedWindow.webContents.executeJavaScript(`(async () => {
     const until = async p => { for (let i=0;i<100;i++) { if(p())return; await new Promise(r=>setTimeout(r,20)); } throw new Error('UPDATE_UI_TIMEOUT'); };
     document.querySelector('.nav-item[data-page="updates"]').click();
@@ -122,6 +124,7 @@ for (const name of names) {
     document.querySelector('.nav-item[data-page="overview"]').click();
     return r;
   })`, true);
+  console.log('MOCK_UPDATE_UI_RENDERER_RETURN', JSON.stringify(updateUi));
   assert.equal(updateUi.visible, true);
   assert.equal(updateUi.shaVisible, true);
   assert.equal(updateUi.toast, true);
@@ -138,6 +141,7 @@ for (const name of names) {
     "window.gateway.status().then(x => 'UNEXPECTED_ACCEPT').catch(e => e.message)"
   );
   assert.match(rejected, /GATEWAY_IPC_SENDER_DENIED/);
+  console.log('MOCK_FOREIGN_UPDATE_DENIAL_BEGIN');
   const deniedInstall = await foreignWindow.webContents.executeJavaScript(
     "window.gateway.installUpdate().then(() => 'UNEXPECTED_ACCEPT').catch(e => e.message)"
   );
