@@ -108,25 +108,28 @@ for (const name of names) {
   assert.equal(navigation.powerControlInvoked, false);
   // Real Electron DOM handlers and trusted IPC; responses are mocked and have no OS side effects.
   console.log('MOCK_UPDATE_UI_BEGIN');
-  const updateUi = await trustedWindow.webContents.executeJavaScript(`(async () => {
-    const until = async p => { for (let i=0;i<100;i++) { if(p())return; await new Promise(r=>setTimeout(r,20)); } throw new Error('UPDATE_UI_TIMEOUT'); };
-    document.querySelector('.nav-item[data-page="updates"]').click();
-    await until(() => document.getElementById('page-updates').classList.contains('active'));
-    const install = document.getElementById('installUpdate');
-    await until(() => !install.disabled);
-    if (document.getElementById('updateCurrent').textContent !== '2.5.18' ||
-      document.getElementById('updateLatest').textContent !== '2.5.19' ||
-      document.getElementById('updateChecksum').textContent !== 'b'.repeat(64)) throw new Error('UPDATE_DOM_INVALID');
-    document.getElementById('checkUpdates').click();
-    await until(() => document.getElementById('updateState').textContent === 'Update available');
-    install.click();
-    await until(() => document.getElementById('toast').textContent.includes('Verified update is installing.'));
-    await until(() => !document.getElementById('busyOverlay').classList.contains('show'));
-    const r={visible:!install.disabled,shaVisible:document.getElementById('updateChecksum').textContent==='b'.repeat(64),toast:document.getElementById('toast').textContent.includes('will restart automatically')};
-    document.querySelector('.nav-item[data-page="overview"]').click();
-    return r;
-  })`, true);
-  console.log('MOCK_UPDATE_UI_RENDERER_RETURN', JSON.stringify(updateUi));
+  // Electron's executeJavaScript result channel must receive cloneable,
+  // synchronous values. Do not send a pending Promise across this IPC boundary.
+  const evaluate = code => trustedWindow.webContents.executeJavaScript(code, true);
+  const until = async (code, label) => {
+    for (let i = 0; i < 100; i++) {
+      if (await evaluate(code)) return;
+      await new Promise(resolve => setTimeout(resolve, 20));
+    }
+    throw new Error('MOCK_UPDATE_UI_TIMEOUT_' + label);
+  };
+  await evaluate("document.querySelector('.nav-item[data-page=\"updates\"]').click(); true");
+  await until("document.getElementById('page-updates').classList.contains('active')", 'navigate');
+  await until("!document.getElementById('installUpdate').disabled", 'available');
+  const visible = await evaluate("document.getElementById('updateCurrent').textContent === '2.5.18' && document.getElementById('updateLatest').textContent === '2.5.19' && document.getElementById('updateChecksum').textContent === 'b'.repeat(64)");
+  assert.equal(visible, true, 'Renderer should show current/latest/checksum from mocked IPC');
+  await evaluate("document.getElementById('checkUpdates').click(); true");
+  await until("document.getElementById('updateState').textContent === 'Update available'", 'check');
+  await evaluate("document.getElementById('installUpdate').click(); true");
+  await until("document.getElementById('toast').textContent.includes('Verified update is installing.')", 'apply');
+  await until("!document.getElementById('busyOverlay').classList.contains('show')", 'clear-busy');
+  const updateUi = await evaluate("({visible:!document.getElementById('installUpdate').disabled,shaVisible:document.getElementById('updateChecksum').textContent==='b'.repeat(64),toast:document.getElementById('toast').textContent.includes('will restart automatically')})");
+  await evaluate("document.querySelector('.nav-item[data-page=\"overview\"]').click(); true");
   assert.equal(updateUi.visible, true);
   assert.equal(updateUi.shaVisible, true);
   assert.equal(updateUi.toast, true);
