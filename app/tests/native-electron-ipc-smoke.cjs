@@ -10,6 +10,7 @@ if (process.argv.includes('--no-sandbox') || app.commandLine.hasSwitch('no-sandb
 }
 const { protectDashboardNavigation, assertDashboardIpcSender } =
   require('../src/main/dashboard-security');
+const { probeReadOnlyNavigation } = require('../src/main/dashboard-navigation-probe');
 
 const testRoot = path.resolve(__dirname, '../../native-electron-smoke');
 fs.mkdirSync(testRoot, { recursive: true });
@@ -23,6 +24,7 @@ let navAttempts = 0;
 let createdWindows = 0;
 let statusCalls = 0;
 let forbiddenCalls = 0;
+let privilegedActions = 0;
 let terminated = false;
 
 const watchdog = setTimeout(() => {
@@ -50,6 +52,7 @@ function createIsolatedWindow() {
 function reply(event, name) {
   try {
     assertDashboardIpcSender(event, trustedWindow, originalUrl);
+    if (name === 'gateway:action' || name === 'gateway:installUpdate') privilegedActions++;
     if (name === 'gateway:status') {
       statusCalls++;
       return { ok: true, nativeSmoke: 'trusted-main-frame' };
@@ -79,6 +82,10 @@ for (const name of names) {
     "window.gateway.status().then(x => x.nativeSmoke).catch(e => 'FAIL:' + e.message)"
   );
   assert.equal(trustedResult, 'trusted-main-frame');
+  // Exercise real dashboard DOM handlers without touching a VPN or updater.
+  const navigation = await probeReadOnlyNavigation(trustedWindow.webContents);
+  assert.deepEqual(navigation.pagesVisited, ['settings', 'overview']);
+  assert.equal(navigation.powerControlInvoked, false);
 
   foreignWindow = createIsolatedWindow();
   const foreignFile = path.join(testRoot, 'untrusted.html');
@@ -102,6 +109,7 @@ for (const name of names) {
   assert.equal(createdWindows, 0);
   assert.ok(statusCalls >= 1);
   assert.ok(forbiddenCalls >= 1);
+  assert.equal(privilegedActions, 0, 'native offline probe must not invoke connect/disconnect/update');
   console.log('NATIVE_ELECTRON_IPC_SMOKE_PASS ' + JSON.stringify({
     electron: process.versions.electron,
     trustedMainFrameIPC: true,
@@ -109,6 +117,7 @@ for (const name of names) {
     popupDenied: popupWasNull,
     navigationDenied: true,
     navAttempts, createdWindows,
+    dashboardNavigation: navigation.pagesVisited, privilegedActions,
     backend: 'mocked-no-network-or-VPN-operation'
   }));
   terminated = true;
