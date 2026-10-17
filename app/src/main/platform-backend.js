@@ -1,4 +1,4 @@
-const { spawn } = require('child_process');
+const { spawn, execFile } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
@@ -78,13 +78,29 @@ class Backend {
     if (process.platform !== 'linux' || !this.backendRoot) return base;
     const runtimeRoot = path.dirname(process.execPath || '');
     const appRun = path.join(runtimeRoot, 'AppRun');
-    const helperScript = path.join(this.backendRoot, 'linux', 'harden_sandbox.py');
-    if (!runtimeRoot || !fs.existsSync(appRun) || !fs.existsSync(helperScript)) {
+    // Execute the versioned helper from packaged resources, not its
+    // user-writable runtime copy. Prefer shipped code; use the app source
+    // directory only when the packaged resources are unavailable.
+    const packagedScript = this.resourcesPath
+      ? path.join(this.resourcesPath, 'backend', 'linux', 'harden_sandbox.py') : '';
+    const developmentScript = this.appPath
+      ? path.join(this.appPath, 'backend', 'linux', 'harden_sandbox.py') : '';
+    const helperScript = [packagedScript, developmentScript].find(candidate => {
+      try { return !!candidate && path.isAbsolute(candidate) && fs.statSync(candidate).isFile(); }
+      catch { return false; }
+    }) || '';
+    if (!runtimeRoot || !fs.existsSync(appRun) || !helperScript) {
       return { ...base, runtimeRoot };
     }
     try {
-      const r = await run('python3', [helperScript, runtimeRoot], { timeout: 10000 });
-      const parsed = JSON.parse(String(r.stdout || '{}').trim() || '{}');
+      // execFile directly accepts an argument array and never invokes a shell;
+      // isolated Python ignores PYTHONPATH, PYTHONHOME and user site-packages.
+      const stdout = await new Promise((resolve, reject) => {
+        execFile('python3', ['-I', helperScript, runtimeRoot], {
+          timeout: 10000, shell: false, windowsHide: true, maxBuffer: 1024 * 1024
+        }, (error, output) => error ? reject(error) : resolve(output));
+      });
+      const parsed = JSON.parse(String(stdout || '{}').trim() || '{}');
       let currentProcessNoSandbox = false;
       try {
         const argv = fs.readFileSync('/proc/' + String(process.pid) + '/cmdline', 'utf8').split('\0').filter(Boolean);
@@ -212,7 +228,7 @@ class Backend {
     if (this.resourcesPath) candidates.push(path.join(this.resourcesPath, 'pwsh', 'pwsh.exe'));
     if (process.env.ProgramFiles) candidates.push(path.join(process.env.ProgramFiles, 'PowerShell', '7', 'pwsh.exe'));
     if (process.env['ProgramFiles(x86)']) candidates.push(path.join(process.env['ProgramFiles(x86)'], 'PowerShell', '7', 'pwsh.exe'));
-    for (const dir of String(process.env.PATH || '').split(path.delimiter).filter(Boolean)) candidates.push(path.join(dir, 'pwsh.exe'));
+    // PATH can include user-writable directories; never resolve a privileged helper from it.
     return candidates.find(candidate => { try { return fs.existsSync(candidate); } catch { return false; } }) || '';
   }
 
@@ -331,9 +347,14 @@ class Backend {
     const elevate = [
       "$ErrorActionPreference='Stop'",
       "$msi='" + escapedMsi + "'",
-      "$msiArgs='/i \"' + $msi + '\" /passive /norestart'",
+      // Silent first-time MSI: the interactive OpenVPN Connect UI and
+      // ovpnconnector.exe service daemon cannot be active simultaneously.
+      "$msiArgs='/i \"' + $msi + '\" /quiet /norestart AUTOSTART=no'",
       "try {",
-      "  $p=Start-Process -FilePath 'msiexec.exe' -Verb RunAs -Wait -PassThru -ArgumentList $msiArgs",
+      // Elevation must execute the OS-owned Windows Installer, never a PATH-resolved binary.
+      "  $systemMsi=Join-Path ([Environment]::SystemDirectory) 'msiexec.exe'",
+      "  if(-not (Test-Path -LiteralPath $systemMsi -PathType Leaf)) { throw 'Trusted Windows Installer executable unavailable.' }",
+      "  $p=Start-Process -FilePath $systemMsi -Verb RunAs -Wait -PassThru -ArgumentList $msiArgs",
       "  exit $p.ExitCode",
       "} catch { Write-Error $_.Exception.Message; exit 1223 }"
     ].join(';');
@@ -349,7 +370,23 @@ class Backend {
 
   async _ensureWindowsRuntimePrerequisites() {
     const pwsh = this._requireWindowsPwsh();
+    // The interactive OpenVPN Connect GUI and headless connector are exclusive.
+    // Check before downloading/installing the MSI (not just before connecting).
+    // Never stop another application's process or modify its independent tunnel.
+    const assertGuiClosed = async () => {
+      const interactive = await run(pwsh, [
+        '-NoProfile', '-NonInteractive', '-Command',
+        "if (Get-Process -Name 'OpenVPNConnect' -ErrorAction SilentlyContinue) { exit 17 } else { exit 0 }"
+      ], { timeout: 10000, allowFailure: true });
+      if (interactive.code === 17) {
+        throw new Error('OpenVPN Connect is already running. Disconnect and close it before connecting through Open Internet Gateway. No OpenVPN process was closed.');
+      }
+      if (interactive.code !== 0) throw new Error('Cannot confirm OpenVPN Connect is closed; refusing a competing VPN operation.');
+    };
+    await assertGuiClosed();
     const openVpn = await this._ensureWindowsConnector();
+    // Verify again after installation in case the MSI or another app opened the GUI.
+    await assertGuiClosed();
     return { powerShell7: { ready: true, path: pwsh }, openVpnConnect: openVpn };
   }
 
@@ -385,10 +422,10 @@ class Backend {
         "$desiredPath='" + path.join(this.backendRoot, 'state', 'desired-state.json').replace(/'/g,"''") + "'",
         "$desired='on';if(Test-Path $desiredPath){try{$desired=[string](Get-Content -Raw $desiredPath|ConvertFrom-Json).desired}catch{}}",
         "$state='" + statePath + "'",
-        "$relay='';$profileIP='';$profileCountry='';if(Test-Path $state){try{$s=Get-Content -Raw $state|ConvertFrom-Json;$relay=([string]$s.serverIP)+':'+([string]$s.port);$profileIP=[string]$s.observedIP;if(-not $profileIP){$profileIP=[string]$s.serverIP};$profileCountry=[string]$s.country;if(-not $profileCountry){$profileCountry=[string]$s.configuredCountry}}catch{}}",
+        "$relay='';$profileIP='';$profileCountry='';$profileSha='';if(Test-Path $state){try{$s=Get-Content -Raw $state|ConvertFrom-Json;$relay=([string]$s.serverIP)+':'+([string]$s.port);$profileIP=[string]$s.observedIP;if(-not $profileIP){$profileIP=[string]$s.serverIP};$profileSha=[string]$s.sha256;$profileCountry=[string]$s.country;if(-not $profileCountry){$profileCountry=[string]$s.configuredCountry}}catch{}}",
         "$managedActive=($svc -and $svc.Status -eq 'Running')",
         "$probeDegraded=$false;if(-not $loc -and $managedActive -and $routes.Count -ge 2 -and -not($dns -contains '10.10.34.35') -and $profileCountry){$loc=$profileCountry;if(-not $ip){$ip=$profileIP};$probeDegraded=$true}",
-        "[ordered]@{connected=($routes.Count -ge 2 -and $managedActive -and $loc -and $loc -ne 'IR' -and -not($dns -contains '10.10.34.35'));ip=$ip.Trim();country=$loc.Trim();dns=$dns;poison=($dns -contains '10.10.34.35');fullRoutes=$routes.Count;relay=$relay;autoRecovery=[bool]$task;autoRecoveryState=$(if(-not $task){'Missing'}elseif(-not [bool]$task.Settings.Enabled){'Disabled'}else{[string]$task.State});interface=($routes|Select-Object -First 1 -ExpandProperty InterfaceAlias -ErrorAction SilentlyContinue);engine=$(if($svc){'HeadlessConnector'}else{'Missing'});connectorService=$(if($svc){[string]$svc.Status}else{'Missing'});managedTunnelActive=[bool]$managedActive;healthProbeDegraded=[bool]$probeDegraded;desiredState=$desired;failureStreak=$(if($guard){[int]$guard.failureStreak}else{0});rotations24h=$(if($guard){@($guard.rotations).Count}else{0})}|ConvertTo-Json -Compress"
+        "[ordered]@{connected=($desired -eq 'on' -and $routes.Count -ge 2 -and $managedActive -and $profileSha -match '^[a-fA-F0-9]{64}$' -and $relay -and $relay -ne ':' -and $profileCountry -and $loc -eq $profileCountry -and $loc -ne 'IR' -and -not($dns -contains '10.10.34.35'));ip=$ip.Trim();country=$loc.Trim();dns=$dns;poison=($dns -contains '10.10.34.35');fullRoutes=$routes.Count;relay=$relay;autoRecovery=[bool]$task;autoRecoveryState=$(if(-not $task){'Missing'}elseif(-not [bool]$task.Settings.Enabled){'Disabled'}else{[string]$task.State});interface=($routes|Select-Object -First 1 -ExpandProperty InterfaceAlias -ErrorAction SilentlyContinue);engine=$(if($svc){'HeadlessConnector'}else{'Missing'});connectorService=$(if($svc){[string]$svc.Status}else{'Missing'});managedTunnelActive=[bool]$managedActive;healthProbeDegraded=[bool]$probeDegraded;desiredState=$desired;failureStreak=$(if($guard){[int]$guard.failureStreak}else{0});rotations24h=$(if($guard){@($guard.rotations).Count}else{0})}|ConvertTo-Json -Compress"
       ].join(';');
       const r = await run(pwsh, ['-NoProfile','-Command',script], { timeout: 12000 });
       return JSON.parse(r.stdout || '{}');

@@ -78,7 +78,8 @@ test('Windows backend is fully headless, self-healing, and independent from Open
   assert.match(factory,/successes\.json/i);
   assert.match(factory,/quarantine\.json/i);
   assert.match(auto,/OpenInternetGateway-AutoRecovery/i);
-  assert.doesNotMatch(production,/OpenVPNConnect(?:\.exe)?/i);
+  assert.match(headless,/Get-Process -Name 'OpenVPNConnect'/);
+  assert.doesNotMatch(production,/--connect-shortcut|Start-Process\s+.*OpenVPNConnect\.exe/i);
   assert.doesNotMatch(production,/--connect-shortcut/i);
   assert.ok(fs.existsSync(path.join(base,'Headless-Control.ps1')));
   assert.ok(fs.existsSync(path.join(base,'Bootstrap-HeadlessConnector.ps1')));
@@ -228,7 +229,7 @@ test('Windows status tolerates a transient geo probe failure only for a real man
   assert.match(winBlock,/\$managedActive=\(\$svc -and \$svc\.Status -eq 'Running'\)/);
   assert.match(winBlock,/\$probeDegraded=\$false/);
   assert.match(winBlock,/healthProbeDegraded=\[bool\]\$probeDegraded/);
-  assert.match(winBlock,/connected=\(\$routes\.Count -ge 2 -and \$managedActive/);
+  assert.match(winBlock,/connected=\(\$desired -eq 'on' -and \$routes\.Count -ge 2 -and \$managedActive/);
 });
 
 test('Linux failed exact relay does not turn desired gateway intent off',()=>{
@@ -565,6 +566,11 @@ test('Linux Chromium sandbox hardening is fail-safe and update-persistent',()=>{
   const helper=fs.readFileSync(path.join(root,'backend/linux/harden_sandbox.py'),'utf8');
   assert.match(backend,/_hardenLinuxChromiumSandbox/);
   assert.match(backend,/linux-sandbox-hardening.json/);
+  assert.match(backend,/path.join\(this.resourcesPath, 'backend', 'linux', 'harden_sandbox.py'\)/);
+  assert.match(backend,/path.join\(this.appPath, 'backend', 'linux', 'harden_sandbox.py'\)/);
+  assert.doesNotMatch(backend,/path.join\(this.backendRoot, 'linux', 'harden_sandbox.py'\)/);
+  assert.match(backend,/path.isAbsolute\(candidate\) && fs.statSync\(candidate\).isFile\(\)/);
+  assert.match(backend,/execFile\('python3', \['-I', helperScript, runtimeRoot\]/);
   assert.match(backend,/sandboxHardened/);
   assert.match(backend,/resources\/backend\/linux\/harden_sandbox\.py/);
   assert.match(main,/OIG_SANDBOX_RESTARTED/);
@@ -1099,9 +1105,13 @@ test('Windows first-connect OpenVPN prerequisite is pinned, verified and install
   const ensure=backend.slice(backend.indexOf('async _ensureWindowsConnector'),backend.indexOf('async _ensureWindowsRuntimePrerequisites'));
   assert.match(ensure,/downloaded\.sha256/);
   assert.match(ensure,/WINDOWS_OPENVPN_CONNECT\.sha256/);
-  assert.match(ensure,/Start-Process -FilePath 'msiexec\.exe' -Verb RunAs -Wait -PassThru/);
+  assert.ok(ensure.includes("$systemMsi=Join-Path ([Environment]::SystemDirectory) 'msiexec.exe'"));
+  assert.ok(ensure.includes('Test-Path -LiteralPath $systemMsi -PathType Leaf'));
+  assert.ok(ensure.includes('Start-Process -FilePath $systemMsi -Verb RunAs -Wait -PassThru'));
+  assert.ok(!ensure.includes("Start-Process -FilePath 'msiexec.exe'"));
   assert.match(ensure,/\$msi='" \+ escapedMsi \+ "'/);
-  assert.match(ensure,/\$msiArgs='\/i \\"' \+ \$msi \+ '\\" \/passive \/norestart'/);
+  assert.match(ensure,/\/quiet \/norestart AUTOSTART=no/);
+  assert.doesNotMatch(ensure,/\/passive/);
   assert.match(ensure,/ArgumentList \$msiArgs/);
   assert.match(ensure,/run\(pwsh, \['-NoProfile','-Command',elevate\]/);
   assert.match(ensure,/administrator approval was cancelled/);
@@ -1124,4 +1134,64 @@ test('Windows update helper uses an isolated copy of bundled PowerShell instead 
   assert.match(block,/updatePwsh = path\.join\(helperRuntime, 'pwsh\.exe'\)/);
   assert.match(block,/spawn\(updatePwsh, pwshArgs/);
   assert.doesNotMatch(block,/where\.exe pwsh\.exe|process\.env\.ComSpec|apply-update\.cmd/);
+});
+
+test('Linux sandbox helper executes packaged Python in isolated mode without shell interpretation', async () => {
+  const vm = require('node:vm');
+  const os = require('node:os');
+  const {EventEmitter} = require('node:events');
+  const {PassThrough} = require('node:stream');
+  const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'oig-helper-argv-'));
+  try {
+    const runtime = path.join(workspace, 'AppDir ; path with spaces');
+    const packages = path.join(workspace, 'packaged resources');
+    const dev = path.join(workspace, 'development');
+    const stable = path.join(workspace, 'writable state');
+    const pkgHelper = path.join(packages, 'backend', 'linux', 'harden_sandbox.py');
+    const devHelper = path.join(dev, 'backend', 'linux', 'harden_sandbox.py');
+    const replaced = path.join(stable, 'linux', 'harden_sandbox.py');
+    for (const item of [runtime, path.dirname(pkgHelper), path.dirname(devHelper), path.dirname(replaced)]) {
+      fs.mkdirSync(item, {recursive:true});
+    }
+    fs.writeFileSync(path.join(runtime, 'AppRun'), '#!/bin/sh\n', 'utf8');
+    fs.writeFileSync(pkgHelper, 'print("packaged")\n', 'utf8');
+    fs.writeFileSync(devHelper, 'print("development")\n', 'utf8');
+    fs.writeFileSync(replaced, 'print("UNTRUSTED")\n', 'utf8');
+    const calls=[];
+    const fakeSpawn=()=>{throw new Error('unexpected spawned process');};
+    const fakeExecFile=(file,args,options,callback)=>{
+      calls.push({file,args,options});
+      process.nextTick(()=>callback(null,'{"supported":true,"hardened":false,"reason":"test"}\n',''));
+      return {kill:()=>true};
+    };
+    const module={exports:{}};
+    const source=fs.readFileSync(path.join(root, 'src/main/platform-backend.js'),'utf8');
+    vm.runInNewContext(source,{
+      module,exports:module.exports,
+      require:(name)=>name==='child_process'?{spawn:fakeSpawn,execFile:fakeExecFile}:require(name),
+      process:{platform:'linux',execPath:path.join(runtime,'open-internet-gateway'),pid:process.pid,env:{}},
+      setTimeout,clearTimeout,Buffer,console
+    },{filename:'platform-backend.js',timeout:1000});
+    const Backend=module.exports;
+    const backend=new Backend({version:'test',resourcesPath:packages,appPath:dev,userData:workspace});
+    backend.backendRoot=stable;
+    backend._writeJson=()=>{};
+    const result=await backend._hardenLinuxChromiumSandbox();
+    assert.equal(result.supported,true);
+    assert.equal(calls.length,1);
+    assert.equal(calls[0].file,'python3');
+    assert.deepEqual(Array.from(calls[0].args),['-I',pkgHelper,runtime]);
+    assert.equal(calls[0].options.shell,false);
+    assert.ok(!calls[0].args.includes(replaced));
+    fs.unlinkSync(pkgHelper);
+    await backend._hardenLinuxChromiumSandbox();
+    assert.equal(calls.length,2);
+    assert.deepEqual(Array.from(calls[1].args),['-I',devHelper,runtime]);
+    fs.unlinkSync(devHelper);
+    const failClosed=await backend._hardenLinuxChromiumSandbox();
+    assert.equal(calls.length,2);
+    assert.equal(failClosed.supported,false);
+  } finally {
+    fs.rmSync(workspace,{recursive:true,force:true});
+  }
 });
