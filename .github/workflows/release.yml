@@ -127,7 +127,7 @@ jobs:
           if-no-files-found: error
 
   verify-preview:
-    if: github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'workflow_dispatch' && startsWith(github.ref, 'refs/heads/')
     needs: [seed, test, windows, linux]
     runs-on: ubuntu-latest
     permissions:
@@ -155,7 +155,7 @@ jobs:
         run: bash .github/scripts/test-release-attestations-negative.sh
 
   publish:
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     needs: [seed, test, windows, linux]
     runs-on: ubuntu-latest
     permissions:
