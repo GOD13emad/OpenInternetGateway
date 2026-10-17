@@ -2,7 +2,7 @@ const { app, BrowserWindow, ipcMain, Menu, Tray, nativeImage, shell, nativeTheme
 const { spawn } = require('child_process');
 const path = require('path');
 const { pathToFileURL } = require('node:url');
-const { protectDashboardNavigation, assertDashboardIpcSender } = require('./dashboard-security');
+const { protectDashboardNavigation, assertDashboardIpcSender, trustedReleaseUrl } = require('./dashboard-security');
 const fs = require('fs');
 const Backend = require('./platform-backend');
 
@@ -170,6 +170,7 @@ function registerIpc() {
   handleDashboardIpc('gateway:openRelease', async () => {
     let url = 'https://github.com/GOD13emad/OpenInternetGateway/releases/latest';
     try { url = (await backend.updateInfo(false)).releaseUrl || url; } catch {}
+    url = trustedReleaseUrl(url);
     await shell.openExternal(url);
     return { ok: true, url };
   });

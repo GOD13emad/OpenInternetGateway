@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const { pathToFileURL } = require('node:url');
-const { protectDashboardNavigation, assertDashboardIpcSender } = require('../src/main/dashboard-security');
+const { protectDashboardNavigation, assertDashboardIpcSender, trustedReleaseUrl } = require('../src/main/dashboard-security');
 
 function fixture() {
   let navigationHandler;
@@ -66,4 +66,24 @@ test('every gateway IPC route uses trusted binder', () => {
   const lines = source.split('\n').filter(line => /['"]gateway:[^'"]+['"]/.test(line) && /ipcMain\.handle|handleDashboardIpc/.test(line));
   assert.ok(lines.length >= 10);
   assert.ok(lines.every(line => /handleDashboardIpc\(/.test(line)), lines.join('\n'));
+});
+
+test('only exact HTTPS repository release links can reach the operating system shell', () => {
+  const fallback = 'https://github.com/GOD13emad/OpenInternetGateway/releases/latest';
+  assert.equal(trustedReleaseUrl(fallback), fallback);
+  assert.equal(trustedReleaseUrl('https://github.com/GOD13emad/OpenInternetGateway/releases/tag/v2.5.19'),
+    'https://github.com/GOD13emad/OpenInternetGateway/releases/tag/v2.5.19');
+  for (const malicious of [
+    'javascript:alert(1)', 'file:///C:/Windows/system32/calc.exe',
+    'https://github.com.evil.test/GOD13emad/OpenInternetGateway/releases/latest',
+    'https://github.com@evil.test/GOD13emad/OpenInternetGateway/releases/latest',
+    'http://github.com/GOD13emad/OpenInternetGateway/releases/latest',
+    'https://github.com/elsewhere/elsewhere/releases/latest',
+    'https://github.com/GOD13emad/OpenInternetGateway/issues/1',
+    'https://github.com/GOD13emad/OpenInternetGateway/releases/tag/v1?source=untrusted',
+    'https://github.com/GOD13emad/OpenInternetGateway/releases/tag/%2e%2e',
+    '', null, {},
+  ]) assert.equal(trustedReleaseUrl(malicious), fallback, String(malicious));
+  const main = fs.readFileSync(path.resolve(__dirname, '../src/main/main.js'), 'utf8');
+  assert.match(main, /url = trustedReleaseUrl\(url\);\s*await shell\.openExternal\(url\)/);
 });

@@ -1,0 +1,72 @@
+[CmdletBinding()]
+param([Parameter(Mandatory=$true)][string]$Receipt)
+$ErrorActionPreference='Stop'
+Set-StrictMode -Version Latest
+
+# Native, installed-dashboard smoke only on disposable GitHub-hosted Windows.
+foreach($pair in @(@('GITHUB_ACTIONS','true'),@('RUNNER_OS','Windows'),@('RUNNER_ENVIRONMENT','github-hosted'),@('GITHUB_REPOSITORY','GOD13emad/OpenInternetGateway'))){
+  if([Environment]::GetEnvironmentVariable($pair[0]) -ne $pair[1]){throw ('DISPOSABLE_WINDOWS_RUNNER_REQUIRED_'+$pair[0])}
+}
+if((Get-CimInstance Win32_ComputerSystem).PartOfDomain){throw 'DOMAIN_JOINED_MACHINE_REFUSED'}
+$backend=Join-Path $env:LOCALAPPDATA 'OpenInternetGateway'
+$program=Join-Path $env:LOCALAPPDATA 'Programs\open-internet-gateway'
+$exe=Join-Path $program 'Open Internet Gateway.exe'
+if(-not(Test-Path -LiteralPath $exe -PathType Leaf)){throw 'INSTALLED_DESKTOP_EXE_MISSING'}
+$desired=Join-Path $backend 'state\desired-state.json'
+
+function Assert-Offline {
+  $routes=@(Get-NetRoute -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object {$_.DestinationPrefix -in @('0.0.0.0/1','128.0.0.0/1')})
+  $svc=Get-Service -Name OVPNConnectorService -ErrorAction SilentlyContinue
+  $intent=''
+  if(Test-Path -LiteralPath $desired){try{$intent=[string](Get-Content -LiteralPath $desired -Raw|ConvertFrom-Json).desired}catch{}}
+  if($intent -ne 'off' -or $routes.Count -ne 0 -or ($svc -and $svc.Status -ne 'Stopped')){
+    throw 'DESKTOP_CAPTURE_REQUIRES_VERIFIED_DISCONNECTED_BASELINE'
+  }
+}
+Assert-Offline
+
+$existing=@(Get-CimInstance Win32_Process -Filter "Name='Open Internet Gateway.exe'" -ErrorAction SilentlyContinue)
+if($existing.Count -ne 0){throw 'DESKTOP_GUI_ALREADY_RUNNING'}
+$png=Join-Path $env:RUNNER_TEMP 'oig-installed-dashboard.png'
+if(Test-Path -LiteralPath $png){throw 'CAPTURE_DEST_ALREADY_EXISTS'}
+$oldCapture=[Environment]::GetEnvironmentVariable('OIG_CAPTURE_PATH')
+$oldOnly=[Environment]::GetEnvironmentVariable('OIG_CAPTURE_ONLY')
+$child=$null
+try{
+  $env:OIG_CAPTURE_PATH=$png
+  $env:OIG_CAPTURE_ONLY='1'
+  $child=Start-Process -FilePath $exe -WorkingDirectory $program -PassThru
+  if(-not $child.WaitForExit(65000)){throw 'INSTALLED_DASHBOARD_RENDER_TIMEOUT'}
+  if($child.ExitCode -ne 0){throw ('INSTALLED_DASHBOARD_EXIT_'+$child.ExitCode)}
+  if(-not(Test-Path -LiteralPath $png)){throw 'INSTALLED_DASHBOARD_SCREENSHOT_MISSING'}
+  $bytes=[IO.File]::ReadAllBytes($png)
+  if($bytes.Length -lt 5000){throw 'INSTALLED_DASHBOARD_SCREENSHOT_TOO_SMALL'}
+  $signature=[byte[]](137,80,78,71,13,10,26,10)
+  for($i=0;$i -lt $signature.Length;$i++){
+    if($bytes[$i] -ne $signature[$i]){throw 'INSTALLED_DASHBOARD_INVALID_PNG'}
+  }
+  $width=([int]$bytes[16]*16777216)+([int]$bytes[17]*65536)+([int]$bytes[18]*256)+[int]$bytes[19]
+  $height=([int]$bytes[20]*16777216)+([int]$bytes[21]*65536)+([int]$bytes[22]*256)+[int]$bytes[23]
+  if($width -lt 980 -or $height -lt 680){throw ('INSTALLED_DASHBOARD_SIZE_INVALID_'+$width+'x'+$height)}
+  Assert-Offline
+  $evidence=[ordered]@{
+    schema='oig-installed-windows-dashboard-smoke-v1'
+    scope='disposable-GitHub-hosted-Windows-Server-2025-packaged-dashboard-render-only'
+    source=$env:GITHUB_SHA
+    pass=$true
+    imageWidth=$width
+    imageHeight=$height
+    pngBytes=$bytes.Length
+    imageSha256=(Get-FileHash -LiteralPath $png -Algorithm SHA256).Hash.ToLowerInvariant()
+    exeSha256=(Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash.ToLowerInvariant()
+    disconnectedBeforeAndAfter=$true
+    vpnConnectionsAttempted=$false
+    endUserWindows10Or11GuiAcceptance=$false
+  }
+  [IO.File]::WriteAllText($Receipt,($evidence|ConvertTo-Json -Depth 6)+[Environment]::NewLine,[Text.UTF8Encoding]::new($false))
+  Write-Host ('INSTALLED_WINDOWS_DASHBOARD_SCREENSHOT_PASS '+$width+'x'+$height)
+}finally{
+  [Environment]::SetEnvironmentVariable('OIG_CAPTURE_PATH',$oldCapture)
+  [Environment]::SetEnvironmentVariable('OIG_CAPTURE_ONLY',$oldOnly)
+  if($child -and -not $child.HasExited){try{Stop-Process -Id $child.Id -Force -ErrorAction Stop}catch{}}
+}

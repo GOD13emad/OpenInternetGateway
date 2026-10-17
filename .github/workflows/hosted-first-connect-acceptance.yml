@@ -15,6 +15,8 @@ on:
       - 'app/tests/first-connect-start-diagnostic.test.js'
       - 'app/tests/hosted-first-connect.cjs'
       - 'app/tests/hosted-first-connect.ps1'
+      - 'app/tests/hosted-desktop-screenshot.ps1'
+      - 'app/tests/hosted-desktop-screenshot.test.js'
       - '.github/workflows/build.yml'
       - 'app/src/main/dashboard-security.js'
       - 'app/src/main/main.js'
@@ -75,9 +77,9 @@ jobs:
           $base='4c34996ef615afa7b515ac0f84e6a18b9ddcb5cf'
           git merge-base --is-ancestor $base HEAD
           if($LASTEXITCODE -ne 0){throw 'BASE_SHA_NOT_ANCESTOR'}
-          $expected=@('.github/workflows/build.yml','.github/workflows/hosted-first-connect-acceptance.yml','app/backend/windows/scripts/Connect-OpenInternet.ps1','app/backend/windows/scripts/Ensure-OpenInternet.ps1','app/backend/windows/scripts/Headless-Control.ps1','app/src/main/dashboard-security.js','app/src/main/main.js','app/src/main/platform-backend.js','app/tests/app.test.js','app/tests/dashboard-navigation-security.test.js','app/tests/first-connect-bootstrap-continuation.test.js','app/tests/first-connect-start-diagnostic.test.js','app/tests/headless-cancel-and-status-safety.test.js','app/tests/hosted-first-connect.cjs','app/tests/hosted-first-connect.ps1','app/tests/native-electron-ipc-smoke.cjs','app/tests/openvpn-gui-exclusivity.test.js','app/tests/packaged-security-parity.cjs','app/tests/pwsh-executable-origin.test.js')
+          $expected=@('.github/workflows/build.yml','.github/workflows/hosted-first-connect-acceptance.yml','app/backend/windows/scripts/Connect-OpenInternet.ps1','app/backend/windows/scripts/Ensure-OpenInternet.ps1','app/backend/windows/scripts/Headless-Control.ps1','app/src/main/dashboard-security.js','app/src/main/main.js','app/src/main/platform-backend.js','app/tests/app.test.js','app/tests/dashboard-navigation-security.test.js','app/tests/first-connect-bootstrap-continuation.test.js','app/tests/first-connect-start-diagnostic.test.js','app/tests/headless-cancel-and-status-safety.test.js','app/tests/hosted-first-connect.cjs','app/tests/hosted-first-connect.ps1','app/tests/hosted-desktop-screenshot.ps1','app/tests/hosted-desktop-screenshot.test.js','app/tests/native-electron-ipc-smoke.cjs','app/tests/openvpn-gui-exclusivity.test.js','app/tests/packaged-security-parity.cjs','app/tests/pwsh-executable-origin.test.js')
           $actual=@(git diff --name-only $base HEAD)
-          if($actual.Count -ne 19 -or @($actual|Where-Object {$_ -notin $expected}).Count){throw 'UNEXPECTED_PRODUCT_SCOPE'}
+          if($actual.Count -ne 21 -or @($actual|Where-Object {$_ -notin $expected}).Count){throw 'UNEXPECTED_PRODUCT_SCOPE'}
       - uses: actions/download-artifact@v8
         with:
           name: firstconnect-candidate-seed
@@ -111,6 +113,14 @@ jobs:
           $receipt=Join-Path $env:RUNNER_TEMP 'oig-first-connect-receipt.json'
           ./app/tests/hosted-first-connect.ps1 -Installer $exe -Receipt $receipt -ExpectedSha256 $sha
           if($LASTEXITCODE -ne 0){throw 'FIRST_CONNECT_NOT_ACCEPTED'}
+      - name: Installed Windows desktop dashboard screenshot after verified rollback
+        shell: pwsh
+        timeout-minutes: 3
+        run: |
+          $ErrorActionPreference='Stop'
+          $receipt=Join-Path $env:RUNNER_TEMP 'oig-desktop-smoke-receipt.json'
+          ./app/tests/hosted-desktop-screenshot.ps1 -Receipt $receipt
+          if($LASTEXITCODE -ne 0){throw 'INSTALLED_DESKTOP_RENDER_FAILED'}
       - uses: actions/upload-artifact@v7
         if: always()
         with:
@@ -119,5 +129,7 @@ jobs:
             ${{ runner.temp }}/oig-first-connect-receipt.json
             ${{ runner.temp }}/oig-first-connect.stdout.log
             ${{ runner.temp }}/oig-first-connect.stderr.log
+            ${{ runner.temp }}/oig-desktop-smoke-receipt.json
+            ${{ runner.temp }}/oig-installed-dashboard.png
           retention-days: 7
           if-no-files-found: warn
