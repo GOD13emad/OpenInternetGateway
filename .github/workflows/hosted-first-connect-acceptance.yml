@@ -1,6 +1,13 @@
-name: Disposable Windows integrated security first-Connect review
+name: Disposable Windows first-Connect acceptance (review/manual main)
 
 on:
+  workflow_dispatch:
+    inputs:
+      confirm_disposable_runner:
+        description: 'Run a real OpenVPN connection ONLY on ephemeral GitHub-hosted Windows Server 2025?'
+        required: true
+        default: false
+        type: boolean
   pull_request:
     paths:
       - '.github/workflows/hosted-first-connect-acceptance.yml'
@@ -30,13 +37,13 @@ permissions:
 
 jobs:
   seed:
-    if: ${{ github.event.pull_request.head.repo.full_name == github.repository && github.head_ref == 'review/firstconnect-security-20261017' }}
+    if: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.base_ref == 'main' && github.head_ref == 'review/firstconnect-security-20261017') || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && inputs.confirm_disposable_runner == true) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: ${{ github.event.pull_request.head.sha }}
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
           fetch-depth: 0
           persist-credentials: false
       - name: Produce public OpenVPN seed using release method
@@ -56,13 +63,13 @@ jobs:
 
   first-connect:
     needs: seed
-    if: ${{ github.event.pull_request.head.repo.full_name == github.repository && github.head_ref == 'review/firstconnect-security-20261017' }}
+    if: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.base_ref == 'main' && github.head_ref == 'review/firstconnect-security-20261017') || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && inputs.confirm_disposable_runner == true) }}
     runs-on: windows-2025
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: ${{ github.event.pull_request.head.sha }}
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
           fetch-depth: 0
           persist-credentials: false
       - uses: actions/setup-node@v7
@@ -74,12 +81,24 @@ jobs:
           $ErrorActionPreference='Stop'
           if($env:RUNNER_ENVIRONMENT -ne 'github-hosted'){throw 'HOSTED_RUNNER_REQUIRED'}
           if($env:GITHUB_REPOSITORY -ne 'GOD13emad/OpenInternetGateway'){throw 'REPO_MISMATCH'}
-          $base='4c34996ef615afa7b515ac0f84e6a18b9ddcb5cf'
-          git merge-base --is-ancestor $base HEAD
-          if($LASTEXITCODE -ne 0){throw 'BASE_SHA_NOT_ANCESTOR'}
-          $expected=@('.github/workflows/build.yml','.github/workflows/hosted-first-connect-acceptance.yml','app/backend/windows/scripts/Connect-OpenInternet.ps1','app/backend/windows/scripts/Ensure-OpenInternet.ps1','app/backend/windows/scripts/Headless-Control.ps1','app/src/main/dashboard-security.js','app/src/main/main.js','app/src/main/platform-backend.js','app/tests/app.test.js','app/tests/dashboard-navigation-security.test.js','app/tests/first-connect-bootstrap-continuation.test.js','app/tests/first-connect-start-diagnostic.test.js','app/tests/headless-cancel-and-status-safety.test.js','app/tests/hosted-first-connect.cjs','app/tests/hosted-first-connect.ps1','app/tests/hosted-desktop-screenshot.ps1','app/tests/hosted-desktop-screenshot.test.js','app/tests/native-electron-ipc-smoke.cjs','app/tests/openvpn-gui-exclusivity.test.js','app/tests/packaged-security-parity.cjs','app/tests/pwsh-executable-origin.test.js')
-          $actual=@(git diff --name-only $base HEAD)
-          if($actual.Count -ne 21 -or @($actual|Where-Object {$_ -notin $expected}).Count){throw 'UNEXPECTED_PRODUCT_SCOPE'}
+          $actualSha=(git rev-parse HEAD).Trim().ToLowerInvariant()
+          if($actualSha -notmatch '^[a-f0-9]{40}$'){throw 'INVALID_CHECKED_OUT_SOURCE_SHA'}
+          if($env:GITHUB_EVENT_NAME -eq 'workflow_dispatch'){
+            # This opt-in branch exists only after the reviewed workflow has
+            # been promoted. No arbitrary ref, tag, fork or auto-push runs.
+            if($env:GITHUB_REF -ne 'refs/heads/main'){throw 'MANUAL_MAIN_ONLY'}
+            if($actualSha -ne [string]$env:GITHUB_SHA){throw 'MANUAL_SOURCE_SHA_MISMATCH'}
+          }elseif($env:GITHUB_EVENT_NAME -eq 'pull_request'){
+            # Keep the original exact review-candidate scope and base guard.
+            if($env:GITHUB_HEAD_REF -ne 'review/firstconnect-security-20261017' -or
+               $env:GITHUB_BASE_REF -ne 'main'){throw 'UNTRUSTED_PR_SOURCE'}
+            $base='4c34996ef615afa7b515ac0f84e6a18b9ddcb5cf'
+            git merge-base --is-ancestor $base HEAD
+            if($LASTEXITCODE -ne 0){throw 'BASE_SHA_NOT_ANCESTOR'}
+            $expected=@('.github/workflows/build.yml','.github/workflows/hosted-first-connect-acceptance.yml','app/backend/windows/scripts/Connect-OpenInternet.ps1','app/backend/windows/scripts/Ensure-OpenInternet.ps1','app/backend/windows/scripts/Headless-Control.ps1','app/src/main/dashboard-security.js','app/src/main/main.js','app/src/main/platform-backend.js','app/tests/app.test.js','app/tests/dashboard-navigation-security.test.js','app/tests/first-connect-bootstrap-continuation.test.js','app/tests/first-connect-start-diagnostic.test.js','app/tests/headless-cancel-and-status-safety.test.js','app/tests/hosted-first-connect.cjs','app/tests/hosted-first-connect.ps1','app/tests/hosted-desktop-screenshot.ps1','app/tests/hosted-desktop-screenshot.test.js','app/tests/native-electron-ipc-smoke.cjs','app/tests/openvpn-gui-exclusivity.test.js','app/tests/packaged-security-parity.cjs','app/tests/pwsh-executable-origin.test.js')
+            $actual=@(git diff --name-only $base HEAD)
+            if($actual.Count -ne 21 -or @($actual|Where-Object {$_ -notin $expected}).Count){throw 'UNEXPECTED_PRODUCT_SCOPE'}
+          }else{throw 'WORKFLOW_EVENT_NOT_ALLOWED'}
       - uses: actions/download-artifact@v8
         with:
           name: firstconnect-candidate-seed

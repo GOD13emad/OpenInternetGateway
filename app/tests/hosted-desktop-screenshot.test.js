@@ -55,3 +55,33 @@ test('Windows dashboard capture uses a single-pass safe quit instead of recursiv
   assert.match(main, /function requestProcessExitPreservingTunnel\(\)/);
   assert.match(main, /allowQuit = true;\s*app\.quit\(\)/);
 });
+test('hosted first-connect supports explicit opt-in from canonical main without automatic main network changes', () => {
+  const yaml = require('js-yaml');
+  const raw = fs.readFileSync(path.resolve(root,'../.github/workflows/hosted-first-connect-acceptance.yml'),'utf8');
+  const parsed = yaml.load(raw);
+  assert.equal(parsed.on.workflow_dispatch.inputs.confirm_disposable_runner.type, 'boolean');
+  assert.equal(parsed.on.workflow_dispatch.inputs.confirm_disposable_runner.default, false);
+  assert.equal(parsed.on.pull_request.paths.length, 21);
+  assert.equal(parsed.on.push, undefined, 'no automatic main push VPN runs');
+  assert.equal(parsed.on.pull_request_target, undefined, 'never check out a PR head under privileged target context');
+  for (const job of [parsed.jobs.seed, parsed.jobs['first-connect']]) {
+    assert.match(job.if, /github\.event_name == 'workflow_dispatch'/);
+    assert.match(job.if, /github\.ref == 'refs\/heads\/main'/);
+    assert.match(job.if, /inputs\.confirm_disposable_runner == true/);
+    assert.match(job.if, /github\.event\.pull_request\.head\.repo\.full_name == github\.repository/);
+    assert.match(job.if, /github\.head_ref == 'review\/firstconnect-security-20261017'/);
+    const checkout = job.steps.find(step => String(step.uses).startsWith('actions/checkout@'));
+    assert.match(checkout.with.ref, /github\.event\.pull_request\.head\.sha \|\| github\.sha/);
+    assert.equal(checkout.with['persist-credentials'], false);
+  }
+  const native = parsed.jobs['first-connect'];
+  assert.equal(native['runs-on'], 'windows-2025');
+  const boundary = native.steps.find(x => x.name === 'Confirm disposable Windows scope and fixed source').run;
+  assert.match(boundary, /MANUAL_MAIN_ONLY/);
+  assert.match(boundary, /MANUAL_SOURCE_SHA_MISMATCH/);
+  assert.match(boundary, /UNTRUSTED_PR_SOURCE/);
+  assert.match(boundary, /WORKFLOW_EVENT_NOT_ALLOWED/);
+  assert.match(boundary, /UNEXPECTED_PRODUCT_SCOPE/);
+  assert.match(boundary, /RUNNER_ENVIRONMENT/);
+  assert.match(boundary, /GITHUB_REPOSITORY/);
+});
