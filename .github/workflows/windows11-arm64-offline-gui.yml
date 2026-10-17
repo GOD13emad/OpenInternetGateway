@@ -242,10 +242,38 @@ jobs:
           })().catch(e=>{console.error(e.stack||String(e));process.exitCode=1});
           '@
           [IO.File]::WriteAllText($src,$js,[Text.UTF8Encoding]::new($false))
+          # Read-only startup latency check, same packaged PowerShell executable and hidden window mode.
+          $watch=[Diagnostics.Stopwatch]::StartNew()
+          & $pwsh -NoProfile -WindowStyle Hidden -Command "Write-Output 'OIG_PWSH_READY'"
+          $watch.Stop()
+          if ($LASTEXITCODE -ne 0) { throw 'PACKAGED_PWSH_STANDALONE_PREFLIGHT_FAILED' }
+          Write-Host "PACKAGED_PWSH_COLD_START_MS=$($watch.ElapsedMilliseconds)"
           node --check $src
           if ($LASTEXITCODE -ne 0) { throw 'NODE_HARNESS_SYNTAX_FAILED' }
           & node $src
-          if ($LASTEXITCODE -ne 0) { throw 'ACTUAL_BACKEND_UPDATER_FAILED' }
+          if ($LASTEXITCODE -ne 0) {
+            # Diagnostic only: never silently accept a delayed receipt as success.
+            $folder=Join-Path $root 'updates\v2.5.19'
+            $started=Join-Path $folder 'apply-result.json.started'
+            $result=Join-Path $folder 'apply-result.json'
+            Start-Sleep -Seconds 18
+            $diag=[ordered]@{
+              failure='ACTUAL_BACKEND_UPDATER_FAILED'
+              startedReceiptExists=(Test-Path -LiteralPath $started -PathType Leaf)
+              resultReceiptExists=(Test-Path -LiteralPath $result -PathType Leaf)
+              helperScriptExists=(Test-Path (Join-Path $folder 'apply-update.ps1') -PathType Leaf)
+              isolatedRuntimeExists=(Test-Path (Join-Path $folder 'pwsh-helper\pwsh.exe') -PathType Leaf)
+              installerExists=(Test-Path (Join-Path $folder 'OpenInternetGateway-Setup-2.5.19.exe') -PathType Leaf)
+              installedProductVersion=(Get-Item $exe).VersionInfo.ProductVersion
+            }
+            if(Test-Path $result -PathType Leaf){
+              try{ $diag['lateResult']=(Get-Content -Raw $result|ConvertFrom-Json|Select-Object ok,error,version,installScope) }catch{}
+            }
+            $diagFile=Join-Path $env:RUNNER_TEMP 'oig-backend-updater-failure-diagnostic.json'
+            [IO.File]::WriteAllText($diagFile,($diag|ConvertTo-Json -Depth 5)+[Environment]::NewLine,[Text.UTF8Encoding]::new($false))
+            Write-Host "UPDATER_FAIL_DIAGNOSTIC=$($diag|ConvertTo-Json -Depth 5 -Compress)"
+            throw 'ACTUAL_BACKEND_UPDATER_FAILED'
+          }
           $nodeReceipt=Join-Path $env:RUNNER_TEMP 'oig-updater-api-result.json'
           if (!(Test-Path $nodeReceipt -PathType Leaf)) { throw 'BACKEND_UPDATER_RESULT_MISSING' }
           $n=Get-Content $nodeReceipt -Raw|ConvertFrom-Json
@@ -297,6 +325,7 @@ jobs:
             ${{ runner.temp }}/oig-arm64-upgrade-receipt.json
             ${{ runner.temp }}/oig-backend-updater-e2e-receipt.json
             ${{ runner.temp }}/oig-updater-api-result.json
+            ${{ runner.temp }}/oig-backend-updater-failure-diagnostic.json
             ${{ runner.temp }}/oig-installed-dashboard.png
             ${{ runner.temp }}/oig-desktop-navigation-probe.json
           retention-days: 7
