@@ -63,7 +63,13 @@ jobs:
           $sha=(Get-FileHash -LiteralPath $installer -Algorithm SHA256).Hash.ToLowerInvariant()
           $receipt=Join-Path $env:RUNNER_TEMP 'oig-desktop-smoke-receipt.json'
           ./tests/hosted-desktop-screenshot.ps1 -Installer $installer -ExpectedSha256 $sha -Receipt $receipt
-          if($LASTEXITCODE -ne 0){throw 'INSTALLED_WINDOWS_DESKTOP_SMOKE_FAILED'}
+          # A PowerShell script's successful return does not reset LASTEXITCODE
+          # from previous native commands. Check the exact receipt instead.
+          if(-not(Test-Path -LiteralPath $receipt)){throw 'INSTALLED_DESKTOP_RECEIPT_MISSING'}
+          $evidence=Get-Content -LiteralPath $receipt -Raw|ConvertFrom-Json
+          if($evidence.pass -ne $true -or $evidence.disconnectedBeforeAndAfter -ne $true -or
+             $evidence.vpnConnectionsAttempted -ne $false -or
+             $evidence.verifiedInstallerSha256 -ne $sha){throw 'INSTALLED_DESKTOP_ACCEPTANCE_NOT_VERIFIED'}
       - uses: actions/upload-artifact@v7
         if: always() && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
         with:

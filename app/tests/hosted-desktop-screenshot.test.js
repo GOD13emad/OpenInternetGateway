@@ -33,6 +33,10 @@ test('standard Windows build validates installed GUI independently of the live V
   assert.match(workflow, /tests\/hosted-desktop-screenshot\.ps1 -Installer/);
   assert.match(workflow, /github\.event\.pull_request\.head\.repo\.full_name == github\.repository/);
   assert.match(workflow, /name: windows-desktop-smoke-evidence/);
+  assert.match(workflow, /evidence\.verifiedInstallerSha256 -ne \$sha/);
+  assert.match(workflow, /evidence\.disconnectedBeforeAndAfter -ne \$true/);
+  assert.doesNotMatch(workflow, /if\(\$LASTEXITCODE -ne 0\)\{throw 'INSTALLED_WINDOWS_DESKTOP_SMOKE_FAILED'\}/);
+
   assert.doesNotMatch(native, /Installed Windows desktop dashboard screenshot after verified rollback/);
 });
 
