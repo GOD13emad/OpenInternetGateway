@@ -34,3 +34,16 @@ test('elevated connector refuses GUI before touching service, profile or routes'
   assert.match(block,/throw 'OpenVPN Connect GUI is already running/);
   assert.doesNotMatch(block,/Stop-Process|taskkill/);
 });
+
+test('preflight occurs before MSI preparation and is rechecked after vendor install',()=>{
+  const begin=backend.indexOf('async _ensureWindowsRuntimePrerequisites()');
+  const end=backend.indexOf('async _windows(action',begin);
+  const block=backend.slice(begin,end);
+  const first=block.indexOf('await assertGuiClosed()');
+  const setup=block.indexOf('await this._ensureWindowsConnector()');
+  const second=block.lastIndexOf('await assertGuiClosed()');
+  assert.ok(first>=0 && setup>first && second>setup, 'do not download or install the vendor MSI if another OpenVPN GUI already runs');
+  assert.equal((block.match(/await assertGuiClosed\(\)/g)||[]).length,2, 're-check after MSI in case UI started during setup');
+  assert.ok(block.indexOf("Get-Process -Name 'OpenVPNConnect'") < first);
+  assert.doesNotMatch(block,/Stop-Process|taskkill|Kill\(/);
+});
