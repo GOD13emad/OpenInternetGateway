@@ -126,6 +126,29 @@ jobs:
             app/dist/OpenInternetGateway-*.deb
           if-no-files-found: error
 
+  verify-preview:
+    if: github.event_name == 'workflow_dispatch'
+    needs: [seed, test, windows, linux]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      attestations: read
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          name: release-windows
+          path: release
+      - uses: actions/download-artifact@v8
+        with:
+          name: release-linux
+          path: release
+      - name: Verify exact produced bytes without public release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: bash .github/scripts/verify-release-attestations.sh
+
   publish:
     if: startsWith(github.ref, 'refs/tags/v')
     needs: [seed, test, windows, linux]
@@ -152,19 +175,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
-        run: |
-          set -euo pipefail
-          shopt -s nullglob
-          windows=(release/OpenInternetGateway-Setup-*.exe)
-          appimages=(release/OpenInternetGateway-*.AppImage)
-          debs=(release/OpenInternetGateway-*.deb)
-          test "${#windows[@]}" -ge 1 && test "${#appimages[@]}" -ge 1 && test "${#debs[@]}" -ge 1
-          for file in "${windows[@]}" "${appimages[@]}" "${debs[@]}"; do
-            gh attestation verify "$file" \
-              --repo "$GITHUB_REPOSITORY" \
-              --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml" \
-              --source-ref "$GITHUB_REF"
-          done
+        run: bash .github/scripts/verify-release-attestations.sh
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
