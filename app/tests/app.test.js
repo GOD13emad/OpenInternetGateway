@@ -1105,7 +1105,10 @@ test('Windows first-connect OpenVPN prerequisite is pinned, verified and install
   const ensure=backend.slice(backend.indexOf('async _ensureWindowsConnector'),backend.indexOf('async _ensureWindowsRuntimePrerequisites'));
   assert.match(ensure,/downloaded\.sha256/);
   assert.match(ensure,/WINDOWS_OPENVPN_CONNECT\.sha256/);
-  assert.match(ensure,/Start-Process -FilePath 'msiexec\.exe' -Verb RunAs -Wait -PassThru/);
+  assert.ok(ensure.includes("$systemMsi=Join-Path ([Environment]::SystemDirectory) 'msiexec.exe'"));
+  assert.ok(ensure.includes('Test-Path -LiteralPath $systemMsi -PathType Leaf'));
+  assert.ok(ensure.includes('Start-Process -FilePath $systemMsi -Verb RunAs -Wait -PassThru'));
+  assert.ok(!ensure.includes("Start-Process -FilePath 'msiexec.exe'"));
   assert.match(ensure,/\$msi='" \+ escapedMsi \+ "'/);
   assert.match(ensure,/\/quiet \/norestart AUTOSTART=no/);
   assert.doesNotMatch(ensure,/\/passive/);

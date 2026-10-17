@@ -11,7 +11,10 @@ test('first-time OpenVPN MSI is silent and does not request GUI autostart',()=>{
   assert.match(install,/\/quiet \/norestart AUTOSTART=no/);
   assert.doesNotMatch(install,/\/passive/);
   assert.match(install,/sha256 !== WINDOWS_OPENVPN_CONNECT\.sha256/);
-  assert.match(install,/Start-Process -FilePath 'msiexec\.exe' -Verb RunAs/);
+  assert.ok(install.includes("$systemMsi=Join-Path ([Environment]::SystemDirectory) 'msiexec.exe'"));
+  assert.ok(install.includes('Test-Path -LiteralPath $systemMsi -PathType Leaf'));
+  assert.ok(install.includes('Start-Process -FilePath $systemMsi -Verb RunAs'));
+  assert.ok(!install.includes("Start-Process -FilePath 'msiexec.exe'"));
 });
 test('Connect refuses existing independent GUI rather than terminating it',()=>{
   const begin=backend.indexOf('async _ensureWindowsRuntimePrerequisites()');

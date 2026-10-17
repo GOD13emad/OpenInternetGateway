@@ -351,7 +351,10 @@ class Backend {
       // ovpnconnector.exe service daemon cannot be active simultaneously.
       "$msiArgs='/i \"' + $msi + '\" /quiet /norestart AUTOSTART=no'",
       "try {",
-      "  $p=Start-Process -FilePath 'msiexec.exe' -Verb RunAs -Wait -PassThru -ArgumentList $msiArgs",
+      // Elevation must execute the OS-owned Windows Installer, never a PATH-resolved binary.
+      "  $systemMsi=Join-Path ([Environment]::SystemDirectory) 'msiexec.exe'",
+      "  if(-not (Test-Path -LiteralPath $systemMsi -PathType Leaf)) { throw 'Trusted Windows Installer executable unavailable.' }",
+      "  $p=Start-Process -FilePath $systemMsi -Verb RunAs -Wait -PassThru -ArgumentList $msiArgs",
       "  exit $p.ExitCode",
       "} catch { Write-Error $_.Exception.Message; exit 1223 }"
     ].join(';');
