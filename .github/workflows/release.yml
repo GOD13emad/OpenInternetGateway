@@ -32,6 +32,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+      - name: Assert push-only publishing boundary
+        run: python3 .github/scripts/test_release_event_gate.py
       - uses: actions/setup-node@v7
         with:
           node-version: '24'
@@ -51,6 +53,11 @@ jobs:
   windows:
     needs: seed
     runs-on: windows-latest
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+      artifact-metadata: write
     steps:
       - uses: actions/checkout@v7
       - uses: actions/download-artifact@v8
@@ -74,6 +81,10 @@ jobs:
         run: npm ci
       - working-directory: app
         run: npm run dist:win
+      - name: Attest Windows installer from its producer build
+        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
+        with:
+          subject-path: 'app/dist/OpenInternetGateway-Setup-*.exe'
       - uses: actions/upload-artifact@v7
         with:
           name: release-windows
@@ -83,6 +94,11 @@ jobs:
   linux:
     needs: seed
     runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+      artifact-metadata: write
     steps:
       - uses: actions/checkout@v7
       - uses: actions/download-artifact@v8
@@ -98,6 +114,12 @@ jobs:
         run: npm ci
       - working-directory: app
         run: npm run dist:linux
+      - name: Attest Linux packages from their producer build
+        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
+        with:
+          subject-path: |
+            app/dist/OpenInternetGateway-*.AppImage
+            app/dist/OpenInternetGateway-*.deb
       - uses: actions/upload-artifact@v7
         with:
           name: release-linux
@@ -106,12 +128,44 @@ jobs:
             app/dist/OpenInternetGateway-*.deb
           if-no-files-found: error
 
+  verify-preview:
+    if: github.event_name == 'workflow_dispatch' && startsWith(github.ref, 'refs/heads/')
+    needs: [seed, test, windows, linux]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      attestations: read
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          name: release-windows
+          path: release
+      - uses: actions/download-artifact@v8
+        with:
+          name: release-linux
+          path: release
+      - name: Validate candidate version and complete package set
+        shell: bash
+        run: bash .github/scripts/verify-release-version.sh preview
+      - name: Verify exact produced bytes without public release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: bash .github/scripts/verify-release-attestations.sh
+      - name: "Negative provenance: reject modified bytes and incorrect source identity"
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: bash .github/scripts/test-release-attestations-negative.sh
+
   publish:
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     needs: [seed, test, windows, linux]
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      attestations: read
     steps:
       - uses: actions/checkout@v7
       - uses: actions/download-artifact@v8
@@ -127,6 +181,14 @@ jobs:
           cd release
           sha256sum OpenInternetGateway-* > SHA256SUMS.txt
           cat SHA256SUMS.txt
+      - name: Validate tag, package version, assets and checksums before publication
+        shell: bash
+        run: bash .github/scripts/verify-release-version.sh publish
+      - name: Verify both producer attestations before public release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: bash .github/scripts/verify-release-attestations.sh
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
