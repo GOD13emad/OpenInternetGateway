@@ -544,7 +544,7 @@ test('GitHub updater checks latest release and verifies published SHA-256',()=>{
   assert.ok(backend.includes("Programs', 'open-internet-gateway', 'Open Internet Gateway.exe'"));
   assert.match(backend,/pwsh-helper/);
   assert.match(backend,/copyDir\(bundledPwshRoot, helperRuntime\)/);
-  assert.match(backend,/spawn\(updatePwsh, pwshArgs/);
+  assert.match(backend,/spawn\(updatePwsh, launchArgs/);
   assert.match(backend,/resultFile \+ '\.started'/);
   assert.match(backend,/Windows update helper failed to start/);
   assert.doesNotMatch(backend,/spawn\('pwsh\.exe'/);
@@ -1132,7 +1132,12 @@ test('Windows update helper uses an isolated copy of bundled PowerShell instead 
   assert.match(block,/const bundledPwshRoot = path\.join\(this\.resourcesPath \|\| '', 'pwsh'\)/);
   assert.match(block,/copyDir\(bundledPwshRoot, helperRuntime\)/);
   assert.match(block,/updatePwsh = path\.join\(helperRuntime, 'pwsh\.exe'\)/);
-  assert.match(block,/spawn\(updatePwsh, pwshArgs/);
+  assert.match(block,/spawn\(updatePwsh, launchArgs/);
+  assert.match(block,/detached: false/);
+  assert.match(block,/const launchScript = String\.raw/);
+  assert.match(block,/Start-Process -FilePath \$Runtime -ArgumentList \$line -WindowStyle Hidden -PassThru/);
+  assert.match(block,/child\.once\('close', code =>/);
+  assert.match(block,/const startedDeadline = Date\.now\(\) \+ 15000/);
   assert.doesNotMatch(block,/where\.exe pwsh\.exe|process\.env\.ComSpec|apply-update\.cmd/);
 });
 

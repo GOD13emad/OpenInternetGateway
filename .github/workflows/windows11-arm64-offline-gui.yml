@@ -26,8 +26,8 @@ jobs:
           git merge-base --is-ancestor dab919f66b555a620af8bf7c7716ccd1a33429d7 HEAD
           if ($LASTEXITCODE -ne 0) { throw 'SOURCE_BASE_NOT_ANCESTOR' }
           $changed=@(git diff --name-only dab919f66b555a620af8bf7c7716ccd1a33429d7 HEAD)
-          $allowed=@('.github/workflows/windows11-arm64-offline-gui.yml','.github/workflows/hosted-first-connect-acceptance.yml')
-          if ($changed.Count -ne 2 -or @($changed | Where-Object { $_ -notin $allowed }).Count) { throw 'UNEXPECTED_SOURCE_CHANGE' }
+          $allowed=@('.github/workflows/windows11-arm64-offline-gui.yml','.github/workflows/hosted-first-connect-acceptance.yml','app/src/main/platform-backend.js','app/tests/app.test.js')
+          if ($changed.Count -ne 4 -or @($changed | Where-Object { $_ -notin $allowed }).Count) { throw 'UNEXPECTED_SOURCE_CHANGE' }
           $caption=(Get-CimInstance Win32_OperatingSystem).Caption
           $arch=[System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()
           if ($caption -notmatch 'Windows 11' -or $arch -ne 'Arm64') { throw 'UNEXPECTED_RUNNER_OS_OR_ARCH' }
@@ -232,7 +232,7 @@ jobs:
             fs.writeFileSync(result,JSON.stringify({
               sourceVersionOverride:'2.5.18',
               sourceVersionOverridePurpose:'Exercise candidate 2.5.19 backend update methods against public release v2.5.19; not an actual user GUI click or real older client code',
-              sourceBackendCommit:'dab919f66b555a620af8bf7c7716ccd1a33429d7',
+              sourceBackendCommit:require('node:child_process').execFileSync('git',['rev-parse','HEAD']).toString().trim(),
               latestVersion:info.latestVersion,
               sourceChecksum:info.asset.sha256,
               publicReleaseDownloadBytes:fs.statSync(downloaded.path).size,
@@ -316,7 +316,7 @@ jobs:
             ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
           $receipt=[ordered]@{
             scope='Disposable Windows 11 Enterprise ARM64, x64 package under emulation'
-            sourceCommit='dab919f66b555a620af8bf7c7716ccd1a33429d7'
+            sourceCommit=(git rev-parse HEAD).Trim()
             testHeadCommit=$env:GITHUB_SHA
             backendRealMethods=@('updateInfo','downloadUpdate','launchDownloadedUpdate')
             sourceVersionOverride='2.5.18'

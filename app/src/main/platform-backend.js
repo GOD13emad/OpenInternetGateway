@@ -1269,8 +1269,28 @@ try {
         updatePwsh = path.join(helperRuntime, 'pwsh.exe');
         if (!fs.existsSync(updatePwsh)) throw new Error('Copied Windows update PowerShell runtime is incomplete.');
       }
-      const pwshArgs = [
-        '-NoProfile','-WindowStyle','Hidden','-ExecutionPolicy','Bypass','-File',helper,
+      // Windows detached:true makes pwsh exit before running its -File script.
+      // An attached, short-lived launcher uses OS Start-Process so the
+      // *actual* helper survives after the main Electron process exits.
+      const launcher = path.join(updateDir, 'start-update-helper.ps1');
+      const launchScript = String.raw`param([string]$Runtime,[string]$Helper,[string]$Installer,[string]$ExpectedSha,[string]$Version,
+[int]$WaitPid,[string]$Target,[string]$Fallback,[string]$ResultFile)
+$ErrorActionPreference='Stop'
+function QuoteArg([string]$v) {
+  if($v -match '[\r\n"]'){throw 'Invalid helper argument'}
+  return '"'+$v+'"'
+}
+$line=@('-NoProfile','-WindowStyle','Hidden','-ExecutionPolicy','Bypass','-File',
+(QuoteArg $Helper),'-Installer',(QuoteArg $Installer),'-ExpectedSha',$ExpectedSha,
+'-Version',$Version,'-WaitPid',"$WaitPid",'-Target',(QuoteArg $Target),
+'-Fallback',(QuoteArg $Fallback),'-ResultFile',(QuoteArg $ResultFile)) -join ' '
+$p=Start-Process -FilePath $Runtime -ArgumentList $line -WindowStyle Hidden -PassThru
+if(!$p -or $p.Id -le 0){throw 'STARTPROCESS_FAILED'}`;
+      fs.writeFileSync(launcher, launchScript, 'utf8');
+      const launchArgs = [
+        '-NoProfile','-WindowStyle','Hidden','-ExecutionPolicy','Bypass','-File',launcher,
+        '-Runtime',updatePwsh,
+        '-Helper',helper,
         '-Installer',downloaded.path,
         '-ExpectedSha',expectedSha,
         '-Version',version,
@@ -1279,17 +1299,19 @@ try {
         '-Fallback',String(currentExecutable || ''),
         '-ResultFile',resultFile
       ];
-      const child = spawn(updatePwsh, pwshArgs, {
-        detached: true,
+      const child = spawn(updatePwsh, launchArgs, {
+        detached: false,
         windowsHide: true,
         stdio: ['ignore', 'ignore', 'ignore']
       });
       await new Promise((resolve, reject) => {
-        child.once('spawn', resolve);
         child.once('error', reject);
+        child.once('close', code => {
+          if (code === 0) resolve();
+          else reject(new Error('Windows update launcher failed with exit code ' + code));
+        });
       });
-      child.unref();
-      const startedDeadline = Date.now() + 5000;
+      const startedDeadline = Date.now() + 15000;
       while (!fs.existsSync(startedFile) && Date.now() < startedDeadline) {
         await new Promise(resolve => setTimeout(resolve, 50));
       }
