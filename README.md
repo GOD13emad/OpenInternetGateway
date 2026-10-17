@@ -4,7 +4,7 @@ Open Internet Gateway (OIG) is a cross-platform desktop application for maintain
 
 The Windows and Linux backends are different, but both sit behind the same Electron dashboard, lifecycle model, health gates, multi-country relay inventory, Self-Healing Config Factory, and verified GitHub update workflow.
 
-## Current release line: 2.5.14
+## Latest published release (checked 2026-10-18): 2.5.19
 
 ### Connections
 
@@ -33,6 +33,19 @@ Before an update is applied, OIG requires all three integrity checks to agree:
 3. the SHA-256 of the bytes downloaded by OIG.
 
 Windows automatic updates use a current-user one-click NSIS install under the user profile, so routine application updates do not request UAC. Linux automatic updates use the AppImage release under `~/.local/opt`; the Debian package remains available for manual/system-managed installation. The updater never bypasses OS security: privileged backend bootstrap/console operations remain explicit, separate actions.
+
+### Windows v2.5.18: recovery when in-app update fails
+
+The **published Windows v2.5.18** client has a confirmed failure when its Updates button attempts to install v2.5.19: the old detached PowerShell update helper does not start. This was reproduced with the actual published installer and a real UI click on a disposable Windows Server 2025 x64 runner. It is **not** a successful automatic update and cannot be fixed retroactively inside the already installed v2.5.18 executable.
+
+For users of that affected version, the independently tested **out-of-app recovery** is:
+
+1. From the [official v2.5.19 GitHub release](https://github.com/GOD13emad/OpenInternetGateway/releases/tag/v2.5.19), download "OpenInternetGateway-Setup-2.5.19.exe" and "SHA256SUMS.txt". Do not use third-party mirrors.
+2. In PowerShell, run "Get-FileHash -LiteralPath '.\OpenInternetGateway-Setup-2.5.19.exe' -Algorithm SHA256" in the download directory. Require exact SHA-256 "761637b5d49f37858973300ec2e9b1bb2b32c684ebabe86f1e8718b4480685db", also consistent with the official release asset digest and "SHA256SUMS.txt". **Do not execute** the installer if any verification differs.
+3. Arrange a maintenance window if you depend on OIG's VPN. Explicit **Quit** disconnects the managed tunnel, so **do not expect uninterrupted VPN access** during manual recovery. Close the application normally and run the verified installer **as your current Windows user** without uninstalling the old version. Do not request elevation, disable Windows App Control/SmartScreen, or override a device security warning. If your policy blocks this unsigned release, stop and obtain an authorized, policy-compliant installation path.
+4. Relaunch OIG, confirm **2.5.19**, and check your own connection state and settings. If you disconnected to perform the upgrade, reconnect deliberately when ready. Avoid assuming that a saved preference proves a live tunnel.
+
+**Evidence and limits:** On a disposable Windows Server 2025 x64 runner, the exact official current-user NSIS installer replaced 2.5.18 with 2.5.19 (exit code 0), preserved a user-state marker, and left VPN intent off with zero protected routes. That test was intentionally disconnected and does **not** prove live-tunnel continuity, automatic repair of the old button, native Windows 11 x64 acceptance, or compatibility with restrictive Application Control policies. Publisher signing is deferred; SHA-256 checks provide integrity against the published release digest, not independent publisher authentication.
 
 ### Windows
 
@@ -158,7 +171,7 @@ See [SECURITY.md](SECURITY.md).
 
 Every published release includes `SHA256SUMS.txt`. The in-app updater verifies the selected release asset against both GitHub's published digest and `SHA256SUMS.txt`, re-hashes the downloaded bytes, then applies the user-space update and restarts the dashboard.
 
-No publicly trusted Authenticode signing credential is configured for v2.5.16, so Windows users installing manually should verify the published checksum. The in-app updater verifies GitHub digest + `SHA256SUMS.txt` + the downloaded bytes before applying an update.
+No publicly trusted Authenticode signing credential is configured for the published v2.5.19 Windows installer; verify the official release SHA-256 and respect the operating system security policy when installing manually. The in-app updater verifies GitHub digest + `SHA256SUMS.txt` + the downloaded bytes before applying an update.
 
 ## Scope
 

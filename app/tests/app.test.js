@@ -1298,6 +1298,22 @@ test('Windows first-connect OpenVPN prerequisite is pinned, verified and install
 });
 
 
+test('official 2.5.18 Windows recovery guidance preserves integrity and security boundaries',()=>{
+  const readme=fs.readFileSync(path.resolve(root,'../README.md'),'utf8');
+  assert.match(readme,/Latest published release \(checked 2026-10-18\): 2\.5\.19/);
+  const section=readme.split('### Windows v2.5.18: recovery when in-app update fails')[1]?.split('### Windows')[0];
+  assert.ok(section,'missing bounded recovery section');
+  assert.match(section,/confirmed failure/i);
+  assert.match(section,/releases\/tag\/v2\.5\.19/);
+  assert.match(section,/Get-FileHash -LiteralPath/);
+  assert.match(section,/761637b5d49f37858973300ec2e9b1bb2b32c684ebabe86f1e8718b4480685db/);
+  assert.match(section,/SHA256SUMS\.txt/);
+  assert.match(section,/Quit.*disconnects the managed tunnel/);
+  assert.match(section,/do not expect uninterrupted VPN access/i);
+  assert.match(section,/Do not request elevation, disable Windows App Control\/SmartScreen/);
+  assert.match(section,/does.*not.*prove live-tunnel continuity/);
+});
+
 test('public 2.5.18 failed updater has separate verified per-user recovery evidence',()=>{
   const script=fs.readFileSync(path.join(root,'tests/hosted-published-updater-ci.ps1'),'utf8');
   const start=script.indexOf('if($driverExit -eq 42){');
