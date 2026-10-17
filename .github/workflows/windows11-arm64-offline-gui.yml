@@ -173,6 +173,120 @@ jobs:
           }
           [IO.File]::WriteAllText((Join-Path $save 'oig-arm64-upgrade-receipt.json'),($proof|ConvertTo-Json -Depth 4)+[Environment]::NewLine,[Text.UTF8Encoding]::new($false))
           Write-Host 'WIN11_ARM64_OFFLINE_NSIS_2518_TO_2519_UPGRADE_PASS'
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+
+      - name: Exercise actual backend updater helper and GitHub checksum on disposable Windows 11 ARM64
+        shell: pwsh
+        timeout-minutes: 9
+        run: |
+          $ErrorActionPreference='Stop'
+          if ($env:RUNNER_ENVIRONMENT -ne 'github-hosted' -or $env:GITHUB_REPOSITORY -ne 'GOD13emad/OpenInternetGateway') { throw 'DISPOSABLE_RUNNER_ONLY' }
+          if ([Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString() -ne 'Arm64' -or
+              (Get-CimInstance Win32_OperatingSystem).Caption -notmatch 'Windows 11') { throw 'WINDOWS_11_ARM64_ONLY' }
+          $root=Join-Path $env:LOCALAPPDATA 'OpenInternetGateway'
+          $exe=Join-Path $env:LOCALAPPDATA 'Programs\open-internet-gateway\Open Internet Gateway.exe'
+          $pwsh=Join-Path (Split-Path -Parent $exe) 'resources\pwsh\pwsh.exe'
+          $state=Join-Path $root 'state\desired-state.json'
+          $marker=Join-Path $root 'state\ci-upgrade-preservation-marker.json'
+          if (!(Test-Path -LiteralPath $exe) -or !(Test-Path -LiteralPath $pwsh) -or
+              !(Test-Path -LiteralPath $state) -or !(Test-Path -LiteralPath $marker)) { throw 'PREEXISTING_INSTALLED_APP_REQUIRED' }
+          if ((Get-Item -LiteralPath $exe).VersionInfo.ProductVersion -notlike '2.5.19*') { throw 'CURRENT_INSTALLED_VERSION_CHANGED' }
+          $originalMarker=Get-Content -LiteralPath $marker -Raw
+          function Assert-Offline {
+            if ((Get-Content $state -Raw | ConvertFrom-Json).desired -ne 'off') { throw 'VPN_DESIRED_ON' }
+            if (@(Get-NetRoute -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { $_.DestinationPrefix -in @('0.0.0.0/1','128.0.0.0/1') }).Count) { throw 'PROTECTED_ROUTE_PRESENT' }
+            $svc=Get-Service OVPNConnectorService -ErrorAction SilentlyContinue
+            if ($svc -and $svc.Status -ne 'Stopped') { throw 'CONNECTOR_NOT_STOPPED' }
+          }
+          Assert-Offline
+          $src=Join-Path $env:RUNNER_TEMP 'oig-updater-backend-test.cjs'
+          if (Test-Path -LiteralPath $src) { throw 'STAGED_UPDATER_TEST_ALREADY_EXISTS' }
+          $js=@'
+          'use strict';
+          const fs=require('node:fs');
+          const path=require('node:path');
+          const Backend=require(path.resolve('app/src/main/platform-backend.js'));
+          const root=path.join(process.env.LOCALAPPDATA,'OpenInternetGateway');
+          const program=path.join(process.env.LOCALAPPDATA,'Programs','open-internet-gateway');
+          const exe=path.join(program,'Open Internet Gateway.exe');
+          const result=path.join(process.env.RUNNER_TEMP,'oig-updater-api-result.json');
+          (async()=>{
+            // Simulated source version; the tested updater METHOD implementations are exact candidate code.
+            const b=new Backend({version:'2.5.18',resourcesPath:path.join(program,'resources'),
+              appPath:path.resolve('app'),userData:root,emit:()=>{}});
+            b.platform='win32';b.backendRoot=root;
+            const info=await b.updateInfo(true);
+            if(info.currentVersion!=='2.5.18'||info.latestVersion!=='2.5.19'||
+              !info.updateAvailable||!info.checksumsUrl||
+              info.asset?.name!=='OpenInternetGateway-Setup-2.5.19.exe'||
+              info.asset.sha256!=='761637b5d49f37858973300ec2e9b1bb2b32c684ebabe86f1e8718b4480685db')
+              throw Error('GITHUB_UPDATE_INFO_RELEASE_CONTRACT_FAILED');
+            const downloaded=await b.downloadUpdate();
+            if(!downloaded.ok||!fs.existsSync(downloaded.path)|| downloaded.sha256!==info.asset.sha256)
+              throw Error('GITHUB_RELEASE_CHECKSUM_DOWNLOAD_FAILED');
+            const applied=await b.launchDownloadedUpdate(downloaded,{appPid:process.pid,currentExecutable:exe});
+            if(!applied.ok||!applied.applying||!applied.restart||applied.installScope!=='current-user')
+              throw Error('UPDATER_HELPER_NOT_LAUNCHED');
+            fs.writeFileSync(result,JSON.stringify({
+              sourceVersionOverride:'2.5.18',
+              sourceVersionOverridePurpose:'Exercise candidate 2.5.19 backend update methods against public release v2.5.19; not an actual user GUI click or real older client code',
+              sourceBackendCommit:'dab919f66b555a620af8bf7c7716ccd1a33429d7',
+              latestVersion:info.latestVersion,
+              sourceChecksum:info.asset.sha256,
+              publicReleaseDownloadBytes:fs.statSync(downloaded.path).size,
+              apiInfoVerified:true,checksumVerified:true,
+              launchReturnedApplying:applied.applying,helperResult:applied.resultFile
+            })+'\n',{encoding:'utf8'});
+          })().catch(e=>{console.error(e.stack||String(e));process.exitCode=1});
+          '@
+          [IO.File]::WriteAllText($src,$js,[Text.UTF8Encoding]::new($false))
+          node --check $src
+          if ($LASTEXITCODE -ne 0) { throw 'NODE_HARNESS_SYNTAX_FAILED' }
+          & node $src
+          if ($LASTEXITCODE -ne 0) { throw 'ACTUAL_BACKEND_UPDATER_FAILED' }
+          $nodeReceipt=Join-Path $env:RUNNER_TEMP 'oig-updater-api-result.json'
+          if (!(Test-Path $nodeReceipt -PathType Leaf)) { throw 'BACKEND_UPDATER_RESULT_MISSING' }
+          $n=Get-Content $nodeReceipt -Raw|ConvertFrom-Json
+          if (!$n.apiInfoVerified -or !$n.checksumVerified -or !$n.launchReturnedApplying -or
+              $n.sourceChecksum -ne '761637b5d49f37858973300ec2e9b1bb2b32c684ebabe86f1e8718b4480685db') { throw 'BACKEND_UPDATER_METADATA_UNVERIFIED' }
+          $result=$n.helperResult
+          $deadline=(Get-Date).AddMinutes(4)
+          while (!(Test-Path -LiteralPath $result -PathType Leaf) -and (Get-Date) -lt $deadline) { Start-Sleep -Seconds 2 }
+          if (!(Test-Path -LiteralPath $result -PathType Leaf)) { throw 'UPDATER_HELPER_RESULT_TIMED_OUT' }
+          $r=Get-Content $result -Raw|ConvertFrom-Json
+          if ($r.ok -ne $true -or $r.version -ne '2.5.19' -or
+              $r.sha256 -ne $n.sourceChecksum -or $r.installScope -ne 'current-user' -or
+              $r.exitCode -ne 0 -or !(Test-Path $r.target) -or
+              (Get-Item $r.target).VersionInfo.ProductVersion -notlike '2.5.19*') { throw 'UPDATER_INSTALL_RESULT_NOT_ACCEPTED' }
+          if ((Get-Content -Raw $marker) -ne $originalMarker) { throw 'BACKEND_UPDATER_LOST_USER_STATE' }
+          Assert-Offline
+          # The real updater restarts the installed app; terminate only on this disposable runner.
+          Get-CimInstance Win32_Process -Filter "Name='Open Internet Gateway.exe'" -ErrorAction SilentlyContinue |
+            ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+          $receipt=[ordered]@{
+            scope='Disposable Windows 11 Enterprise ARM64, x64 package under emulation'
+            sourceCommit='dab919f66b555a620af8bf7c7716ccd1a33429d7'
+            testHeadCommit=$env:GITHUB_SHA
+            backendRealMethods=@('updateInfo','downloadUpdate','launchDownloadedUpdate')
+            sourceVersionOverride='2.5.18'
+            latestRelease='2.5.19'
+            publicReleaseChecksumVerified=$true
+            publicAssetSha256=$n.sourceChecksum
+            downloadedBytes=$n.publicReleaseDownloadBytes
+            actualPwshUpdateHelper=$true
+            installerExitCode=$r.exitCode
+            resultSha256=(Get-FileHash -LiteralPath $result -Algorithm SHA256).Hash
+            markerPreserved=$true
+            offlineAfter=$true
+            UIUpdateButtonClicked=$false
+            runningOldInstalledAppUpgraded=$false
+            ownerWin11X64Acceptance=$false
+          }
+          [IO.File]::WriteAllText((Join-Path $env:RUNNER_TEMP 'oig-backend-updater-e2e-receipt.json'),
+              ($receipt|ConvertTo-Json -Depth 5)+[Environment]::NewLine,[Text.UTF8Encoding]::new($false))
+          Write-Host 'WIN11_ARM64_ACTUAL_BACKEND_GITHUB_UPDATE_INSTALL_HELPER_PASS'
       - uses: actions/upload-artifact@v7
         if: always()
         with:
@@ -181,6 +295,8 @@ jobs:
             ${{ runner.temp }}/oig-arm64-gui-receipt.json
             ${{ runner.temp }}/oig-arm64-provenance.json
             ${{ runner.temp }}/oig-arm64-upgrade-receipt.json
+            ${{ runner.temp }}/oig-backend-updater-e2e-receipt.json
+            ${{ runner.temp }}/oig-updater-api-result.json
             ${{ runner.temp }}/oig-installed-dashboard.png
             ${{ runner.temp }}/oig-desktop-navigation-probe.json
           retention-days: 7
