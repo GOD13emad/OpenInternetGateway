@@ -132,6 +132,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      attestations: read
     steps:
       - uses: actions/checkout@v7
       - uses: actions/download-artifact@v8
