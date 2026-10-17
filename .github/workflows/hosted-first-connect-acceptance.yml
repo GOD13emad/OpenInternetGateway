@@ -113,14 +113,7 @@ jobs:
           $receipt=Join-Path $env:RUNNER_TEMP 'oig-first-connect-receipt.json'
           ./app/tests/hosted-first-connect.ps1 -Installer $exe -Receipt $receipt -ExpectedSha256 $sha
           if($LASTEXITCODE -ne 0){throw 'FIRST_CONNECT_NOT_ACCEPTED'}
-      - name: Installed Windows desktop dashboard screenshot after verified rollback
-        shell: pwsh
-        timeout-minutes: 3
-        run: |
-          $ErrorActionPreference='Stop'
-          $receipt=Join-Path $env:RUNNER_TEMP 'oig-desktop-smoke-receipt.json'
-          ./app/tests/hosted-desktop-screenshot.ps1 -Receipt $receipt
-          if($LASTEXITCODE -ne 0){throw 'INSTALLED_DESKTOP_RENDER_FAILED'}
+
       - uses: actions/upload-artifact@v7
         if: always()
         with:
@@ -129,7 +122,5 @@ jobs:
             ${{ runner.temp }}/oig-first-connect-receipt.json
             ${{ runner.temp }}/oig-first-connect.stdout.log
             ${{ runner.temp }}/oig-first-connect.stderr.log
-            ${{ runner.temp }}/oig-desktop-smoke-receipt.json
-            ${{ runner.temp }}/oig-installed-dashboard.png
           retention-days: 7
           if-no-files-found: warn

@@ -53,6 +53,26 @@ jobs:
           $proc = Start-Process -FilePath $exe -ArgumentList @('tests/native-electron-ipc-smoke.cjs') -NoNewWindow -Wait -PassThru
           if ($proc.ExitCode -ne 0) { throw "ELECTRON_WINDOWS_IPC_SMOKE_EXIT_$($proc.ExitCode)" }
       - run: npm run dist:win
+      - name: Installed desktop GUI render and safe exit on disposable Windows, no VPN
+        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+        shell: pwsh
+        timeout-minutes: 7
+        run: |
+          $ErrorActionPreference='Stop'
+          $installer=(Resolve-Path 'dist/OpenInternetGateway-Setup-2.5.19.exe').Path
+          $sha=(Get-FileHash -LiteralPath $installer -Algorithm SHA256).Hash.ToLowerInvariant()
+          $receipt=Join-Path $env:RUNNER_TEMP 'oig-desktop-smoke-receipt.json'
+          ./tests/hosted-desktop-screenshot.ps1 -Installer $installer -ExpectedSha256 $sha -Receipt $receipt
+          if($LASTEXITCODE -ne 0){throw 'INSTALLED_WINDOWS_DESKTOP_SMOKE_FAILED'}
+      - uses: actions/upload-artifact@v7
+        if: always() && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+        with:
+          name: windows-desktop-smoke-evidence
+          path: |
+            ${{ runner.temp }}/oig-desktop-smoke-receipt.json
+            ${{ runner.temp }}/oig-installed-dashboard.png
+          retention-days: 7
+          if-no-files-found: warn
       - uses: actions/upload-artifact@v7
         with:
           name: windows-installer

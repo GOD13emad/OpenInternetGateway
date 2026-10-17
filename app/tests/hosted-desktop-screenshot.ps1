@@ -1,5 +1,5 @@
 [CmdletBinding()]
-param([Parameter(Mandatory=$true)][string]$Receipt)
+param([Parameter(Mandatory=$true)][string]$Receipt,[string]$Installer,[string]$ExpectedSha256)
 $ErrorActionPreference='Stop'
 Set-StrictMode -Version Latest
 
@@ -11,8 +11,30 @@ if((Get-CimInstance Win32_ComputerSystem).PartOfDomain){throw 'DOMAIN_JOINED_MAC
 $backend=Join-Path $env:LOCALAPPDATA 'OpenInternetGateway'
 $program=Join-Path $env:LOCALAPPDATA 'Programs\open-internet-gateway'
 $exe=Join-Path $program 'Open Internet Gateway.exe'
-if(-not(Test-Path -LiteralPath $exe -PathType Leaf)){throw 'INSTALLED_DESKTOP_EXE_MISSING'}
 $desired=Join-Path $backend 'state\desired-state.json'
+
+# A fresh installer is used by the standard Windows Build job, which must
+# not depend on any OpenVPN relay or start a VPN service.
+$installerHash=''
+if($Installer) {
+  $existingRoutes=@(Get-NetRoute -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object {$_.DestinationPrefix -in @('0.0.0.0/1','128.0.0.0/1')})
+  if($existingRoutes.Count -ne 0 -or (Get-Service OVPNConnectorService -ErrorAction SilentlyContinue)){
+    throw 'DESKTOP_INSTALL_REQUIRES_CLEAN_NO_TUNNEL_RUNNER'
+  }
+  if(Test-Path -LiteralPath $exe){throw 'DESKTOP_INSTALL_NOT_FRESH'}
+  if(-not(Test-Path -LiteralPath $Installer -PathType Leaf)){throw 'DESKTOP_INSTALLER_MISSING'}
+  if($ExpectedSha256 -notmatch '^[0-9a-fA-F]{64}$'){throw 'DESKTOP_INSTALLER_DIGEST_INVALID'}
+  $installerHash=(Get-FileHash -LiteralPath $Installer -Algorithm SHA256).Hash.ToLowerInvariant()
+  if($installerHash -ne $ExpectedSha256.ToLowerInvariant()){throw 'DESKTOP_INSTALLER_DIGEST_MISMATCH'}
+  $setup=Start-Process -FilePath (Resolve-Path $Installer).Path -ArgumentList '/S' -PassThru
+  if(-not $setup.WaitForExit(180000)){throw 'DESKTOP_INSTALLER_TIMEOUT'}
+  if($setup.ExitCode -ne 0){throw ('DESKTOP_INSTALLER_EXIT_'+$setup.ExitCode)}
+  if(-not(Test-Path -LiteralPath $exe -PathType Leaf)){throw 'DESKTOP_INSTALLER_EXE_NOT_FOUND'}
+  if(Test-Path -LiteralPath $desired){throw 'DESKTOP_INSTALL_EXPECTED_CLEAN_STATE'}
+  New-Item -ItemType Directory -Force -Path (Split-Path $desired -Parent)|Out-Null
+  [ordered]@{desired='off';at=(Get-Date).ToString('o')}|ConvertTo-Json|Set-Content -LiteralPath $desired -Encoding UTF8
+}
+if(-not(Test-Path -LiteralPath $exe -PathType Leaf)){throw 'INSTALLED_DESKTOP_EXE_MISSING'}
 
 function Assert-Offline {
   $routes=@(Get-NetRoute -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object {$_.DestinationPrefix -in @('0.0.0.0/1','128.0.0.0/1')})
@@ -59,6 +81,7 @@ try{
     pngBytes=$bytes.Length
     imageSha256=(Get-FileHash -LiteralPath $png -Algorithm SHA256).Hash.ToLowerInvariant()
     exeSha256=(Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash.ToLowerInvariant()
+    verifiedInstallerSha256=$installerHash
     disconnectedBeforeAndAfter=$true
     vpnConnectionsAttempted=$false
     endUserWindows10Or11GuiAcceptance=$false

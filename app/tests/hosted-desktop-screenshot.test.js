@@ -24,14 +24,24 @@ test('installed Windows screenshot smoke is limited to a disposable runner and a
   assert.doesNotMatch(script, /Invoke-Connector|Connect-OpenInternet|\/Run \/TN|Start-Service|Set-NetRoute/);
 });
 
-test('review-only hosted acceptance runs desktop smoke after native Connect + Disconnect', () => {
-  const workflow = fs.readFileSync(path.resolve(root, '../.github/workflows/hosted-first-connect-acceptance.yml'), 'utf8');
-  const connectedAt = workflow.indexOf('First live Connect, diagnostics, and bounded rollback on disposable runner');
-  const desktopAt = workflow.indexOf('Installed Windows desktop dashboard screenshot after verified rollback');
-  assert.ok(connectedAt >= 0 && desktopAt > connectedAt);
-  assert.match(workflow, /app\/tests\/hosted-desktop-screenshot\.ps1/);
-  assert.match(workflow, /github\.head_ref == 'review\/firstconnect-security-20261017'/);
-  assert.match(workflow, /runs-on: windows-2025/);
+test('standard Windows build validates installed GUI independently of the live VPN runner', () => {
+  const workflow = fs.readFileSync(path.resolve(root, '../.github/workflows/build.yml'), 'utf8');
+  const native = fs.readFileSync(path.resolve(root, '../.github/workflows/hosted-first-connect-acceptance.yml'), 'utf8');
+  const packaged = workflow.indexOf('npm run dist:win');
+  const desktopAt = workflow.indexOf('Installed desktop GUI render and safe exit on disposable Windows, no VPN');
+  assert.ok(packaged >= 0 && desktopAt > packaged, 'installed GUI smoke must use the built installer');
+  assert.match(workflow, /tests\/hosted-desktop-screenshot\.ps1 -Installer/);
+  assert.match(workflow, /github\.event\.pull_request\.head\.repo\.full_name == github\.repository/);
+  assert.match(workflow, /name: windows-desktop-smoke-evidence/);
+  assert.doesNotMatch(native, /Installed Windows desktop dashboard screenshot after verified rollback/);
+});
+
+test('desktop screenshot fresh installer is checked by hash and its desired state stays off', () => {
+  assert.match(script, /DESKTOP_INSTALLER_DIGEST_MISMATCH/);
+  assert.match(script, /Start-Process -FilePath \(Resolve-Path \$Installer\)\.Path/);
+  assert.match(script, /\[ordered\]@\{desired='off'/);
+  assert.match(script, /DESKTOP_INSTALL_REQUIRES_CLEAN_NO_TUNNEL_RUNNER/);
+  assert.match(script, /verifiedInstallerSha256=\$installerHash/);
 });
 
 test('Windows dashboard capture uses a single-pass safe quit instead of recursive before-quit retry', () => {
