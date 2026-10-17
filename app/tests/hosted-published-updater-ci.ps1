@@ -101,6 +101,10 @@ if($driverExit -eq 42){
   }
   [IO.File]::WriteAllText((Join-Path $folder 'published-old-real-update-e2e-result.json'),($proof|ConvertTo-Json -Depth 4)+[Environment]::NewLine,[Text.UTF8Encoding]::new($false))
   Write-Host ('NEGATIVE_CONTROL_DETECTOR_PASS_PRODUCT_LEGACY_AUTO_UPDATE_FAIL='+($proof|ConvertTo-Json -Depth 4 -Compress))
+  # Clear only the expected sentinel exit 42 after a fully validated negative
+  # receipt. GitHub's pwsh wrapper otherwise propagates stale LASTEXITCODE
+  # even though this diagnostic script returned successfully.
+  $global:LASTEXITCODE=0
   return
 }
 if($driverExit -ne 0){throw ('AUTHENTIC_OLD_GUI_DRIVER_INFRASTRUCTURE_FAILURE_'+$driverExit)}
