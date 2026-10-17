@@ -391,7 +391,7 @@ test('Linux direct ISP path rejects tunnel defaults and stale exact request file
   assert.match(block,/nmcli -t -f DEVICE,TYPE,STATE/);
   assert.match(block,/ethernet/);
   assert.match(block,/wifi/);
-  assert.match(block,/tun\|tap\|wg\|tailscale\|ppp\|zt\|vpn/);
+  assert.match(backend,/tun\|tap\|wg\|tailscale\|ppp\|zt\|vpn/);
   assert.match(backend,/fs\.unlinkSync\(path\.join\(stable, 'state', 'exact-profile\.request'\)\)/);
   const connect=backend.slice(backend.indexOf('async connectProfile'),backend.indexOf('async _directInternetPath'));
   assert.doesNotMatch(connect,/this\._writeJson\(request/);
@@ -494,6 +494,36 @@ test('fast Test all probes relays in parallel and table sorting is explicit',()=
   for(const key of ['country','relay','protocol','sourcePing','livePing','download','upload','status']) assert.match(html,new RegExp('data-sort="'+key+'"'));
 });
 
+test('Linux direct ISP selects a connected physical NIC with a usable best-metric default route',()=>{
+  const Backend=require(path.join(root,'src/main/platform-backend.js'));
+  const backend=new Backend({version:'2.5.19'});
+  const wired={name:'enp1s0',type:'ethernet',state:'connected',hardware:true};
+  const wifi={name:'wlp2s0',type:'wifi',state:'connected',hardware:true};
+  const routes=[
+    {dst:'default',gateway:'192.168.20.1',dev:'wlp2s0',metric:600},
+    {dst:'default',gateway:'192.168.20.1',dev:'enp1s0',metric:100},
+    {dst:'default',gateway:'100.64.0.1',dev:'tun0',metric:1}
+  ];
+  const route=backend._selectLinuxPhysicalDefaultRoute(routes,[wifi,wired]);
+  assert.equal(route.interface,'enp1s0','lowest-metric physical default, not first enumerated connected NIC');
+  assert.equal(route.gateway,'192.168.20.1');
+  assert.equal(route.curlInterface,'if!enp1s0');
+  assert.equal(backend._selectLinuxPhysicalDefaultRoute(routes.filter(r=>r.dev!=='enp1s0'),[wired,wifi]).interface,'wlp2s0',
+    'fallback to secondary Wi-Fi default when first Ethernet has no default');
+  const rogue={dst:'default',gateway:'192.168.20.1',dev:'evil;touch /tmp/oig',metric:0};
+  assert.equal(backend._selectLinuxPhysicalDefaultRoute([rogue,...routes],[wired,wifi]).interface,'enp1s0',
+    'never parse/shell interpolate device names from route results');
+  for(const bad of [
+    [{...wired,hardware:false},wifi],
+    [{...wired,state:'disconnected'},wifi],
+    [{...wired,type:'tun'},wifi]
+  ]) assert.equal(backend._selectLinuxPhysicalDefaultRoute(routes,bad).interface,'wlp2s0');
+  assert.throws(()=>backend._selectLinuxPhysicalDefaultRoute(routes,[{...wired,hardware:false}]),/physical|default|route/i);
+  assert.throws(()=>backend._selectLinuxPhysicalDefaultRoute(
+    [{dst:'default',dev:'tun0',gateway:'100.64.0.1',metric:0}],[wired,wifi]),/physical|default|route/i);
+  assert.throws(()=>backend._selectLinuxPhysicalDefaultRoute(
+    [{dst:'default',dev:'enp1s0',gateway:'not-an-ip',metric:0}],[wired]),/physical|default|route/i);
+});
 test('Windows direct ISP route selection rejects split-tunnel VPN, nonphysical default and spoofed source',()=>{
   const Backend=require(path.join(root,'src/main/platform-backend.js'));
   const backend=new Backend({version:'2.5.19'});
@@ -530,7 +560,7 @@ test('direct ISP benchmark binds physical Internet and bypasses proxies',()=>{
   assert.match(backend,/async _directInternetPath\(\)/);
   assert.match(backend,/--noproxy','\*','--interface/);
   assert.match(backend,/curlInterface: 'host!' \+ localIP/);
-  assert.match(backend,/curlInterface: 'if!' \+ iface/);
+  assert.match(backend,/curlInterface: 'if!' \+ selected\.dev/);
   assert.match(backend,/async benchmarkDirectInternet\(\)/);
   assert.match(backend,/mode: 'direct-physical-internet'/);
   assert.match(backend,/downloadMbps/);

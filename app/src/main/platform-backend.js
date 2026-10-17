@@ -699,6 +699,40 @@ class Backend {
     return { ok: true, profile, status };
   }
 
+  _isLinuxPhysicalNic(name) {
+    // Require a kernel-backed NIC rather than a tun/tap/virtual interface.
+    // Read-only sysfs inspection, separate from route selection so isolated
+    // tests can simulate physical uplinks without probing the host.
+    return typeof name === 'string'
+      && /^[A-Za-z0-9_][A-Za-z0-9_.:-]{0,14}$/.test(name)
+      && fs.existsSync(path.join('/sys/class/net', name, 'device'));
+  }
+  _selectLinuxPhysicalDefaultRoute(routes, devices) {
+    const safeName = name => typeof name === 'string'
+      && /^[A-Za-z0-9_][A-Za-z0-9_.:-]{0,14}$/.test(name)
+      && !/^(tun|tap|wg|tailscale|ppp|zt|vpn)/i.test(name);
+    const connectedPhysical = new Set((Array.isArray(devices) ? devices : [])
+      .filter(d => d && safeName(d.name)
+        && (d.type === 'ethernet' || d.type === 'wifi')
+        && d.state === 'connected' && d.hardware === true)
+      .map(d => d.name));
+    const candidates = (Array.isArray(routes) ? routes : []).filter(route =>
+      route?.dst === 'default' && connectedPhysical.has(route.dev)
+      && net.isIP(route.gateway) === 4 && route.gateway !== '0.0.0.0'
+      && (route.metric == null || (Number.isInteger(Number(route.metric)) && Number(route.metric) >= 0)));
+    if (!candidates.length) {
+      throw new Error('No usable connected physical IPv4 default route exists for direct ISP testing.');
+    }
+    candidates.sort((a, b) => Number(a.metric ?? 0) - Number(b.metric ?? 0));
+    const selected = candidates[0];
+    return {
+      interface: selected.dev,
+      index: 0,
+      gateway: selected.gateway,
+      curlInterface: 'if!' + selected.dev,
+      bindMode: 'physical-interface'
+    };
+  }
   _selectWindowsPhysicalRoute(rows) {
     const routes = Array.isArray(rows) ? rows : (rows && typeof rows === 'object' ? [rows] : []);
     // On Windows, curl host! binds a source IP; unlike Linux if!, it cannot
@@ -754,35 +788,31 @@ class Backend {
     }
 
     if (this.platform === 'linux') {
-      // A connected VPN often installs the lowest-metric default route on tun0.
-      // Direct-ISP tests must instead bind a real connected Ethernet/Wi-Fi NIC.
-      const routeScript = [
-        "iface=$(nmcli -t -f DEVICE,TYPE,STATE device status 2>/dev/null | awk -F: '$3==\"connected\" && ($2==\"ethernet\" || $2==\"wifi\"){print $1;exit}')",
-        "if [ -n \"$iface\" ]; then ip -4 route show default | grep -F \" dev $iface \" | head -n1; else ip -4 route show default | grep -Ev ' dev (tun|tap|wg|tailscale|ppp|zt|vpn)[^ ]*' | head -n1; fi"
-      ].join('; ');
-      const route = await run('/bin/bash', ['-lc', routeScript], { timeout: 5000 });
-      const line = String(route.stdout || '').trim();
-      const iface = (line.match(/\bdev\s+(\S+)/) || [])[1] || '';
-      const gateway = (line.match(/\bvia\s+(\S+)/) || [])[1] || '';
-      // Linux network interface names are kernel-bounded (IFNAMSIZ: 15 bytes).
-      // Reject option-like and shell metacharacters before using the selected NIC.
-      if (!/^[A-Za-z0-9_][A-Za-z0-9_.:-]{0,14}$/.test(iface)
-          || /^(tun|tap|wg|tailscale|ppp|zt|vpn)/i.test(iface)) {
-        throw new Error('No safe physical IPv4 Internet route was found.');
-      }
-      // Pass the NIC as a literal argv element: never interpolate an interface
-      // name into bash -lc (where quote/substitution syntax can be reinterpreted).
-      const addr = await run('ip', ['-4','-o','addr','show','dev',iface], { timeout: 5000 });
+      // Enumerate ALL connected physical Ethernet/Wi-Fi uplinks, then match
+      // them to real kernel IPv4 default routes. A connected NIC may have no
+      // usable default route while a secondary Wi-Fi NIC is fully functional.
+      // No shell interpolation, no NetworkManager mutation, no route changes.
+      const [nmcli, routes] = await Promise.all([
+        run('nmcli', ['-t','-f','DEVICE,TYPE,STATE','device','status'], { timeout: 5000 }),
+        run('ip', ['-j','-4','route','show','default'], { timeout: 5000 })
+      ]);
+      // nmcli -t -f DEVICE,TYPE,STATE device status
+      const devices = String(nmcli.stdout || '').split(/\r?\n/).map(line => {
+        const fields = line.match(/^([A-Za-z0-9_][A-Za-z0-9_.:-]{0,14}):(ethernet|wifi):connected$/);
+        if (!fields) return null;
+        const name = fields[1];
+        return {
+          name, type: fields[2], state: 'connected',
+          hardware: this._isLinuxPhysicalNic(name)
+        };
+      }).filter(Boolean);
+      const selected = this._selectLinuxPhysicalDefaultRoute(JSON.parse(routes.stdout || '[]'), devices);
+      const addr = await run('ip', ['-4','-o','addr','show','dev',selected.interface], { timeout: 5000 });
       const localIP = (String(addr.stdout || '').match(/\binet\s+((?:\d{1,3}\.){3}\d{1,3})\/\d{1,2}\b/) || [])[1] || '';
-      if (!localIP) throw new Error('Physical Internet interface has no IPv4 address.');
-      return {
-        interface: iface,
-        index: 0,
-        localIP,
-        gateway,
-        curlInterface: 'if!' + iface,
-        bindMode: 'physical-interface'
-      };
+      if (net.isIP(localIP) !== 4 || localIP === '0.0.0.0' || localIP.startsWith('169.254.')) {
+        throw new Error('Selected physical Internet interface has no usable IPv4 address.');
+      }
+      return { ...selected, localIP };
     }
 
     throw new Error('Direct Internet test is supported only on Windows and Linux.');
