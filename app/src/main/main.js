@@ -3,6 +3,7 @@ const { spawn } = require('child_process');
 const path = require('path');
 const { pathToFileURL } = require('node:url');
 const { protectDashboardNavigation, assertDashboardIpcSender, trustedReleaseUrl } = require('./dashboard-security');
+const { probeReadOnlyNavigation } = require('./dashboard-navigation-probe');
 const fs = require('fs');
 const Backend = require('./platform-backend');
 
@@ -59,8 +60,38 @@ function createWindow({ showWhenReady = !startInBackground } = {}) {
       setTimeout(async () => {
         try {
           if (!isLiveWindow(win) || win.webContents.isDestroyed()) return;
+          // The optional CI-only probe clicks navigation controls, never VPN
+          // controls, and uses the same isolated installed Electron window.
+          const probePath = process.platform === 'win32'
+            && process.env.OIG_CAPTURE_ONLY === '1'
+            ? process.env.OIG_DESKTOP_PROBE_RECEIPT : '';
+          const navigation = probePath
+            ? await probeReadOnlyNavigation(win.webContents)
+            : null;
           const image = await win.webContents.capturePage();
           fs.writeFileSync(process.env.OIG_CAPTURE_PATH, image.toPNG());
+          if (probePath) {
+            if (!win.isVisible()) throw new Error('DESKTOP_NOT_VISIBLE_BEFORE_CLOSE');
+            win.close();
+            if (!isLiveWindow(win) || win.isVisible()) throw new Error('CLOSE_TO_TRAY_DID_NOT_HIDE');
+            fs.writeFileSync(probePath, JSON.stringify({
+              schema: 'oig-offline-installed-ui-navigation-tray-v1',
+              pass: true,
+              navigation,
+              closeToTray: true,
+              windowStillAlive: true,
+              vpnControlInvoked: false,
+              at: new Date().toISOString()
+            }) + '\n');
+          }
+        } catch (error) {
+          console.error('OIG_DESKTOP_INTERACTION_SMOKE_FAILED', error);
+          if (process.env.OIG_CAPTURE_ONLY === '1' && process.platform === 'win32') {
+            // Force non-zero on CI-only capture failure; do not convert a
+            // renderer-probe error into a successful screenshot receipt.
+            app.exit(41);
+            return;
+          }
         } finally {
           if (process.env.OIG_CAPTURE_ONLY === '1') {
             // On Windows a direct app.quit() is canceled by before-quit and

@@ -85,3 +85,23 @@ test('hosted first-connect supports explicit opt-in from canonical main without 
   assert.match(boundary, /RUNNER_ENVIRONMENT/);
   assert.match(boundary, /GITHUB_REPOSITORY/);
 });
+test('offline installed GUI probe exercises Settings and Overview navigation, then closes to tray', () => {
+  const main=fs.readFileSync(path.join(root,'src/main/main.js'),'utf8');
+  const probe=fs.readFileSync(path.join(root,'src/main/dashboard-navigation-probe.js'),'utf8');
+  const workflow=fs.readFileSync(path.join(root,'../.github/workflows/build.yml'),'utf8');
+  assert.match(probe, /settings\.click\(\)/);
+  assert.match(probe, /find\('overview'\)\.click\(\)/);
+  assert.match(probe, /executeJavaScript\(navigationScript, true\)/);
+  assert.match(probe, /navigationClicked: true, powerControlInvoked: false/);
+  assert.doesNotMatch(probe.slice(probe.indexOf('const navigationScript')), /gateway\.action|powerButton\.click|connect-profile|update-download/);
+  assert.match(main, /await probeReadOnlyNavigation\(win\.webContents\)/);
+  assert.match(main, /win\.close\(\);\s*if \(!isLiveWindow\(win\) \|\| win\.isVisible\(\)\)/);
+  assert.match(main, /app\.exit\(41\)/);
+  assert.match(main, /OIG_DESKTOP_PROBE_RECEIPT/);
+  assert.match(script, /INSTALLED_DESKTOP_NAVIGATION_TRAY_PROBE_FAILED/);
+  assert.match(script, /navigationAndTrayProbe=\$probe/);
+  assert.match(script, /Assert-Offline\s+\$evidence=/);
+  assert.match(workflow, /evidence\.navigationAndTrayProbe\.pass -ne \$true/);
+  assert.match(workflow, /evidence\.navigationAndTrayProbe\.closeToTray -ne \$true/);
+  assert.match(workflow, /oig-desktop-navigation-probe\.json/);
+});

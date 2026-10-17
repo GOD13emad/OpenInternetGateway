@@ -69,7 +69,12 @@ jobs:
           $evidence=Get-Content -LiteralPath $receipt -Raw|ConvertFrom-Json
           if($evidence.pass -ne $true -or $evidence.disconnectedBeforeAndAfter -ne $true -or
              $evidence.vpnConnectionsAttempted -ne $false -or
-             $evidence.verifiedInstallerSha256 -ne $sha){throw 'INSTALLED_DESKTOP_ACCEPTANCE_NOT_VERIFIED'}
+             $evidence.verifiedInstallerSha256 -ne $sha -or
+             $evidence.navigationAndTrayProbe.pass -ne $true -or
+             $evidence.navigationAndTrayProbe.closeToTray -ne $true -or
+             $evidence.navigationAndTrayProbe.navigation.powerControlInvoked -ne $false){
+               throw 'INSTALLED_DESKTOP_ACCEPTANCE_NOT_VERIFIED'
+             }
       - uses: actions/upload-artifact@v7
         if: always() && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
         with:
@@ -77,6 +82,7 @@ jobs:
           path: |
             ${{ runner.temp }}/oig-desktop-smoke-receipt.json
             ${{ runner.temp }}/oig-installed-dashboard.png
+            ${{ runner.temp }}/oig-desktop-navigation-probe.json
           retention-days: 7
           if-no-files-found: warn
       - uses: actions/upload-artifact@v7
