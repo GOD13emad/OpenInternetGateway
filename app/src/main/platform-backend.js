@@ -3,6 +3,7 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const https = require('https');
+const net = require('net');
 const crypto = require('crypto');
 
 const WINDOWS_OPENVPN_CONNECT = Object.freeze({
@@ -698,28 +699,58 @@ class Backend {
     return { ok: true, profile, status };
   }
 
+  _selectWindowsPhysicalRoute(rows) {
+    const routes = Array.isArray(rows) ? rows : (rows && typeof rows === 'object' ? [rows] : []);
+    // On Windows, curl host! binds a source IP; unlike Linux if!, it cannot
+    // force physical-device routing. Fail closed if a VPN full-tunnel route is
+    // active rather than displaying tunnel throughput as "Direct ISP".
+    if (routes.some(route => ['0.0.0.0/1', '128.0.0.0/1'].includes(route?.prefix))) {
+      throw new Error('Direct ISP test is unavailable while VPN full-tunnel split routes are active. Disconnect VPN before testing physical Internet.');
+    }
+    const defaults = routes.filter(route => route?.prefix === '0.0.0.0/0');
+    if (!defaults.length) throw new Error('No active physical IPv4 default route is available.');
+    const metric = route => Number(route.routeMetric) + Number(route.interfaceMetric);
+    if (defaults.some(route => !Number.isFinite(metric(route)))) {
+      throw new Error('Direct ISP default-route metrics could not be verified.');
+    }
+    defaults.sort((a, b) => metric(a) - metric(b));
+    const selected = defaults[0];
+    const localIP = String(selected.ip || '');
+    const gateway = String(selected.gateway || '');
+    const alias = String(selected.alias || '');
+    if (selected.hardware !== true || selected.status !== 'Up'
+        || !Number.isInteger(Number(selected.index)) || Number(selected.index) < 1
+        || !alias || /OpenVPN|TAP|Wintun|OIG|WireGuard|Cloudflare|vEthernet|Loopback|tunnel|VPN/i.test(alias)
+        || net.isIP(localIP) !== 4 || localIP.startsWith('169.254.')
+        || localIP.startsWith('127.') || localIP === '0.0.0.0'
+        || net.isIP(gateway) !== 4 || gateway === '0.0.0.0') {
+      throw new Error('Direct ISP test cannot verify a safe physical default route. Disconnect VPN and retry.');
+    }
+    return {
+      interface: alias,
+      index: Number(selected.index),
+      localIP,
+      gateway,
+      curlInterface: 'host!' + localIP,
+      bindMode: 'physical-ip-verified-default'
+    };
+  }
+
   async _directInternetPath() {
     if (this.platform === 'win32') {
+      // Read-only snapshot. Never add/delete host routes, change adapter
+      // metrics, start VPN or request Windows administrator privileges.
       const script = [
-        "$routes=@(Get-NetRoute -AddressFamily IPv4 -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue|Where-Object{$_.InterfaceAlias -notmatch 'OpenVPN|TAP|Wintun|OIG|WireGuard|Cloudflare|vEthernet|Loopback'}|Sort-Object RouteMetric,InterfaceMetric)",
-        "$r=$routes|Where-Object{(Get-NetAdapter -InterfaceIndex $_.InterfaceIndex -ErrorAction SilentlyContinue).HardwareInterface}|Select-Object -First 1",
-        "if(-not $r){$r=$routes|Select-Object -First 1}",
-        "if(-not $r){throw 'No physical IPv4 Internet route was found.'}",
+        "$routes=@(Get-NetRoute -AddressFamily IPv4 -PolicyStore ActiveStore -ErrorAction SilentlyContinue|Where-Object{$_.DestinationPrefix -in @('0.0.0.0/0','0.0.0.0/1','128.0.0.0/1')})",
+        "$rows=@(foreach($r in $routes){",
         "$a=Get-NetAdapter -InterfaceIndex $r.InterfaceIndex -ErrorAction SilentlyContinue",
         "$ip=Get-NetIPAddress -AddressFamily IPv4 -InterfaceIndex $r.InterfaceIndex -ErrorAction SilentlyContinue|Where-Object{$_.IPAddress -notlike '169.254*'}|Select-Object -First 1",
-        "if(-not $ip){throw 'Physical Internet adapter has no IPv4 address.'}",
-        "[ordered]@{interface=[string]$a.Name;index=[int]$r.InterfaceIndex;ip=[string]$ip.IPAddress;gateway=[string]$r.NextHop}|ConvertTo-Json -Compress"
+        "[pscustomobject]@{prefix=[string]$r.DestinationPrefix;alias=[string]$a.Name;index=[int]$r.InterfaceIndex;ip=[string]$ip.IPAddress;gateway=[string]$r.NextHop;hardware=[bool]$a.HardwareInterface;status=[string]$a.Status;routeMetric=[int]$r.RouteMetric;interfaceMetric=[int]$r.InterfaceMetric}",
+        "})",
+        "ConvertTo-Json -InputObject $rows -Compress"
       ].join(';');
-      const r = await run(this._requireWindowsPwsh(), ['-NoProfile','-Command',script], { timeout: 5000 });
-      const info = JSON.parse(r.stdout || '{}');
-      return {
-        interface: String(info.interface || ''),
-        index: Number(info.index || 0),
-        localIP: String(info.ip || ''),
-        gateway: String(info.gateway || ''),
-        curlInterface: 'host!' + String(info.ip || ''),
-        bindMode: 'physical-ip'
-      };
+      const r = await run(this._requireWindowsPwsh(), ['-NoProfile','-Command',script], { timeout: 8000 });
+      return this._selectWindowsPhysicalRoute(JSON.parse(r.stdout || '[]'));
     }
 
     if (this.platform === 'linux') {

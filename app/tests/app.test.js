@@ -494,13 +494,42 @@ test('fast Test all probes relays in parallel and table sorting is explicit',()=
   for(const key of ['country','relay','protocol','sourcePing','livePing','download','upload','status']) assert.match(html,new RegExp('data-sort="'+key+'"'));
 });
 
+test('Windows direct ISP route selection rejects split-tunnel VPN, nonphysical default and spoofed source',()=>{
+  const Backend=require(path.join(root,'src/main/platform-backend.js'));
+  const backend=new Backend({version:'2.5.19'});
+  const physical={prefix:'0.0.0.0/0',alias:'Ethernet',index:18,
+    gateway:'192.168.20.1',ip:'192.168.20.6',hardware:true,
+    status:'Up',routeMetric:0,interfaceMetric:25};
+  const selected=backend._selectWindowsPhysicalRoute([physical]);
+  assert.equal(selected.interface,'Ethernet');
+  assert.equal(selected.gateway,'192.168.20.1');
+  assert.equal(selected.curlInterface,'host!192.168.20.6');
+  const secondary={...physical,alias:'Wi-Fi',index:30,interfaceMetric:35};
+  assert.equal(backend._selectWindowsPhysicalRoute([secondary,physical]).index,18,
+    'effective route uses sum of route and interface metrics');
+  const vpnSplit={...physical,prefix:'0.0.0.0/1',alias:'VPN',hardware:false};
+  assert.throws(()=>backend._selectWindowsPhysicalRoute([physical,vpnSplit]),/VPN|split|tunnel/i);
+  const vpn128={...vpnSplit,prefix:'128.0.0.0/1'};
+  assert.throws(()=>backend._selectWindowsPhysicalRoute([physical,vpn128]),/VPN|split|tunnel/i);
+  const virtualDefault={...physical,alias:'OIG tunnel',hardware:false,routeMetric:0,interfaceMetric:5};
+  assert.throws(()=>backend._selectWindowsPhysicalRoute([physical,virtualDefault]),/physical|VPN|route/i,
+    'do not switch to a secondary physical route when effective default is VPN');
+  for(const route of [
+    {...physical,hardware:false}, {...physical,status:'Disabled'},
+    {...physical,alias:'OpenVPN renamable'},
+    {...physical,ip:'0.0.0.0'}, {...physical,ip:'169.254.1.2'},
+    {...physical,ip:'1000.1.1.1'}, {...physical,gateway:'0.0.0.0'},
+    {...physical,index:0}
+  ]) assert.throws(()=>backend._selectWindowsPhysicalRoute([route]),/physical|safe|VPN|route/i);
+  assert.throws(()=>backend._selectWindowsPhysicalRoute([]),/route|physical/i);
+});
 test('direct ISP benchmark binds physical Internet and bypasses proxies',()=>{
   const backend=fs.readFileSync(path.join(root,'src/main/platform-backend.js'),'utf8');
   const renderer=fs.readFileSync(path.join(root,'src/renderer/app.js'),'utf8');
   const html=fs.readFileSync(path.join(root,'src/renderer/index.html'),'utf8');
   assert.match(backend,/async _directInternetPath\(\)/);
   assert.match(backend,/--noproxy','\*','--interface/);
-  assert.match(backend,/host!' \+ String\(info\.ip/);
+  assert.match(backend,/curlInterface: 'host!' \+ localIP/);
   assert.match(backend,/curlInterface: 'if!' \+ iface/);
   assert.match(backend,/async benchmarkDirectInternet\(\)/);
   assert.match(backend,/mode: 'direct-physical-internet'/);
