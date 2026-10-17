@@ -178,3 +178,34 @@ jobs:
           xvfb-run -a -s "-screen 0 1280x800x24" timeout 35s \
             node_modules/electron/dist/electron --disable-gpu \
             tests/native-electron-ipc-smoke.cjs
+
+
+  published-old-gui-update-e2e:
+    # Authentic published v2.5.18 installed GUI -> public v2.5.19.
+    # Disposable Windows Server 2025 x64 ONLY; no owner OS/network.
+    if: github.event_name == 'pull_request' && github.event.pull_request.number == 18 && github.event.pull_request.head.repo.full_name == github.repository && github.head_ref == 'review/firstconnect-security-20261017'
+    runs-on: windows-2025
+    timeout-minutes: 16
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+      - name: Real published old installed app Update button and online installer
+        shell: pwsh
+        working-directory: app
+        timeout-minutes: 13
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference='Stop'
+          ./tests/hosted-published-updater-ci.ps1
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: published-old-gui-update-evidence
+          path: |
+            ${{ runner.temp }}/oig-authentic-old-release-update-ui/*receipt.json
+            ${{ runner.temp }}/oig-authentic-old-release-update-ui/*result.json
+          if-no-files-found: warn
+          retention-days: 7
