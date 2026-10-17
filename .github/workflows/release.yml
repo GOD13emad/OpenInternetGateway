@@ -159,9 +159,9 @@ jobs:
           debs=(release/OpenInternetGateway-*.deb)
           test "${#windows[@]}" -ge 1 && test "${#appimages[@]}" -ge 1 && test "${#debs[@]}" -ge 1
           for file in "${windows[@]}" "${appimages[@]}" "${debs[@]}"; do
-            gh attestation verify "$file" \\
-              --repo "$GITHUB_REPOSITORY" \\
-              --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml" \\
+            gh attestation verify "$file" \
+              --repo "$GITHUB_REPOSITORY" \
+              --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml" \
               --source-ref "$GITHUB_REF"
           done
       - name: Create GitHub Release
