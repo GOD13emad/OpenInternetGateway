@@ -61,7 +61,7 @@ test('hosted first-connect supports explicit opt-in from canonical main without 
   const parsed = yaml.load(raw);
   assert.equal(parsed.on.workflow_dispatch.inputs.confirm_disposable_runner.type, 'boolean');
   assert.equal(parsed.on.workflow_dispatch.inputs.confirm_disposable_runner.default, false);
-  assert.equal(parsed.on.pull_request.paths.length, 21);
+  assert.equal(parsed.on.pull_request.paths.length, 22);
   assert.equal(parsed.on.push, undefined, 'no automatic main push VPN runs');
   assert.equal(parsed.on.pull_request_target, undefined, 'never check out a PR head under privileged target context');
   for (const job of [parsed.jobs.seed, parsed.jobs['first-connect']]) {
