@@ -51,6 +51,11 @@ jobs:
   windows:
     needs: seed
     runs-on: windows-latest
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+      artifact-metadata: write
     steps:
       - uses: actions/checkout@v7
       - uses: actions/download-artifact@v8
@@ -74,6 +79,10 @@ jobs:
         run: npm ci
       - working-directory: app
         run: npm run dist:win
+      - name: Attest Windows installer from its producer build
+        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
+        with:
+          subject-path: 'app/dist/OpenInternetGateway-Setup-*.exe'
       - uses: actions/upload-artifact@v7
         with:
           name: release-windows
@@ -83,6 +92,11 @@ jobs:
   linux:
     needs: seed
     runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+      artifact-metadata: write
     steps:
       - uses: actions/checkout@v7
       - uses: actions/download-artifact@v8
@@ -98,6 +112,12 @@ jobs:
         run: npm ci
       - working-directory: app
         run: npm run dist:linux
+      - name: Attest Linux packages from their producer build
+        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
+        with:
+          subject-path: |
+            app/dist/OpenInternetGateway-*.AppImage
+            app/dist/OpenInternetGateway-*.deb
       - uses: actions/upload-artifact@v7
         with:
           name: release-linux
@@ -112,9 +132,6 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
-      id-token: write
-      attestations: write
-      artifact-metadata: write
     steps:
       - uses: actions/checkout@v7
       - uses: actions/download-artifact@v8
@@ -130,10 +147,23 @@ jobs:
           cd release
           sha256sum OpenInternetGateway-* > SHA256SUMS.txt
           cat SHA256SUMS.txt
-      - name: Attest exact public release artifact bytes
-        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
-        with:
-          subject-path: 'release/OpenInternetGateway-*'
+      - name: Verify both producer attestations before public release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          windows=(release/OpenInternetGateway-Setup-*.exe)
+          appimages=(release/OpenInternetGateway-*.AppImage)
+          debs=(release/OpenInternetGateway-*.deb)
+          test "${#windows[@]}" -ge 1 && test "${#appimages[@]}" -ge 1 && test "${#debs[@]}" -ge 1
+          for file in "${windows[@]}" "${appimages[@]}" "${debs[@]}"; do
+            gh attestation verify "$file" \\
+              --repo "$GITHUB_REPOSITORY" \\
+              --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml" \\
+              --source-ref "$GITHUB_REF"
+          done
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
