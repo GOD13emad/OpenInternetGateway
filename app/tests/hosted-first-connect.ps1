@@ -27,10 +27,12 @@ try{
   if(-not $p.WaitForExit(180000)){try{$p.Kill()}catch{};throw 'NSIS_INSTALL_TIMEOUT'}
   if($p.ExitCode -ne 0){throw ('NSIS_INSTALL_FAILED_'+$p.ExitCode)}
   if(-not(Test-Path -LiteralPath $exe)){throw 'INSTALLED_EXECUTABLE_MISSING'}
-  $shipped=Join-Path $program 'resources\backend\windows\scripts\Ensure-OpenInternet.ps1'
-  $checked=Join-Path $PSScriptRoot '..\backend\windows\scripts\Ensure-OpenInternet.ps1'
-  if(-not(Test-Path -LiteralPath $shipped)){throw 'FIXED_ENSURE_SCRIPT_NOT_SHIPPED'}
-  if((Get-FileHash -LiteralPath $shipped -Algorithm SHA256).Hash -ne (Get-FileHash -LiteralPath $checked -Algorithm SHA256).Hash){throw 'FIXED_ENSURE_SCRIPT_PACKAGE_MISMATCH'}
+  foreach($name in @('Ensure-OpenInternet.ps1','Headless-Control.ps1')){
+    $shipped=Join-Path $program ('resources\backend\windows\scripts\'+$name)
+    $checked=Join-Path $PSScriptRoot ('..\backend\windows\scripts\'+$name)
+    if(-not(Test-Path -LiteralPath $shipped)){throw ('WINDOWS_SCRIPT_NOT_SHIPPED_'+$name)}
+    if((Get-FileHash -LiteralPath $shipped -Algorithm SHA256).Hash -ne (Get-FileHash -LiteralPath $checked -Algorithm SHA256).Hash){throw ('WINDOWS_SCRIPT_PACKAGE_MISMATCH_'+$name)}
+  }
   $pwsh=Join-Path $program 'resources\pwsh\pwsh.exe'
   if(-not(Test-Path -LiteralPath $pwsh)){throw 'BUNDLED_PWSH_MISSING'}
   $disconnect=Join-Path $backend 'OpenInternetGateway.ps1'

@@ -42,7 +42,7 @@ const b=new Backend({version:'2.5.19',resourcesPath:res,appPath:archive,userData
       bootstrap:snap('evidence/headless-bootstrap.json',['result','error','steps','service']),
       ensureError:snap('evidence/ensure-last-error.json',['error']),
       headless:snap('evidence/headless-control-last.json',['result','action']),
-      shadow:snap('evidence/shadow-handover-last.json',['result','native','dataPlane']),
+      shadow:snap('evidence/shadow-handover-last.json',['result','native','dataPlane','error']),
       desired:snap('state/desired-state.json',['desired']),
       candidateFailures:(()=>{
         try{

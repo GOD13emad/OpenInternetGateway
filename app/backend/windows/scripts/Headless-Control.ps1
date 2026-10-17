@@ -340,6 +340,13 @@ function Try-Candidate($c){
  $shadow=Add-PhysicalShadows
  $logOffset=0;if(Test-Path $serviceLog){$logOffset=(Get-Item $serviceLog).Length}
  try{[void](Invoke-Connector @('start') 20000)}catch{
+   # Record a bounded diagnostic; previously every start failure was collapsed
+   # to START_FAIL with no explanation for clean-machine installation failures.
+   $startError=[string]$_.Exception.Message
+   $startError=[regex]::Replace($startError,'(?i)(password|token|secret|key)\s*[=:]\s*\S+','$1=[redacted]')
+   $startError=[regex]::Replace($startError,'[A-Za-z0-9+/]{64,}={0,2}','[redacted]')
+   if($startError.Length -gt 400){$startError=$startError.Substring(0,400)}
+   Write-ShadowEvidence ([ordered]@{at=(Get-Date).ToString('o');result='START_REJECTED';error=$startError;candidate=[string]$c.SHA256})
    Record-Failure $c 'START_FAIL';Stop-Connector;return $null
  }
  $native=Wait-NativeReady $c $logOffset 18
