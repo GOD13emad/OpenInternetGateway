@@ -78,7 +78,8 @@ test('Windows backend is fully headless, self-healing, and independent from Open
   assert.match(factory,/successes\.json/i);
   assert.match(factory,/quarantine\.json/i);
   assert.match(auto,/OpenInternetGateway-AutoRecovery/i);
-  assert.doesNotMatch(production,/OpenVPNConnect(?:\.exe)?/i);
+  assert.match(headless,/Get-Process -Name 'OpenVPNConnect'/);
+  assert.doesNotMatch(production,/--connect-shortcut|Start-Process\s+.*OpenVPNConnect\.exe/i);
   assert.doesNotMatch(production,/--connect-shortcut/i);
   assert.ok(fs.existsSync(path.join(base,'Headless-Control.ps1')));
   assert.ok(fs.existsSync(path.join(base,'Bootstrap-HeadlessConnector.ps1')));
@@ -1101,7 +1102,8 @@ test('Windows first-connect OpenVPN prerequisite is pinned, verified and install
   assert.match(ensure,/WINDOWS_OPENVPN_CONNECT\.sha256/);
   assert.match(ensure,/Start-Process -FilePath 'msiexec\.exe' -Verb RunAs -Wait -PassThru/);
   assert.match(ensure,/\$msi='" \+ escapedMsi \+ "'/);
-  assert.match(ensure,/\$msiArgs='\/i \\"' \+ \$msi \+ '\\" \/passive \/norestart'/);
+  assert.match(ensure,/\/quiet \/norestart AUTOSTART=no/);
+  assert.doesNotMatch(ensure,/\/passive/);
   assert.match(ensure,/ArgumentList \$msiArgs/);
   assert.match(ensure,/run\(pwsh, \['-NoProfile','-Command',elevate\]/);
   assert.match(ensure,/administrator approval was cancelled/);

@@ -331,7 +331,9 @@ class Backend {
     const elevate = [
       "$ErrorActionPreference='Stop'",
       "$msi='" + escapedMsi + "'",
-      "$msiArgs='/i \"' + $msi + '\" /passive /norestart'",
+      // Silent first-time MSI: the interactive OpenVPN Connect UI and
+      // ovpnconnector.exe service daemon cannot be active simultaneously.
+      "$msiArgs='/i \"' + $msi + '\" /quiet /norestart AUTOSTART=no'",
       "try {",
       "  $p=Start-Process -FilePath 'msiexec.exe' -Verb RunAs -Wait -PassThru -ArgumentList $msiArgs",
       "  exit $p.ExitCode",
@@ -350,6 +352,16 @@ class Backend {
   async _ensureWindowsRuntimePrerequisites() {
     const pwsh = this._requireWindowsPwsh();
     const openVpn = await this._ensureWindowsConnector();
+    // Never shut down somebody's independently running OpenVPN Connect GUI.
+    // The vendor's interactive application and headless service are exclusive.
+    const interactive = await run(pwsh, [
+      '-NoProfile', '-NonInteractive', '-Command',
+      "if (Get-Process -Name 'OpenVPNConnect' -ErrorAction SilentlyContinue) { exit 17 } else { exit 0 }"
+    ], { timeout: 10000, allowFailure: true });
+    if (interactive.code === 17) {
+      throw new Error('OpenVPN Connect is already running. Disconnect and close it before connecting through Open Internet Gateway. No OpenVPN process was closed.');
+    }
+    if (interactive.code !== 0) throw new Error('Cannot confirm OpenVPN Connect is closed; refusing a competing VPN operation.');
     return { powerShell7: { ready: true, path: pwsh }, openVpnConnect: openVpn };
   }
 

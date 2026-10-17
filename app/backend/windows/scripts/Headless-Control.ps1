@@ -333,6 +333,10 @@ function Try-Candidate($c){
  if(-not(Test-Path $profile)){Record-Failure $c 'PROFILE_MISSING';return $null}
  $sha=(Get-FileHash -Algorithm SHA256 $profile).Hash.ToLowerInvariant()
  if($c.SHA256 -and $sha -ne ([string]$c.SHA256).ToLowerInvariant()){Record-Failure $c 'HASH_MISMATCH';return $null}
+ # Guard the race after frontend preflight. Never terminate a user's own GUI.
+ if(Get-Process -Name 'OpenVPNConnect' -ErrorAction SilentlyContinue){
+   throw 'OpenVPN Connect GUI is already running; headless service cannot coexist. Close the independent app manually before retrying.'
+ }
  Stop-Connector
  Copy-Item -LiteralPath $profile -Destination $serviceProfile -Force
  if((Get-FileHash -Algorithm SHA256 $serviceProfile).Hash.ToLowerInvariant() -ne $sha){throw 'ProgramData profile copy hash mismatch.'}
@@ -340,6 +344,13 @@ function Try-Candidate($c){
  $shadow=Add-PhysicalShadows
  $logOffset=0;if(Test-Path $serviceLog){$logOffset=(Get-Item $serviceLog).Length}
  try{[void](Invoke-Connector @('start') 20000)}catch{
+   # Record a bounded diagnostic; previously every start failure was collapsed
+   # to START_FAIL with no explanation for clean-machine installation failures.
+   $startError=[string]$_.Exception.Message
+   $startError=[regex]::Replace($startError,'(?i)(password|token|secret|key)\s*[=:]\s*\S+','$1=[redacted]')
+   $startError=[regex]::Replace($startError,'[A-Za-z0-9+/]{64,}={0,2}','[redacted]')
+   if($startError.Length -gt 400){$startError=$startError.Substring(0,400)}
+   Write-ShadowEvidence ([ordered]@{at=(Get-Date).ToString('o');result='START_REJECTED';error=$startError;candidate=[string]$c.SHA256})
    Record-Failure $c 'START_FAIL';Stop-Connector;return $null
  }
  $native=Wait-NativeReady $c $logOffset 18

@@ -81,7 +81,8 @@ try{
  $ready=Test-Path (Join-Path $Root 'state\headless-bootstrap.ready')
  if(-not $svc -or -not $ready){
    & (Join-Path $PSScriptRoot 'Bootstrap-HeadlessConnector.ps1')
-   exit 0
+   # Continue into Ensure immediately on first Connect; the next periodic
+   # recovery run can be ten minutes away, beyond the foreground timeout.
  }
  & (Join-Path $PSScriptRoot 'Headless-Control.ps1') -Action Ensure
 }catch{
