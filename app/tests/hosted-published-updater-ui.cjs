@@ -68,7 +68,10 @@ function send(method, params={}) {
   return new Promise((resolve,reject)=>{
     pending.set(id,{resolve,reject});
     ws.send(JSON.stringify({id,method,params}));
-    setTimeout(()=>{if(pending.has(id)){pending.delete(id);reject(Error('CDP_TIMEOUT_'+method));}},4000);
+    // Hosted Electron may momentarily pause its main renderer during the
+    // genuine online release check. Allow a bounded CDP response window,
+    // without ever retrying side-effectful Install clicks.
+    setTimeout(()=>{if(pending.has(id)){pending.delete(id);reject(Error('CDP_TIMEOUT_'+method));}},12000);
   });
 }
 async function evalJs(js) {
