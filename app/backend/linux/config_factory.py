@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import argparse, base64, concurrent.futures, datetime as dt, fcntl, hashlib, json, os, re, shutil, subprocess, sys, tempfile, urllib.request
+import argparse, base64, concurrent.futures, datetime as dt, fcntl, hashlib, json, os, re, shutil, subprocess, sys, tempfile, urllib.request, urllib.parse
 from pathlib import Path
 
 SEEDS = [
@@ -32,6 +32,14 @@ def write_json(path, value):
     tmp.write_text(json.dumps(value, indent=2, sort_keys=False), encoding="utf-8")
     tmp.replace(path)
 
+class NoHttpsDowngrade(urllib.request.HTTPRedirectHandler):
+    """Never label an HTTPS feed secure after following a plaintext redirect."""
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if (urllib.parse.urlsplit(req.full_url).scheme.lower() == "https" and
+                urllib.parse.urlsplit(newurl).scheme.lower() != "https"):
+            raise ValueError("HTTPS feed redirect downgrade refused")
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
 def fetch(url, timeout=8, allow_partial=False):
     # urllib timeouts are per blocking socket operation, not a hard wall-clock
     # deadline. Prefer curl's bounded connect + total transfer limits so dead
@@ -39,7 +47,9 @@ def fetch(url, timeout=8, allow_partial=False):
     curl = shutil.which("curl")
     if curl:
         proc = subprocess.run([
-            curl,"-4","-L","--fail","--noproxy","*",
+            curl,"-4","-L","--proto","=http,https",
+            "--proto-redir",("=https" if url.lower().startswith("https://") else "=http,https"),
+            "--fail","--noproxy","*",
             "--connect-timeout","2","--max-time",str(timeout),
             "--max-filesize",str(MAX_SOURCE_CSV_BYTES),"-sS",url
         ], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
@@ -56,7 +66,9 @@ def fetch(url, timeout=8, allow_partial=False):
             raise RuntimeError(f"curl failed ({proc.returncode})")
         return proc.stdout, False
     req = urllib.request.Request(url, headers={"User-Agent":"OpenInternetGateway/2.5"})
-    with urllib.request.urlopen(req, timeout=timeout) as r:
+    # The no-curl fallback must honor the same HTTPS-to-HTTPS redirect rule.
+    opener = urllib.request.build_opener(NoHttpsDowngrade())
+    with opener.open(req, timeout=timeout) as r:
         data = r.read(MAX_SOURCE_CSV_BYTES + 1)
         if len(data) > MAX_SOURCE_CSV_BYTES:
             raise RuntimeError("VPN Gate source CSV size exceeded")

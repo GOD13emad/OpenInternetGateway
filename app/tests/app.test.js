@@ -96,6 +96,43 @@ test('Linux source transport provenance handles HTTP, HTTPS, mixed, cached and u
   assert.match(r.stdout,/PASS five isolated source-transport fixtures/);
 });
 
+test('HTTPS relay feed redirects cannot silently downgrade to plaintext HTTP',()=>{
+  const py=fs.readFileSync(path.join(root,'backend/linux/config_factory.py'),'utf8');
+  const win=fs.readFileSync(path.join(root,'backend/windows/scripts/Refresh-VpnGateCache.ps1'),'utf8');
+  assert.match(py,/--proto-redir/);
+  assert.match(py,/class NoHttpsDowngrade/);
+  assert.match(win,/--proto-redir/);
+  assert.match(win,/StartsWith\('https:\/\//);
+  if(process.platform!=='linux') return;
+  const cp=require('node:child_process');
+  const fixture=[
+    'import importlib.util,sys,urllib.request',
+    'spec=importlib.util.spec_from_file_location("factory",sys.argv[1])',
+    'm=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)',
+    'seen=[]',
+    'm.shutil.which=lambda name: "/usr/bin/curl"',
+    'def fake_run(args,**kwargs):',
+    '  seen.append(args)',
+    '  return type("Result",(),{"stdout":b"test","returncode":0})()',
+    'm.subprocess.run=fake_run',
+    'm.fetch("https://provider.invalid/api/iphone/")',
+    'm.fetch("http://mirror.invalid/api/iphone/")',
+    'assert seen[0][seen[0].index("--proto-redir")+1]=="=https",seen',
+    'assert seen[1][seen[1].index("--proto-redir")+1]=="=http,https",seen',
+    'handler=m.NoHttpsDowngrade()',
+    'req=urllib.request.Request("https://provider.invalid/api/iphone/")',
+    'try:',
+    '  handler.redirect_request(req,None,302,"Found",{},"http://mirror.invalid/api/iphone/")',
+    'except ValueError: pass',
+    'else: raise AssertionError("HTTPS-to-HTTP redirect accepted")',
+    'assert handler.redirect_request(req,None,302,"Found",{},"https://mirror.invalid/api/iphone/").full_url.startswith("https://")',
+    'print("PASS curl and urllib HTTPS downgrade guard; HTTP fallback retained")'
+  ].join('\n');
+  const result=cp.spawnSync('python3',['-c',fixture,path.join(root,'backend/linux/config_factory.py')],{encoding:'utf8',timeout:12000});
+  assert.equal(result.status,0,result.stderr||result.stdout);
+  assert.match(result.stdout,/PASS curl and urllib HTTPS downgrade guard/);
+});
+
 test('Imported OpenVPN profiles fail closed on unknown executable directives and unsafe extra remote, including retained LKG',()=>{
   const factory=fs.readFileSync(path.join(root,'backend/linux/config_factory.py'),'utf8');
   const win=fs.readFileSync(path.join(root,'backend/windows/scripts/Build-VpnGateUdpCache.ps1'),'utf8');

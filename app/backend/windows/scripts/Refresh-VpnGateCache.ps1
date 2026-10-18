@@ -34,7 +34,10 @@ try{
   $psi.FileName='curl.exe'
   $psi.UseShellExecute=$false
   $psi.CreateNoWindow=$true
-  foreach($a in @('-4','-L','--fail','--noproxy','*','--connect-timeout','2','--max-time','8','--max-filesize',([string]$MaxSourceCsvBytes),'-sS','-o',$out,($base+'/api/iphone/'))){[void]$psi.ArgumentList.Add([string]$a)}
+  # HTTPS origin may follow HTTPS redirects only. Explicit HTTP mirrors retain
+  # their prior HTTP/HTTPS fallback without implying provider authentication.
+  $redirectPolicy=if($base.StartsWith('https://',[StringComparison]::OrdinalIgnoreCase)){'=https'}else{'=http,https'}
+  foreach($a in @('-4','-L','--proto','=http,https','--proto-redir',$redirectPolicy,'--fail','--noproxy','*','--connect-timeout','2','--max-time','8','--max-filesize',([string]$MaxSourceCsvBytes),'-sS','-o',$out,($base+'/api/iphone/'))){[void]$psi.ArgumentList.Add([string]$a)}
   $p=[Diagnostics.Process]::new();$p.StartInfo=$psi
   try{
    if($p.Start()){$jobs.Add([pscustomobject]@{Base=$base;Path=$out;Process=$p})}
