@@ -25,6 +25,19 @@ if(Test-Path $successFile){try{$success=Get-Content -Raw $successFile|ConvertFro
 $stage=Join-Path $stagingRoot ([guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Force -Path $stage|Out-Null
 
+function Test-AllowedRelayIp([Net.IPAddress]$Address){
+ if($null -eq $Address -or $Address.AddressFamily -ne [Net.Sockets.AddressFamily]::InterNetwork){return $false}
+ $b=$Address.GetAddressBytes()
+ $a=[int]$b[0];$c=[int]$b[1]
+ if($a -eq 0 -or $a -eq 10 -or $a -eq 127 -or $a -ge 224){return $false}
+ if($a -eq 100 -and $c -ge 64 -and $c -le 127){return $false}
+ if($a -eq 169 -and $c -eq 254){return $false}
+ if($a -eq 172 -and $c -ge 16 -and $c -le 31){return $false}
+ if($a -eq 192 -and $c -in @(0,168)){return $false}
+ if($a -eq 198 -and $c -in @(18,19)){return $false}
+ return $true
+}
+
 function Test-SafePublicVpnProfile([string]$text){
  $ls=$text -split '[\r\n]+'
  # Public OpenVPN profiles are data only: explicitly allow known client directives.
@@ -92,7 +105,8 @@ foreach($line in Get-Content -LiteralPath $csv){
  if(-not([Net.IPAddress]::TryParse(([string]$p[1]).Trim(),[ref]$csvIp)) -or
     -not([Net.IPAddress]::TryParse($ip,[ref]$remoteIp)) -or
     $csvIp.AddressFamily -ne [Net.Sockets.AddressFamily]::InterNetwork -or
-    -not $csvIp.Equals($remoteIp)){continue}
+    -not $csvIp.Equals($remoteIp) -or
+    -not(Test-AllowedRelayIp $remoteIp)){continue}
  $key=($transport+':'+$ip+':'+$port)
  if($seen.ContainsKey($key)){continue}
  if($text -notmatch '(?m)^client\s*$'){continue}
@@ -178,6 +192,12 @@ foreach($wrap in $oldSorted){
    $text=Get-Content -Raw -LiteralPath $oldPath -ErrorAction Stop
  }catch{continue}
  if(-not(Test-SafePublicVpnProfile $text)){continue}
+ $lkgRemote=[regex]::Match($text,'(?m)^remote\s+([0-9.]+)\s+(\d+)\s*$')
+ if(-not $lkgRemote.Success){continue}
+ $lkgIp=$null
+ if(-not([Net.IPAddress]::TryParse($lkgRemote.Groups[1].Value,[ref]$lkgIp)) -or
+    -not(Test-AllowedRelayIp $lkgIp) -or
+    $lkgRemote.Groups[1].Value -ne ([string]$o.IP).Trim()){continue}
  $protocol=if($text -match '(?m)^proto\s+udp'){'udp'}elseif($text -match '(?m)^proto\s+tcp'){'tcp'}else{'unknown'}
  $i++;$kept++
  $file=('LKG-{0:D2}-{1}' -f $kept,(Split-Path $oldPath -Leaf))

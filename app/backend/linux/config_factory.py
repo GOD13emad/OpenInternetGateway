@@ -167,6 +167,21 @@ def refresh_snapshot(evidence, max_sources=3):
     })
     return csv_path, (used[0] if used else None)
 
+# Public volunteer relays must not target local services, private subnets,
+# carrier-grade NAT, multicast or reserved IPv4 destinations.
+_UNSAFE_RELAY_NETS = tuple(ipaddress.ip_network(net) for net in (
+    "0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8",
+    "169.254.0.0/16", "172.16.0.0/12", "192.0.0.0/24",
+    "192.168.0.0/16", "198.18.0.0/15", "224.0.0.0/4", "240.0.0.0/4"
+))
+
+def relay_ip_allowed(value):
+    try:
+        addr = ipaddress.IPv4Address(str(value).strip())
+        return not any(addr in net for net in _UNSAFE_RELAY_NETS)
+    except ValueError:
+        return False
+
 # Imported profiles are untrusted data, never executable local policy.
 # Deny unknown directives, external paths/commands and extra destinations.
 def profile_is_data_only(text):
@@ -265,6 +280,7 @@ def parse_candidates(csv_path, count=48, per_country=6):
         else:
             continue
         ip, port = rm.group(1), int(rm.group(2))
+        if not relay_ip_allowed(ip): continue
         # CSV metadata and the executable OpenVPN remote must agree.
         # Reject mismatches before reserving an endpoint for deduplication.
         try:
@@ -341,6 +357,9 @@ def preserve_old(active, stage, meta, success, limit=4):
         old_path=active/Path(raw).name
         text=old_path.read_text(encoding="utf-8",errors="replace")
         if not profile_is_data_only(text): continue
+        remote = re.search(r"(?m)^remote\s+([0-9.]+)\s+(\d+)\s*$", text)
+        if not remote or not relay_ip_allowed(remote.group(1)): continue
+        if str(c.get("IP", "")).strip() != remote.group(1): continue
         protocol="udp" if re.search(r"(?m)^proto\s+udp",text) else ("tcp" if re.search(r"(?m)^proto\s+tcp",text) else "unknown")
         kept+=1
         name=f"LKG-{kept:02d}-{old_path.name}"
