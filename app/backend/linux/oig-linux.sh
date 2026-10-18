@@ -418,7 +418,9 @@ connect_gateway() {
   command -v curl >/dev/null
   command -v python3 >/dev/null
 
-  python3 "$FACTORY_PY" ensure --common "$OIG_COMMON" >/dev/null
+  if [[ -z "$exact_sha" ]]; then
+    python3 "$FACTORY_PY" ensure --common "$OIG_COMMON" >/dev/null
+  fi
   [[ -f "$OIG_COMMON/runtime/udp-cache/index.json" ]] || { echo "Config pool index missing" >&2; return 20; }
 
   start_watchdog
@@ -620,10 +622,11 @@ case "$action" in
     # When a protected tunnel is already healthy, prove the candidate can
     # complete an OpenVPN handshake without taking default-route/DNS ownership
     # before touching the working connection.
+    # Validate visible selection before changing intent or live VPN route.
+    candidate="$(profile_lines "$2" | head -n1 || true)"
+    [[ -n "$candidate" ]] || { echo "Selected relay is missing or quarantined." >&2; exit 21; }
+    IFS="$(printf '	')" read -r phost pip pport pleaf psha pproto pcountry <<<"$candidate"
     if healthy; then
-      candidate="$(profile_lines "$2" | head -n1 || true)"
-      [[ -n "$candidate" ]] || { echo "Selected relay is missing or quarantined." >&2; exit 21; }
-      IFS="$(printf '	')" read -r phost pip pport pleaf psha pproto pcountry <<<"$candidate"
       if preflight_one "$phost" "$pip" "$pport" "$pleaf" "$psha" "$pproto" "$pcountry"; then
         :
       else

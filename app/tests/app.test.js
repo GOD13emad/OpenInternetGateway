@@ -362,6 +362,46 @@ test('selected relay connection is exact rather than fallback',()=>{
   assert.match(backend,/_linux\('connect-profile', \[sha\]\)/);
 });
 
+test('Linux exact relay selection preserves the visible pool and rejects missing relay before VPN intent changes',()=>{
+  const linux=fs.readFileSync(path.join(root,'backend/linux/oig-linux.sh'),'utf8').replace(/\r\n/g,'\n');
+  const start=linux.indexOf('connect_gateway() {');
+  const end=linux.indexOf('\nteardown_gateway()',start);
+  const gateway=linux.slice(start,end);
+  assert.ok(start>=0 && end>start);
+  assert.match(gateway,/if \[\[ -z "\$exact_sha" \]\]; then\s+python3 "\$FACTORY_PY" ensure --common "\$OIG_COMMON"/,
+    'an exact selected relay must not disappear during factory ensure');
+  const selectedStart=linux.indexOf('  connect-profile)');
+  const selectedEnd=linux.indexOf('    ;;',selectedStart);
+  const selected=linux.slice(selectedStart,selectedEnd);
+  const inventory=selected.indexOf('candidate="$(profile_lines "$2" | head -n1 || true)"');
+  assert.ok(inventory>=0 && inventory<selected.indexOf('if healthy; then') && inventory<selected.indexOf('set_desired on "connect-profile"'),
+    'reject invalid exact SHA before preflight, desired-state or teardown');
+  if(process.platform!=='linux') return;
+  const os=require('node:os'),cp=require('node:child_process');
+  const temp=fs.mkdtempSync(path.join(os.tmpdir(),'oig-missing-exact-linux-'));
+  try{
+    fs.mkdirSync(path.join(temp,'state'),{recursive:true});
+    fs.mkdirSync(path.join(temp,'common/runtime/udp-cache'),{recursive:true});
+    fs.writeFileSync(path.join(temp,'state/desired-state'),'off\n');
+    fs.writeFileSync(path.join(temp,'common/runtime/udp-cache/index.json'),'[]\n');
+    fs.mkdirSync(path.join(temp,'bin'));
+    for(const command of ['nmcli','curl','getent']){
+      const stub=path.join(temp,'bin',command);
+      fs.writeFileSync(stub,'#!/bin/sh\nprintf "CALLED '+command+'\\n" >> "$OIG_HOME/external-command-attempts"\nexit 87\n',{mode:0o700});
+    }
+    const res=cp.spawnSync('bash',[path.join(root,'backend/linux/oig-linux.sh'),'connect-profile','a'.repeat(64)],{
+      env:{...process.env,OIG_HOME:temp,OIG_COMMON:path.join(temp,'common'),
+        PATH:path.join(temp,'bin')+':'+process.env.PATH},
+      timeout:15000,encoding:'utf8'
+    });
+    assert.equal(res.status,21,'expected missing-selection rejection: '+res.stderr);
+    assert.match(res.stderr,/Selected relay is missing or quarantined/);
+    assert.equal(fs.readFileSync(path.join(temp,'state/desired-state'),'utf8').trim(),'off');
+    assert.equal(fs.existsSync(path.join(temp,'external-command-attempts')),false,
+      'missing exact selection must not launch nmcli, curl or DNS probes');
+  }finally{fs.rmSync(temp,{recursive:true,force:true});}
+});
+
 test('explicit Windows disconnect cancels queued recovery and exact requests before running recovery task',()=>{
   const disconnect=fs.readFileSync(path.join(root,'backend/windows/scripts/Disconnect-OpenInternet.ps1'),'utf8');
   assert.match(disconnect,/exact-profile\.request/);
