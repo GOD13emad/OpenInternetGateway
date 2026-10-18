@@ -63,6 +63,11 @@ function Test-SafePublicVpnProfile([string]$text){
    $fields=@($v -split '\s+')
    $opt=$fields[0].ToLowerInvariant()
    if($opt -notin $allowed){$unsafe=$true;break}
+   # Imported profiles cannot disable crypto, including a NONE cipher-list
+   # member that would otherwise survive in a colon-delimited list.
+   if($opt -in @('cipher','auth','data-ciphers','data-ciphers-fallback')){
+     if($fields.Count -ne 2 -or 'none' -in ($fields[1].ToLowerInvariant() -split ':')){$unsafe=$true;break}
+   }
    $seenOps[$opt]=[int]$seenOps[$opt]+1
    if($opt -in @('client','dev','proto','remote') -and $seenOps[$opt] -ne 1){$unsafe=$true;break}
    if($opt -eq 'remote'){

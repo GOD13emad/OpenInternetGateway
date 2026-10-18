@@ -227,6 +227,11 @@ def profile_is_data_only(text):
         directive = fields[0].lower()
         if directive not in allowed:
             return False
+        # A downloaded profile cannot turn off data-channel encryption or
+        # integrity; explicit NONE is unsafe even when mixed into a cipher list.
+        if directive in {"cipher", "auth", "data-ciphers", "data-ciphers-fallback"}:
+            if len(fields) != 2 or "none" in fields[1].lower().split(":"):
+                return False
         seen[directive] = seen.get(directive, 0) + 1
         if directive in {"client", "dev", "proto", "remote"} and seen[directive] > 1:
             return False

@@ -451,6 +451,76 @@ test('Linux profile dedupe does not let an incomplete candidate reserve a valid 
   assert.match(result.stdout,/PASS invalid prior duplicate/);
 });
 
+test('OpenVPN imported profiles cannot disable cipher or authentication',()=>{
+  const sourcePy=fs.readFileSync(path.join(root,'backend/linux/config_factory.py'),'utf8');
+  const sourceWin=fs.readFileSync(path.join(root,'backend/windows/scripts/Build-VpnGateUdpCache.ps1'),'utf8');
+  assert.match(sourcePy,/directive in \{"cipher", "auth", "data-ciphers", "data-ciphers-fallback"\}/);
+  assert.match(sourceWin,/\$opt -in @\('cipher','auth','data-ciphers','data-ciphers-fallback'\)/);
+  const cp=require('node:child_process'),os=require('node:os'),crypto=require('node:crypto');
+  const temp=fs.mkdtempSync(path.join(os.tmpdir(),'oig-crypto-guard-'));
+  const bad=['cipher none','auth none','data-ciphers AES-128-GCM:none','data-ciphers-fallback NONE'];
+  const profile=(ip,override='')=>[
+    'client','dev tun','proto udp','remote '+ip+' 1194',
+    'cipher AES-128-CBC','auth SHA1',override,
+    '<ca>','a','</ca>','<cert>','b','</cert>','<key>','c','</key>',''
+  ].filter(Boolean).join('\n');
+  const row=(host,ip,override='')=>[host,ip,'100','12','100000','Japan','JP','4',
+    '0','0','0','0','0','0',Buffer.from(profile(ip,override)).toString('base64')].join(',');
+  const csv=[
+    ...bad.map((directive,i)=>row('bad-'+i,'203.0.113.'+(40+i),directive)),
+    row('good-0','203.0.113.60'),row('good-1','203.0.113.61'),
+    row('good-2','203.0.113.62')
+  ].join('\n')+'\n';
+  try{
+    if(process.platform==='linux'){
+      const script=[
+        'import importlib.util,sys,json,hashlib',
+        'from pathlib import Path',
+        'spec=importlib.util.spec_from_file_location("factory",sys.argv[1])',
+        'm=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)',
+        'base=Path(sys.argv[2]);rows=m.parse_candidates(base/"feed.csv",count=30,per_country=30)',
+        'assert [r["Host"] for r in rows]==["good-0","good-1","good-2"],rows',
+        'active=base/"active";stage=base/"stage";active.mkdir();stage.mkdir()',
+        'old=[]',
+        'for i,flag in enumerate(["cipher none","auth none",""]):',
+        '  ip="203.0.113."+str(80+i)',
+        '  p="client\\ndev tun\\nproto udp\\nremote "+ip+" 1194\\ncipher AES-128-CBC\\nauth SHA1\\n"+flag+"\\n<ca>\\na\\n</ca>\\n<cert>\\nb\\n</cert>\\n<key>\\nc\\n</key>\\n"',
+        '  fname="prior-"+str(i)+".ovpn";(active/fname).write_text(p)',
+        '  old.append({"Rank":i+1,"Host":"prior-"+str(i),"IP":ip,"Port":1194,"Protocol":"udp","Country":"JP","Profile":"runtime/udp-cache/"+fname,"SHA256":hashlib.sha256(p.encode()).hexdigest()})',
+        '(active/"index.json").write_text(json.dumps(old))',
+        'meta=[];n=m.preserve_old(active,stage,meta,{},4)',
+        'assert n==1 and meta[0]["Host"]=="prior-2",(n,meta)',
+        'print("PASS crypto disable rejected in new and retained profiles")'
+      ].join('\n');
+      fs.writeFileSync(path.join(temp,'feed.csv'),csv);
+      const result=cp.spawnSync('python3',['-c',script,path.join(root,'backend/linux/config_factory.py'),temp],{encoding:'utf8',timeout:12000});
+      assert.equal(result.status,0,result.stderr||result.stdout);
+    }else if(process.platform==='win32'){
+      const base=path.join(temp,'windows');
+      const scripts=path.join(base,'scripts'),evidence=path.join(base,'evidence'),active=path.join(base,'runtime','udp-cache');
+      for(const dir of [scripts,evidence,active]) fs.mkdirSync(dir,{recursive:true});
+      for(const name of ['Build-VpnGateUdpCache.ps1','Config-Factory.ps1']){
+        fs.copyFileSync(path.join(root,'backend/windows/scripts',name),path.join(scripts,name));
+      }
+      fs.writeFileSync(path.join(evidence,'vpngate-mirror-api.csv'),csv);
+      const old=[];
+      for(const [i,flag] of ['cipher none','auth none',''].entries()){
+        const ip='203.0.113.'+(80+i),name='prior-'+i+'.ovpn',text=profile(ip,flag);
+        fs.writeFileSync(path.join(active,name),text);
+        old.push({Rank:i+1,Host:'prior-'+i,IP:ip,Port:1194,Protocol:'udp',Country:'JP',
+          Profile:'runtime/udp-cache/'+name,SHA256:crypto.createHash('sha256').update(text).digest('hex')});
+      }
+      fs.writeFileSync(path.join(active,'index.json'),JSON.stringify(old));
+      const result=cp.spawnSync('pwsh',['-NoProfile','-NonInteractive','-File',path.join(scripts,'Build-VpnGateUdpCache.ps1'),
+        '-Count','3','-PerCountry','3','-PreserveOld','4'],{encoding:'utf8',timeout:20000});
+      assert.equal(result.status,0,result.stderr||result.stdout);
+      const resultIndex=JSON.parse(fs.readFileSync(path.join(active,'index.json'),'utf8'));
+      assert.deepEqual(resultIndex.filter(x=>x.Source==='VPNGate').map(x=>x.Host),['good-0','good-1','good-2']);
+      assert.deepEqual(resultIndex.filter(x=>x.Source==='LastKnownGood').map(x=>x.Host),['prior-2']);
+    }
+  }finally{fs.rmSync(temp,{recursive:true,force:true});}
+});
+
 test('Public relay pool never imports local, private, link-local or reserved tunnel endpoints',()=>{
   const python=fs.readFileSync(path.join(root,'backend/linux/config_factory.py'),'utf8');
   const windows=fs.readFileSync(path.join(root,'backend/windows/scripts/Build-VpnGateUdpCache.ps1'),'utf8');
