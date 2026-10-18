@@ -376,10 +376,14 @@ def preserve_old(active, stage, meta, success, limit=4):
         if not remote or not relay_ip_allowed(remote.group(1)): continue
         if str(c.get("IP", "")).strip() != remote.group(1): continue
         protocol="udp" if re.search(r"(?m)^proto\s+udp",text) else ("tcp" if re.search(r"(?m)^proto\s+tcp",text) else "unknown")
+        # Deduplicate after normalization; the old pre-role SHA can differ.
+        staged_text = with_server_certificate_role(text)
+        normalized_sha = hashlib.sha256(staged_text.encode("utf-8")).hexdigest()
+        if normalized_sha in current_shas: continue
         kept+=1
         name=f"LKG-{kept:02d}-{old_path.name}"
         staged = stage/name
-        staged.write_text(with_server_certificate_role(text),encoding="utf-8",newline="")
+        staged.write_text(staged_text,encoding="utf-8",newline="")
         staged_sha = hashlib.sha256(staged.read_bytes()).hexdigest()
         prior = success.get(sha,{}) if isinstance(success,dict) else {}
         country = c.get("Country","") or (prior.get("country","") if isinstance(prior,dict) else "") or "JP"  # legacy pools before 2.3 were JP-only

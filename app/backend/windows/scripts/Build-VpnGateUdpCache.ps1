@@ -211,11 +211,17 @@ foreach($wrap in $oldSorted){
     -not(Test-AllowedRelayIp $lkgIp) -or
     $lkgRemote.Groups[1].Value -ne ([string]$o.IP).Trim()){continue}
  $protocol=if($text -match '(?m)^proto\s+udp'){'udp'}elseif($text -match '(?m)^proto\s+tcp'){'tcp'}else{'unknown'}
- $i++;$kept++
- $file=('LKG-{0:D2}-{1}' -f $kept,(Split-Path $oldPath -Leaf))
+ # The old raw SHA can differ from the final server-role-hardened
+ # profile hash. Compare final content before reserving an LKG slot.
+ $file=('LKG-{0:D2}-{1}' -f ($kept+1),(Split-Path $oldPath -Leaf))
  $staged=Join-Path $stage $file
  [IO.File]::WriteAllText($staged,(Add-ServerRole $text),[Text.UTF8Encoding]::new($false))
  $stagedSha=(Get-FileHash -LiteralPath $staged -Algorithm SHA256).Hash.ToLowerInvariant()
+ if($meta|Where-Object {([string]$_.SHA256).ToLowerInvariant() -eq $stagedSha}){
+   Remove-Item -LiteralPath $staged -Force
+   continue
+ }
+ $i++;$kept++
  $country=[string]$o.Country
  if([string]::IsNullOrWhiteSpace($country) -and $success.ContainsKey($sha)){try{$country=[string]$success[$sha].country}catch{}}
  if([string]::IsNullOrWhiteSpace($country)){$country='JP'} # legacy pools before 2.3 were JP-only
