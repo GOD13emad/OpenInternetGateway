@@ -1196,6 +1196,11 @@ class Backend {
     const release = await this._githubJson('https://api.github.com/repos/GOD13emad/OpenInternetGateway/releases/latest');
     const latestVersion = String(release.tag_name || '').replace(/^v/i, '');
     if (!latestVersion) throw new Error('GitHub latest release did not contain a version tag.');
+    // The released installer/AppImage naming and helper paths require one stable
+    // MAJOR.MINOR.PATCH value, not a partially parsed or suffixed release tag.
+    if (!/^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/.test(latestVersion)) {
+      throw new Error('Invalid release version tag; expected stable MAJOR.MINOR.PATCH.');
+    }
     const asset = this._selectUpdateAsset(release.assets, latestVersion);
     const sums = (release.assets || []).find(a => a.name === 'SHA256SUMS.txt');
     const comparison = this._compareVersions(this.version, latestVersion);

@@ -924,6 +924,31 @@ test('up-to-date releases never require platform assets or try download', async(
     fs.rmSync(tmp,{recursive:true,force:true});
   }
 });
+test('updater rejects malformed latest release tags before caching or downloading',async()=>{
+  const Backend=require(path.join(root,'src/main/platform-backend.js'));
+  const os=require('node:os');
+  const tmp=fs.mkdtempSync(path.join(os.tmpdir(),'oig-release-semver-'));
+  try{
+    const backend=new Backend({version:'2.5.19',resourcesPath:tmp,appPath:tmp,userData:tmp,emit:()=>{}});
+    backend.backendRoot=tmp;
+    let downloads=0;
+    backend._downloadWithSha256=async()=>{downloads++;throw Error('INVALID_TAG_DOWNLOAD_ATTEMPTED');};
+    for(const tag of ['v2.5.20junk','v2.5.20-rc.1','v2.5.20/../../escape','v02.5.20','v2.5.20\nanything','v2.5','2.5.20+build']){
+      backend._githubJson=async()=>({tag_name:tag,assets:[]});
+      await assert.rejects(backend.updateInfo(true),/invalid release version tag/i,
+        'reject malformed latest release tag: '+JSON.stringify(tag));
+      await assert.rejects(backend.downloadUpdate(),/invalid release version tag/i);
+      assert.equal(downloads,0,'invalid release metadata must not reach installer download');
+    }
+    for(const tag of ['v2.5.20','2.5.20']){
+      backend._githubJson=async()=>({tag_name:tag,assets:[]});
+      const result=await backend.updateInfo(true);
+      assert.equal(result.latestVersion,'2.5.20');
+      assert.equal(result.updateAvailable,true);
+    }
+  }finally{fs.rmSync(tmp,{recursive:true,force:true});}
+});
+
 test('updater requires published SHA256SUMS before downloading a newer release on both platforms',async()=>{
   const Backend=require(path.join(root,'src/main/platform-backend.js'));
   const os=require('node:os');
