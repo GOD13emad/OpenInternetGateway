@@ -432,7 +432,7 @@ class Backend {
       return JSON.parse(r.stdout || '{}');
     }
 
-    const mapped = map[action];
+    const mapped = Object.prototype.hasOwnProperty.call(map, action) ? map[action] : undefined;
     if (!mapped) throw new Error('Unsupported action: ' + action);
     const elevated = ['console-enable','console-disable'].includes(action);
     if (elevated) {

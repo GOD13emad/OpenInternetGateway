@@ -16,6 +16,22 @@ test('secure Electron boundary is configured',()=>{
   assert.match(main,/sandbox:\s*true/);
 });
 
+test('Windows backend rejects inherited prototype action keys before launching PowerShell',async()=>{
+  const Backend=require(path.join(root,'src/main/platform-backend.js'));
+  const os=require('node:os');
+  const tmp=fs.mkdtempSync(path.join(os.tmpdir(),'oig-action-map-'));
+  try{
+    const backend=new Backend({version:'2.5.19',resourcesPath:tmp,appPath:tmp,userData:tmp,emit:()=>{}});
+    backend.backendRoot=tmp;
+    // Nonexistent executable: no privileged process, VPN, or network action can run.
+    backend._requireWindowsPwsh=()=>path.join(tmp,'no-powershell-runtime.exe');
+    for(const action of ['constructor','toString','__proto__','hasOwnProperty','not-an-action']){
+      await assert.rejects(backend._windows(action),/Unsupported action:/,
+        'reject inherited/unlisted action before attempting shell command: '+action);
+    }
+  }finally{fs.rmSync(tmp,{recursive:true,force:true});}
+});
+
 test('Linux backend implements required actions',()=>{
   const sh=fs.readFileSync(path.join(root,'backend/linux/oig-linux.sh'),'utf8');
   for(const action of ['connect','disconnect','refresh','ensure','auto-install','auto-remove','console-status','console-enable','console-disable']) assert.ok(sh.includes(action));
