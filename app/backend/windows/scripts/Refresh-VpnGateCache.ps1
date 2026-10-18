@@ -66,10 +66,10 @@ try{
   if($rows -ge 8){
    $complete=$false
    try{$complete=($j.Process.HasExited -and $j.Process.ExitCode -eq 0)}catch{}
-   $usable+=,[pscustomobject]@{Base=$j.Base;Path=$j.Path;Rows=$rows;Size=$size;Complete=$complete}
+   $usable+=,[pscustomobject]@{Base=$j.Base;Path=$j.Path;Rows=$rows;Size=$size;Complete=$complete;HttpsPriority=([string]$j.Base).StartsWith('https://',[StringComparison]::OrdinalIgnoreCase)}
   }
  }
- $chosen=@($usable|Sort-Object @{Expression='Complete';Descending=$true},@{Expression='Rows';Descending=$true}|Select-Object -First ([Math]::Max(1,$MaxSources)))
+ $chosen=@($usable|Sort-Object @{Expression='HttpsPriority';Descending=$true},@{Expression='Complete';Descending=$true},@{Expression='Rows';Descending=$true}|Select-Object -First ([Math]::Max(1,$MaxSources)))
  $seen=[Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
   $mergedBytes=0
  foreach($j in $chosen){

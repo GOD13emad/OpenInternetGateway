@@ -94,47 +94,50 @@ def refresh_snapshot(evidence, max_sources=3):
         # refresh time scale with dead mirrors.
         with concurrent.futures.ThreadPoolExecutor(max_workers=min(6, len(SEEDS))) as pool:
             futures = [pool.submit(fetch_one, base) for base in SEEDS]
-            for future in concurrent.futures.as_completed(futures):
-                base, data, partial = future.result()
-                if not data:
+            fetched = [future.result() for future in concurrent.futures.as_completed(futures)]
+        # Download completion order is untrusted as a source priority. Prefer
+        # HTTPS among sources that still satisfy normal CSV/profile gates;
+        # keep HTTP mirror fallback when censored HTTPS cannot be reached.
+        fetched.sort(key=lambda item: (
+            0 if item[0].lower().startswith("https://") else 1,
+            bool(item[2]), SEEDS.index(item[0])))
+        for base, data, partial in fetched:
+            if not data:
+                continue
+            text = data.decode("utf-8", errors="replace")
+            lines = text.splitlines()
+            # A timed-out transfer may end in the middle of one CSV row.
+            # Never treat that unterminated tail as a complete record.
+            if partial and data and not data.endswith((b"\n", b"\r")) and lines:
+                lines = lines[:-1]
+            rows = []
+            source_seen = set()
+            for line in lines:
+                if len(line.encode("utf-8")) > MAX_CSV_LINE_BYTES:
                     continue
-                text = data.decode("utf-8", errors="replace")
-                lines = text.splitlines()
-                # A timed-out transfer may end in the middle of one CSV row.
-                # Never treat that unterminated tail as a complete record.
-                if partial and data and not data.endswith((b"\n", b"\r")) and lines:
-                    lines = lines[:-1]
-                rows = []
-                source_seen = set()
-                for line in lines:
-                    if len(line.encode("utf-8")) > MAX_CSV_LINE_BYTES:
-                        continue
-                    if not line or line.startswith("*") or line.startswith("#"):
-                        continue
-                    parts = line.split(",")
-                    if len(parts) < 15:
-                        continue
-                    # Deduplicate identical OpenVPN endpoints/configs across
-                    # mirrors while retaining different transports/profiles.
-                    key = (parts[0].strip(), parts[1].strip(), parts[-1].strip())
-                    if key in seen or key in source_seen:
-                        continue
-                    source_seen.add(key)
-                    rows.append(line)
-                # Eight complete rows are enough to exceed the release/runtime
-                # minimum after structural OpenVPN validation, without turning
-                # a network timeout into an unbounded retry.
-                if len(rows) >= 8:
-                    merged.extend(rows)
-                    seen.update(source_seen)
-                    used.append(base)
-                    if partial:
-                        partial_sources += 1
-                if len(used) >= max_sources:
-                    for pending in futures:
-                        pending.cancel()
-                    break
-
+                if not line or line.startswith("*") or line.startswith("#"):
+                    continue
+                parts = line.split(",")
+                if len(parts) < 15:
+                    continue
+                # Deduplicate identical OpenVPN endpoints/configs across
+                # mirrors while retaining different transports/profiles.
+                key = (parts[0].strip(), parts[1].strip(), parts[-1].strip())
+                if key in seen or key in source_seen:
+                    continue
+                source_seen.add(key)
+                rows.append(line)
+            # Eight complete rows are enough to exceed the release/runtime
+            # minimum after structural OpenVPN validation, without turning
+            # a network timeout into an unbounded retry.
+            if len(rows) >= 8:
+                merged.extend(rows)
+                seen.update(source_seen)
+                used.append(base)
+                if partial:
+                    partial_sources += 1
+            if len(used) >= max_sources:
+                break
         if merged:
             # Parse into a temporary candidate before replacing a known-good
             # snapshot. CSV column counts are not OpenVPN profile validity.

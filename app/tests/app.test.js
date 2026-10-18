@@ -133,6 +133,49 @@ test('HTTPS relay feed redirects cannot silently downgrade to plaintext HTTP',()
   assert.match(result.stdout,/PASS curl and urllib HTTPS downgrade guard/);
 });
 
+test('valid HTTPS VPN Gate feeds outrank faster HTTP mirrors with fallback intact',()=>{
+  const win=fs.readFileSync(path.join(root,'backend/windows/scripts/Refresh-VpnGateCache.ps1'),'utf8');
+  assert.match(win,/HttpsPriority/);
+  assert.match(win,/'HttpsPriority';Descending=\$true/);
+  if(process.platform!=='linux') return;
+  const cp=require('node:child_process');
+  const fixture=[
+    'import sys,importlib.util,tempfile,base64,time,json',
+    'from pathlib import Path',
+    'spec=importlib.util.spec_from_file_location("factory",sys.argv[1])',
+    'm=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)',
+    'def csvrows(offset):',
+    '  lines=[]',
+    '  for n in range(8):',
+    '    ip="203.0.113.%d"%(offset+n)',
+    '    ovpn="client\\ndev tun\\nproto udp\\nremote "+ip+" 1194\\n<ca>\\na\\n</ca>\\n<cert>\\nb\\n</cert>\\n<key>\\nc\\n</key>\\n"',
+    '    line=["relay"+str(n),ip,"100","12","1000000","Japan","JP","4","0","0","0","0","0","0",base64.b64encode(ovpn.encode()).decode()]',
+    '    lines.append(",".join(line))',
+    '  return ("\\n".join(lines)+"\\n").encode()',
+    'https=csvrows(10);http=csvrows(70)',
+    'def slow_https(url,timeout=6,allow_partial=True):',
+    '  if url.startswith("https://"): time.sleep(0.2);return https,False',
+    '  return http,False',
+    'm.fetch=slow_https',
+    'with tempfile.TemporaryDirectory(prefix="oig-https-preference-") as td:',
+    '  evidence=Path(td);m.refresh_snapshot(evidence,max_sources=3)',
+    '  report=json.loads((evidence/"mirror-refresh-last.json").read_text())',
+    '  assert report["usedMirrors"][0].startswith("https://"),report["usedMirrors"]',
+    '  assert 2<=len(report["usedMirrors"])<=3,report',
+    '  def unavailable_https(url,timeout=6,allow_partial=True):',
+    '    if url.startswith("https://"): raise RuntimeError("offline HTTPS")',
+    '    return http,False',
+    '  m.fetch=unavailable_https',
+    '  m.refresh_snapshot(evidence,max_sources=3)',
+    '  fallback=json.loads((evidence/"mirror-refresh-last.json").read_text())',
+    '  assert fallback["usedMirrors"] and all(u.startswith("http://") for u in fallback["usedMirrors"]),fallback',
+    'print("PASS HTTPS priority with HTTP fallback")'
+  ].join('\n');
+  const res=cp.spawnSync('python3',['-c',fixture,path.join(root,'backend/linux/config_factory.py')],{encoding:'utf8',timeout:15000});
+  assert.equal(res.status,0,res.stderr||res.stdout);
+  assert.match(res.stdout,/PASS HTTPS priority with HTTP fallback/);
+});
+
 test('Imported OpenVPN profiles fail closed on unknown executable directives and unsafe extra remote, including retained LKG',()=>{
   const factory=fs.readFileSync(path.join(root,'backend/linux/config_factory.py'),'utf8');
   const win=fs.readFileSync(path.join(root,'backend/windows/scripts/Build-VpnGateUdpCache.ps1'),'utf8');
