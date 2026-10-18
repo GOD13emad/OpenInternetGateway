@@ -924,6 +924,48 @@ test('up-to-date releases never require platform assets or try download', async(
     fs.rmSync(tmp,{recursive:true,force:true});
   }
 });
+test('updater requires published SHA256SUMS before downloading a newer release on both platforms',async()=>{
+  const Backend=require(path.join(root,'src/main/platform-backend.js'));
+  const os=require('node:os');
+  for(const platform of ['win32','linux']){
+    const tmp=fs.mkdtempSync(path.join(os.tmpdir(),'oig-updater-required-sums-'));
+    try{
+      const backend=new Backend({version:'2.5.19',resourcesPath:tmp,appPath:tmp,userData:tmp,emit:()=>{}});
+      backend.backendRoot=tmp;
+      backend.platform=platform;
+      const filename=platform==='win32'?'OpenInternetGateway-Setup-2.5.20.exe':'OpenInternetGateway-2.5.20-x86_64.AppImage';
+      const hash='a'.repeat(64);
+      const asset={name:filename,digest:'sha256:'+hash,browser_download_url:'https://github.com/GOD13emad/OpenInternetGateway/releases/download/v2.5.20/'+filename};
+      const sumsAsset={name:'SHA256SUMS.txt',browser_download_url:'https://github.com/GOD13emad/OpenInternetGateway/releases/download/v2.5.20/SHA256SUMS.txt'};
+      let checksumFetches=0, downloads=0;
+      backend._curlText=async()=>{
+        checksumFetches++;
+        return hash+'  '+filename+'\n';
+      };
+      backend._downloadWithSha256=async()=>{
+        downloads++;
+        return {sha256:hash,bytes:3};
+      };
+      backend._githubJson=async()=>({tag_name:'v2.5.20',assets:[asset]});
+      await assert.rejects(backend.downloadUpdate(),/SHA256SUMS/i,'missing manifest must stop actual update');
+      assert.equal(downloads,0,'installer must not download before manifest verification');
+      backend._githubJson=async()=>({tag_name:'v2.5.20',assets:[asset,{...sumsAsset,browser_download_url:''}]});
+      await assert.rejects(backend.downloadUpdate(),/SHA256SUMS/i,'empty manifest URL must stop actual update');
+      assert.equal(downloads,0);
+      backend._githubJson=async()=>({tag_name:'v2.5.20',assets:[asset,sumsAsset]});
+      backend._curlText=async()=>{ checksumFetches++; return 'b'.repeat(64)+'  '+filename+'\n'; };
+      await assert.rejects(backend.downloadUpdate(),/GitHub digest and SHA256SUMS disagree/i);
+      assert.equal(downloads,0,'mismatched manifest must not download installer');
+      backend._curlText=async()=>{checksumFetches++;return hash+'  '+filename+'\n';};
+      const good=await backend.downloadUpdate();
+      assert.equal(good.ok,true);
+      assert.equal(good.sha256,hash);
+      assert.equal(downloads,1);
+      assert.equal(checksumFetches,2,'checksum text fetched for mismatched and correct manifest only');
+    }finally{fs.rmSync(tmp,{recursive:true,force:true});}
+  }
+});
+
 test('updater streams checksum calculation and never promotes a hash-mismatched installer', {timeout:30000}, async()=>{
   const Backend=require(path.join(root,'src/main/platform-backend.js'));
   const os=require('node:os');

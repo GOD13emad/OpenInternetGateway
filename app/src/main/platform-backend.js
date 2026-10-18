@@ -1523,13 +1523,14 @@ exit 0
     if (!info.asset?.url || !info.asset?.name) throw new Error('No compatible update asset was published for this platform.');
     if (!info.asset.sha256) throw new Error('GitHub release asset has no SHA-256 digest; refusing an unverifiable update.');
 
-    if (info.checksumsUrl) {
-      const sums = await this._curlText(info.checksumsUrl, 20);
-      const line = sums.split(/\r?\n/).find(x => x.trim().endsWith('  ' + info.asset.name));
-      if (!line) throw new Error('Published SHA256SUMS does not include the selected update asset.');
-      const checksum = line.trim().split(/\s+/)[0].toLowerCase();
-      if (checksum !== info.asset.sha256) throw new Error('GitHub digest and SHA256SUMS disagree; update refused.');
-    }
+    // Actual upgrades must satisfy all three published integrity checks.
+    // Never skip the release checksum manifest when it is missing.
+    if (!info.checksumsUrl) throw new Error('GitHub release has no SHA256SUMS.txt asset; update refused.');
+    const sums = await this._curlText(info.checksumsUrl, 20);
+    const line = sums.split(/\r?\n/).find(x => x.trim().endsWith('  ' + info.asset.name));
+    if (!line) throw new Error('Published SHA256SUMS does not include the selected update asset.');
+    const checksum = line.trim().split(/\s+/)[0].toLowerCase();
+    if (checksum !== info.asset.sha256) throw new Error('GitHub digest and SHA256SUMS disagree; update refused.');
 
     const destination = path.join(this.backendRoot, 'updates', 'v' + info.latestVersion, info.asset.name);
     if (fs.existsSync(destination)) {
