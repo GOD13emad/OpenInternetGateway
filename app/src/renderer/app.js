@@ -109,6 +109,15 @@ function renderStatus(s) {
   setText('poolProtocols', protocols || '—');
   setText('poolAge', pool.ageHours == null ? '—' : (Number(pool.ageHours).toFixed(1) + 'h'));
   setText('factorySource', pool.source ? ('Source: ' + pool.source) : 'Maintains multiple validated and standby tunnel profiles automatically.');
+  const fetchTransport = String(pool.lastFetchTransport || 'unknown').toLowerCase();
+  const fetchNotice = fetchTransport === 'http'
+    ? 'Last feed fetch: plaintext HTTP. Relay profiles and embedded CA may be altered in transit; origin not authenticated.'
+    : fetchTransport === 'https'
+      ? 'Last feed fetch: HTTPS transport. Imported relay profiles and server identity are still not independently authenticated.'
+      : fetchTransport === 'mixed'
+        ? 'Last feed fetch: mixed or unknown transports, possibly HTTP. Relay origin not authenticated.'
+        : 'Last feed fetch: cached or unknown. Relay origin and server identity are not authenticated.';
+  setText('poolFetchTransport', fetchNotice);
 }
 
 function markHealth(iconId, textId, ok, label) {

@@ -310,6 +310,20 @@ def status(common, evidence, min_pool=6):
             ts=dt.datetime.fromisoformat(str(last).replace("Z","+00:00"))
             age=round((dt.datetime.now().astimezone()-ts.astimezone()).total_seconds()/3600,2)
         except Exception: pass
+    # Last observed fetch transport only, not an active profile-origin signature.
+    raw_mirrors = mirror.get("usedMirrors")
+    mirrors = [str(u).strip() for u in raw_mirrors if u] if isinstance(raw_mirrors, list) else []
+    if not mirrors and mirror.get("usedMirror"):
+        mirrors = [str(mirror["usedMirror"]).strip()]
+    schemes = {u.split(":", 1)[0].lower() for u in mirrors}
+    if not mirrors:
+        last_fetch_transport = "cached" if mirror else "unknown"
+    elif schemes == {"https"}:
+        last_fetch_transport = "https"
+    elif schemes == {"http"}:
+        last_fetch_transport = "http"
+    else:
+        last_fetch_transport = "mixed"
     generations=len([p for p in (factory/"generations").glob("*") if p.is_dir()]) if (factory/"generations").exists() else 0
     protocols={}
     countries={}
@@ -323,7 +337,9 @@ def status(common, evidence, min_pool=6):
         "at":now(),"schemaVersion":2,"pool":len(idx),"validated":validated,
         "standby":max(0,len(idx)-validated),"quarantined":len(quarantine),
         "generations":generations,"lastRefresh":last,"ageHours":age,
-        "source":source,"healthy":len(idx)>=min_pool,"metadataComplete":metadata_complete,
+        "source":source,"lastFetchTransport":last_fetch_transport,
+        "lastFetchTransportTlsOnly":last_fetch_transport=="https","profileOriginAuthenticated":False,
+        "healthy":len(idx)>=min_pool,"metadataComplete":metadata_complete,
         "protocols":protocols,"countries":countries
     }
     write_json(factory/"status.json",obj)

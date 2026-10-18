@@ -1563,15 +1563,20 @@ exit 0
 
   async _factoryStatus() {
     const p = this._factoryStatusPath();
-    if (!fs.existsSync(p)) {
+    let cached = null;
+    if (fs.existsSync(p)) {
+      try { cached = JSON.parse(fs.readFileSync(p, 'utf8').replace(/^\uFEFF/, '')); } catch {}
+    }
+    // Existing installed clients may have a pre-upgrade status.json. Rebuild
+    // metadata using factory STATUS only (no relay refresh or VPN action).
+    if (!cached || !Object.prototype.hasOwnProperty.call(cached, 'lastFetchTransport')) {
       try {
         if (this.platform === 'win32') await this._windows('factory-status');
         else await this._linux('factory-status');
+        cached = JSON.parse(fs.readFileSync(p, 'utf8').replace(/^\uFEFF/, ''));
       } catch {}
     }
-    if (fs.existsSync(p)) {
-      try { return JSON.parse(fs.readFileSync(p, 'utf8').replace(/^\uFEFF/, '')); } catch {}
-    }
+    if (cached && typeof cached === 'object') return cached;
     return { pool:0, validated:0, standby:0, quarantined:0, generations:0, protocols:{}, healthy:false, source:'', ageHours:null, lastRefresh:null };
   }
 

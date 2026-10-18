@@ -49,6 +49,53 @@ test('dashboard explicitly separates VPN route health from relay certificate ide
   assert.doesNotMatch(html,/SECURE TUNNEL/);
 });
 
+test('Config Factory exposes last-fetch transport without pretending provider profiles are authenticated',()=>{
+  const py=fs.readFileSync(path.join(root,'backend/linux/config_factory.py'),'utf8');
+  const ps=fs.readFileSync(path.join(root,'backend/windows/scripts/Config-Factory.ps1'),'utf8');
+  const ui=fs.readFileSync(path.join(root,'src/renderer/app.js'),'utf8');
+  const backend=fs.readFileSync(path.join(root,'src/main/platform-backend.js'),'utf8');
+  const html=fs.readFileSync(path.join(root,'src/renderer/index.html'),'utf8');
+  for(const source of [py,ps]) {
+    assert.match(source,/lastFetchTransport/);
+    assert.match(source,/profileOriginAuthenticated/);
+    assert.match(source,/usedMirrors/);
+  }
+  assert.match(py,/last_fetch_transport=="https"/);
+  assert.match(ps,/lastFetchTransport -eq 'https'/);
+  assert.match(html,/id="poolFetchTransport" class="relay-identity-note" role="note"/);
+  assert.match(backend,/hasOwnProperty.call\(cached, 'lastFetchTransport'\)/);
+  assert.match(ui,/fetchTransport === 'http'/);
+  assert.match(ui,/Last feed fetch: plaintext HTTP/);
+  assert.match(ui,/HTTPS transport\. Imported relay profiles/);
+  assert.match(ui,/mixed or unknown transports/);
+  assert.match(ui,/cached or unknown/);
+});
+
+test('Linux source transport provenance handles HTTP, HTTPS, mixed, cached and unknown in isolated factory status',()=>{
+  if(process.platform!=='linux') return;
+  const cp=require('node:child_process');
+  const source=[
+    'import sys,importlib.util,collections,json,tempfile',
+    'from pathlib import Path',
+    'spec=importlib.util.spec_from_file_location("oig_factory",sys.argv[1])',
+    'factory=importlib.util.module_from_spec(spec);spec.loader.exec_module(factory)',
+    'cases=[("http",["http://relay.invalid"]),("https",["https://relay.invalid"]),("mixed",["http://relay.invalid","https://relay.invalid"]),("cached",[]),("unknown",None)]',
+    'for expected,urls in cases:',
+    '  with tempfile.TemporaryDirectory(prefix="oig-provenance-") as path:',
+    '    common=Path(path)/"common";evidence=common/"evidence";evidence.mkdir(parents=True)',
+    '    if urls is not None:',
+    '      (evidence/"mirror-refresh-last.json").write_text(json.dumps({"usedMirrors":urls,"refresh":bool(urls)}))',
+    '    s=factory.status(common,evidence)',
+    '    assert s["lastFetchTransport"]==expected,(expected,s["lastFetchTransport"])',
+    '    assert s["lastFetchTransportTlsOnly"]==(expected=="https")',
+    '    assert s["profileOriginAuthenticated"] is False',
+    'print("PASS five isolated source-transport fixtures")'
+  ].join('\n');
+  const r=cp.spawnSync('python3',['-c',source,path.join(root,'backend/linux/config_factory.py')],{encoding:'utf8',timeout:15000});
+  assert.equal(r.status,0,r.stderr||r.stdout);
+  assert.match(r.stdout,/PASS five isolated source-transport fixtures/);
+});
+
 test('Linux backend implements required actions',()=>{
   const sh=fs.readFileSync(path.join(root,'backend/linux/oig-linux.sh'),'utf8');
   for(const action of ['connect','disconnect','refresh','ensure','auto-install','auto-remove','console-status','console-enable','console-disable']) assert.ok(sh.includes(action));

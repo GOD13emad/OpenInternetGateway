@@ -59,6 +59,22 @@ function Write-Status {
      if($m.at){$lastRefresh=[string]$m.at}
    }catch{}
  }
+ $lastFetchTransport='unknown'
+ # The transport of the latest feed fetch does not authenticate imported
+ # profiles or last-known-good cached relay configurations.
+ if(Test-Path $mirror){
+   try{
+     $provenance=Get-Content -Raw $mirror|ConvertFrom-Json
+     $urls=@($provenance.usedMirrors|Where-Object {$_})
+     if(-not $urls.Count -and $provenance.usedMirror){$urls=@([string]$provenance.usedMirror)}
+     if(-not $urls.Count){$lastFetchTransport='cached'}
+     else{
+       $schemes=@($urls|ForEach-Object {try{([Uri]([string]$_)).Scheme.ToLowerInvariant()}catch{'unknown'}}|Sort-Object -Unique)
+       if($schemes.Count -eq 1 -and $schemes[0] -in @('http','https')){$lastFetchTransport=$schemes[0]}
+       else{$lastFetchTransport='mixed'}
+     }
+   }catch{$lastFetchTransport='unknown'}
+ }
  $ageHours=$null
  if($lastRefresh){try{$ageHours=[Math]::Round(((Get-Date)-[DateTimeOffset]::Parse($lastRefresh).LocalDateTime).TotalHours,2)}catch{}}
  $metadataComplete=($items.Count -gt 0 -and @($items|Where-Object {[string]::IsNullOrWhiteSpace([string]$_.Country)}).Count -eq 0)
@@ -73,6 +89,9 @@ function Write-Status {
    lastRefresh=$lastRefresh
    ageHours=$ageHours
    source=$source
+   lastFetchTransport=$lastFetchTransport
+   lastFetchTransportTlsOnly=($lastFetchTransport -eq 'https')
+   profileOriginAuthenticated=$false
    healthy=($items.Count -ge $MinPool)
    metadataComplete=$metadataComplete
    protocols=$protocols
