@@ -1381,10 +1381,11 @@ test('TCP socket responsiveness receives bounded ranking credit, not TLS validat
   }else if(process.platform==='win32'){
     const script=[
       '$ErrorActionPreference="Stop"',
-      '$text=[IO.File]::ReadAllText($args[0])',
-      '$match=[regex]::Match($text,"(?s)function Get-Number\(\$Value\)\{.*?(?=function Get-Candidates\()")',
-      'if(-not $match.Success){throw "Windows quality functions missing"}',
-      'Invoke-Expression $match.Value',
+      '$text=[IO.File]::ReadAllText($env:OIG_RANKING_SOURCE)',
+      '$start=$text.IndexOf("function Get-Number(")',
+      '$end=$text.IndexOf("function Get-Candidates(",$start)',
+      'if($start -lt 0 -or $end -lt 0){throw "Windows quality functions missing"}',
+      'Invoke-Expression $text.Substring($start,$end-$start)',
       '$c=@{SHA256="fixture";Protocol="tcp";Port=443;Ping=90;Speed=0;Score=0}',
       '$base=Get-QualityScore $c "fixture" @{} @{} @{} ""',
       'function Delta($b){(Get-QualityScore $c "fixture" @{} @{} @{fixture=$b} "")-$base}',
@@ -1395,7 +1396,10 @@ test('TCP socket responsiveness receives bounded ranking credit, not TLS validat
       'if($tcp -le 0 -or $tcp -gt 25 -or $icmp -le 100 -or $legacy -le 100){throw ("Quality mismatch: "+$tcp+","+ $icmp+","+$legacy)}',
       '"PASS native Windows quality: TCP-only reduced and legacy preserved"'
     ].join(';');
-    const r=cp.spawnSync('pwsh',['-NoProfile','-NonInteractive','-Command',script,path.join(root,'backend/windows/scripts/Headless-Control.ps1')],{encoding:'utf8',timeout:15000});
+    const r=cp.spawnSync('pwsh',['-NoProfile','-NonInteractive','-EncodedCommand',Buffer.from(script,'utf16le').toString('base64')],{
+      encoding:'utf8',timeout:15000,
+      env:{...process.env,OIG_RANKING_SOURCE:path.join(root,'backend/windows/scripts/Headless-Control.ps1')}
+    });
     assert.equal(r.status,0,r.stderr||r.stdout);
   }
 });
