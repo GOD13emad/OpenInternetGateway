@@ -233,6 +233,9 @@ def profile_is_data_only(text):
             if len(fields) != 2 or "none" in fields[1].lower().split(":"):
                 return False
         seen[directive] = seen.get(directive, 0) + 1
+        if directive == "remote-cert-tls":
+            if len(fields) != 2 or fields[1].lower() != "server" or seen[directive] > 1:
+                return False
         if directive in {"client", "dev", "proto", "remote"} and seen[directive] > 1:
             return False
         if directive == "remote":
@@ -245,6 +248,13 @@ def profile_is_data_only(text):
             except ValueError:
                 return False
     return block is None and all(seen.get(name) == 1 for name in ("client", "dev", "proto", "remote")) and all(inline_seen.get(name) == 1 for name in ("ca", "cert", "key"))
+
+def with_server_certificate_role(text):
+    """Require the peer's X.509 server KU/EKU; not a substitute for an independently trusted pin."""
+    if re.search(r"(?mi)^remote-cert-tls\s+server\s*$", text):
+        return text
+    return text.rstrip("\r\n") + "\nremote-cert-tls server\n"
+
 
 def bounded_csv_rows(csv_path):
     if csv_path.stat().st_size > MAX_CACHED_CSV_BYTES:
@@ -368,14 +378,16 @@ def preserve_old(active, stage, meta, success, limit=4):
         protocol="udp" if re.search(r"(?m)^proto\s+udp",text) else ("tcp" if re.search(r"(?m)^proto\s+tcp",text) else "unknown")
         kept+=1
         name=f"LKG-{kept:02d}-{old_path.name}"
-        shutil.copy2(old_path,stage/name)
+        staged = stage/name
+        staged.write_text(with_server_certificate_role(text),encoding="utf-8",newline="")
+        staged_sha = hashlib.sha256(staged.read_bytes()).hexdigest()
         prior = success.get(sha,{}) if isinstance(success,dict) else {}
         country = c.get("Country","") or (prior.get("country","") if isinstance(prior,dict) else "") or "JP"  # legacy pools before 2.3 were JP-only
         meta.append({
             "Rank":len(meta)+1,"Host":c.get("Host",""),"IP":c.get("IP",""),"Port":c.get("Port",0),
             "Protocol":protocol,"Country":country,"CountryName":c.get("CountryName",""),
             "Score":c.get("Score",0),"Ping":c.get("Ping",""),"Speed":c.get("Speed",0),"Sessions":c.get("Sessions",0),
-            "Profile":f"runtime/udp-cache/{name}","SHA256":sha,
+            "Profile":f"runtime/udp-cache/{name}","SHA256":staged_sha,
             "Source":"LastKnownGood","GeneratedAt":now()
         })
         current_shas.add(sha)
@@ -403,7 +415,7 @@ def promote(common, evidence, count=48, keep_generations=4, preserve_count=8):
         safe=re.sub(r"[^A-Za-z0-9_-]","_",r["Host"])
         name=f"{i:02d}-{r['Protocol']}-{safe}-{r['IP']}-{r['Port']}.ovpn"
         p=stage/name
-        p.write_text(r["Text"],encoding="utf-8",newline="")
+        p.write_text(with_server_certificate_role(r["Text"]),encoding="utf-8",newline="")
         sha=hashlib.sha256(p.read_bytes()).hexdigest()
         meta.append({
             "Rank":i,"Host":r["Host"],"IP":r["IP"],"Port":r["Port"],"Protocol":r["Protocol"],

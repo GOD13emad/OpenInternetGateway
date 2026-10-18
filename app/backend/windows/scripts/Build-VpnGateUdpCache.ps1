@@ -69,6 +69,7 @@ function Test-SafePublicVpnProfile([string]$text){
      if($fields.Count -ne 2 -or 'none' -in ($fields[1].ToLowerInvariant() -split ':')){$unsafe=$true;break}
    }
    $seenOps[$opt]=[int]$seenOps[$opt]+1
+   if($opt -eq 'remote-cert-tls' -and ($fields.Count -ne 2 -or $fields[1] -ine 'server' -or $seenOps[$opt] -ne 1)){$unsafe=$true;break}
    if($opt -in @('client','dev','proto','remote') -and $seenOps[$opt] -ne 1){$unsafe=$true;break}
    if($opt -eq 'remote'){
      if($fields.Count -ne 3){$unsafe=$true;break}
@@ -82,6 +83,12 @@ function Test-SafePublicVpnProfile([string]$text){
  if(@('client','dev','proto','remote')|Where-Object {$seenOps[$_] -ne 1}){return $false}
  if(@('ca','cert','key')|Where-Object {$seenBlocks[$_] -ne 1}){return $false}
  return $true
+}
+
+function Add-ServerRole([string]$text){
+ # Server KU/EKU alone does not establish independent relay identity.
+ if($text -match '(?mi)^remote-cert-tls\s+server\s*$'){return $text}
+ return ($text.TrimEnd([char]13,[char]10)+[Environment]::NewLine+'remote-cert-tls server'+[Environment]::NewLine)
 }
 
 $rows=@()
@@ -131,7 +138,7 @@ foreach($line in Get-Content -LiteralPath $csv){
  $seen[$key]=$true
  $rows += [pscustomobject]@{
    Host=$p[0];IP=$ip;Score=$scoreValue;Ping=$p[3];Speed=$speedValue;
-   Sessions=$sessionValue;Port=$port;Text=$text;Source='VPNGate';
+   Sessions=$sessionValue;Port=$port;Text=(Add-ServerRole $text);Source='VPNGate';
    Protocol=$transport;TransportRank=$transportRank;Country=$country;CountryName=$countryName
  }
 }
@@ -206,13 +213,15 @@ foreach($wrap in $oldSorted){
  $protocol=if($text -match '(?m)^proto\s+udp'){'udp'}elseif($text -match '(?m)^proto\s+tcp'){'tcp'}else{'unknown'}
  $i++;$kept++
  $file=('LKG-{0:D2}-{1}' -f $kept,(Split-Path $oldPath -Leaf))
- Copy-Item -LiteralPath $oldPath -Destination (Join-Path $stage $file) -Force
+ $staged=Join-Path $stage $file
+ [IO.File]::WriteAllText($staged,(Add-ServerRole $text),[Text.UTF8Encoding]::new($false))
+ $stagedSha=(Get-FileHash -LiteralPath $staged -Algorithm SHA256).Hash.ToLowerInvariant()
  $country=[string]$o.Country
  if([string]::IsNullOrWhiteSpace($country) -and $success.ContainsKey($sha)){try{$country=[string]$success[$sha].country}catch{}}
  if([string]::IsNullOrWhiteSpace($country)){$country='JP'} # legacy pools before 2.3 were JP-only
  $meta += [pscustomobject]@{
    Rank=$i;Host=$o.Host;IP=$o.IP;Port=$o.Port;Protocol=$protocol;Country=$country;CountryName=$o.CountryName;Score=$o.Score;Ping=$o.Ping;
-   Speed=$o.Speed;Sessions=$o.Sessions;Profile=('runtime\udp-cache\'+$file);SHA256=$sha;
+   Speed=$o.Speed;Sessions=$o.Sessions;Profile=('runtime\udp-cache\'+$file);SHA256=$stagedSha;
    Source='LastKnownGood';GeneratedAt=(Get-Date).ToString('o')
  }
 }

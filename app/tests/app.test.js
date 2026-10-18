@@ -451,6 +451,86 @@ test('Linux profile dedupe does not let an incomplete candidate reserve a valid 
   assert.match(result.stdout,/PASS invalid prior duplicate/);
 });
 
+test('OpenVPN staged profiles enforce server certificate role including retained cache',()=>{
+  const cp=require('node:child_process'),os=require('node:os'),crypto=require('node:crypto');
+  const base=fs.mkdtempSync(path.join(os.tmpdir(),'oig-server-role-'));
+  const build=(ip,role='')=>[
+    'client','dev tun','proto udp','remote '+ip+' 1194',
+    'cipher AES-128-CBC','auth SHA1',role,
+    '<ca>','a','</ca>','<cert>','b','</cert>','<key>','c','</key>',''
+  ].filter(Boolean).join('\n');
+  const row=(name,ip,role='')=>[
+    name,ip,'100','12','100000','Japan','JP','4',
+    '0','0','0','0','0','0',Buffer.from(build(ip,role)).toString('base64')
+  ].join(',');
+  const csv=[
+    row('bad-role','203.0.113.40','remote-cert-tls client'),
+    row('duplicate-role','203.0.113.41','remote-cert-tls server\nremote-cert-tls server'),
+    row('valid-0','203.0.113.50'),
+    row('valid-1','203.0.113.51','remote-cert-tls server'),
+    row('valid-2','203.0.113.52')
+  ].join('\n')+'\n';
+  try{
+    const evidence=path.join(base,'evidence');
+    const active=path.join(base,'runtime','udp-cache');
+    fs.mkdirSync(evidence,{recursive:true});
+    fs.mkdirSync(active,{recursive:true});
+    fs.writeFileSync(path.join(evidence,'vpngate-mirror-api.csv'),csv);
+    const prior=build('203.0.113.80');
+    fs.writeFileSync(path.join(active,'prior.ovpn'),prior);
+    const priorHash=crypto.createHash('sha256').update(prior).digest('hex');
+    fs.writeFileSync(path.join(active,'index.json'),JSON.stringify([{
+      Rank:1,Host:'prior',IP:'203.0.113.80',Port:1194,Protocol:'udp',Country:'JP',
+      CountryName:'Japan',Profile:'runtime/udp-cache/prior.ovpn',SHA256:priorHash
+    }]));
+    if(process.platform==='linux'){
+      const snippet=[
+        'import importlib.util,sys,json,hashlib,re',
+        'from pathlib import Path',
+        'mod=importlib.util.spec_from_file_location("f",sys.argv[1])',
+        'f=importlib.util.module_from_spec(mod);mod.loader.exec_module(f)',
+        'base=Path(sys.argv[2]);meta,kept=f.promote(base,base/"evidence",count=3,preserve_count=1)',
+        'assert kept==1 and len(meta)==4,(kept,len(meta))',
+        'assert sorted(x["Host"] for x in meta)==["prior","valid-0","valid-1","valid-2"]',
+        'for item in meta:',
+        '  target=base/"runtime"/"udp-cache"/Path(item["Profile"]).name',
+        '  blob=target.read_bytes()',
+        '  assert hashlib.sha256(blob).hexdigest()==item["SHA256"],item',
+        '  text=blob.decode("utf8")',
+        '  assert len(re.findall(r"(?mi)^remote-cert-tls\\s+server\\s*$",text))==1,item',
+        '  assert f.profile_is_data_only(text),item',
+        'print("PASS staged role and LKG digest")'
+      ].join('\n');
+      const result=cp.spawnSync('python3',['-c',snippet,path.join(root,'backend/linux/config_factory.py'),base],{encoding:'utf8',timeout:15000});
+      assert.equal(result.status,0,result.stderr||result.stdout);
+    }else if(process.platform==='win32'){
+      const target=path.join(base,'windows');
+      const scripts=path.join(target,'scripts'),wevidence=path.join(target,'evidence');
+      const wactive=path.join(target,'runtime','udp-cache');
+      for(const dir of [scripts,wevidence,wactive])fs.mkdirSync(dir,{recursive:true});
+      for(const name of ['Build-VpnGateUdpCache.ps1','Config-Factory.ps1']){
+        fs.copyFileSync(path.join(root,'backend/windows/scripts',name),path.join(scripts,name));
+      }
+      fs.writeFileSync(path.join(wevidence,'vpngate-mirror-api.csv'),csv);
+      fs.writeFileSync(path.join(wactive,'prior.ovpn'),prior);
+      fs.writeFileSync(path.join(wactive,'index.json'),JSON.stringify([{
+        Rank:1,Host:'prior',IP:'203.0.113.80',Port:1194,Protocol:'udp',Country:'JP',
+        CountryName:'Japan',Profile:'runtime/udp-cache/prior.ovpn',SHA256:priorHash
+      }]));
+      const result=cp.spawnSync('pwsh',['-NoProfile','-NonInteractive','-File',
+        path.join(scripts,'Build-VpnGateUdpCache.ps1'),'-Count','3','-PerCountry','3','-PreserveOld','1'],{encoding:'utf8',timeout:20000});
+      assert.equal(result.status,0,result.stderr||result.stdout);
+      const idx=JSON.parse(fs.readFileSync(path.join(wactive,'index.json'),'utf8'));
+      assert.deepEqual(idx.map(x=>x.Host).sort(),['prior','valid-0','valid-1','valid-2']);
+      for(const item of idx){
+        const blob=fs.readFileSync(path.join(wactive,path.basename(item.Profile)));
+        assert.equal(crypto.createHash('sha256').update(blob).digest('hex'),item.SHA256);
+        assert.equal((blob.toString('utf8').match(/^remote-cert-tls\s+server\s*$/gmi)||[]).length,1);
+      }
+    }
+  }finally{fs.rmSync(base,{recursive:true,force:true});}
+});
+
 test('OpenVPN imported profiles cannot disable cipher or authentication',()=>{
   const sourcePy=fs.readFileSync(path.join(root,'backend/linux/config_factory.py'),'utf8');
   const sourceWin=fs.readFileSync(path.join(root,'backend/windows/scripts/Build-VpnGateUdpCache.ps1'),'utf8');
