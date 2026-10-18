@@ -220,8 +220,11 @@ function renderBenchmarkSummary() {
   const b = active?.benchmark;
   const box = $('benchmarkSummary');
   if (!box) return;
+  // The active-tunnel summary must not relabel a TCP socket-open duration
+  // as live ICMP ping, even when the cached fast probe selected TCP.
+  const liveIcmpMs = b?.icmpPingMs ?? (b?.fastMethod === 'icmp-direct' ? b?.fastPingMs : null);
   const values = [
-    (b?.icmpPingMs ?? b?.fastPingMs) == null ? 'Blocked / —' : metric(b.icmpPingMs ?? b.fastPingMs, ' ms'),
+    liveIcmpMs == null ? 'Blocked / —' : metric(liveIcmpMs, ' ms'),
     b?.httpsLatencyMs == null ? '—' : metric(b.httpsLatencyMs, ' ms'),
     b?.downloadMbps == null ? '—' : metric(b.downloadMbps, ' Mbps'),
     b?.uploadMbps == null ? '—' : metric(b.uploadMbps, ' Mbps')

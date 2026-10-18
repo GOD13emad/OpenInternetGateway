@@ -1404,6 +1404,14 @@ test('TCP socket responsiveness receives bounded ranking credit, not TLS validat
   }
 });
 
+test('active tunnel summary never labels TCP-port latency as live ICMP ping',()=>{
+  const renderer=fs.readFileSync(path.join(root,'src/renderer/app.js'),'utf8');
+  const summary=renderer.slice(renderer.indexOf('function renderBenchmarkSummary()'),renderer.indexOf('function connectionStatusRank('));
+  assert.match(summary,/b\?\.fastMethod === 'icmp-direct'/);
+  assert.match(summary,/liveIcmpMs == null/);
+  assert.doesNotMatch(summary,/b\?\.icmpPingMs \?\? b\?\.fastPingMs/);
+});
+
 test('direct relay reachability separates ICMP from TCP-open without claiming VPN TLS',async()=>{
   const Backend=require(path.join(root,'src/main/platform-backend.js'));
   const backend=Object.create(Backend.prototype);
