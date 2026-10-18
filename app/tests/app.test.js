@@ -131,6 +131,36 @@ test('Imported OpenVPN profiles fail closed on unknown executable directives and
   assert.match(result.stdout,/PASS safe=3 malicious_rejected=6/);
 });
 
+test('untrusted duplicate endpoint cannot suppress a later valid relay profile',()=>{
+  const factory=fs.readFileSync(path.join(root,'backend/linux/config_factory.py'),'utf8');
+  const windows=fs.readFileSync(path.join(root,'backend/windows/scripts/Build-VpnGateUdpCache.ps1'),'utf8');
+  const pyScope=factory.slice(factory.indexOf('def parse_candidates('),factory.indexOf('def preserve_old('));
+  assert.ok(pyScope.indexOf('if not profile_is_data_only(text): continue') < pyScope.indexOf('seen.add(key)'));
+  assert.ok(windows.indexOf('if(-not(Test-SafePublicVpnProfile $text)){continue}') < windows.indexOf('$seen[$key]=$true'));
+  if(process.platform!=='linux') return;
+  const cp=require('node:child_process');
+  const script=[
+    'import importlib.util,sys,tempfile,base64',
+    'from pathlib import Path',
+    'sp=importlib.util.spec_from_file_location("oig_factory",sys.argv[1]);m=importlib.util.module_from_spec(sp);sp.loader.exec_module(m)',
+    'def text(ip,extra):',
+    '  return "client\\ndev tun\\nproto udp\\nremote %s 1194\\n<ca>\\nCA\\n</ca>\\n<cert>\\nCERT\\n</cert>\\n<key>\\nKEY\\n</key>\\n%s\\n"%(ip,extra)',
+    'values=[("poison","203.0.113.10","management 127.0.0.1 7777"),("valid-same","203.0.113.10",""),("valid-other","203.0.113.11","")]',
+    'with tempfile.TemporaryDirectory(prefix="oig-duplicate-safe-") as d:',
+    '  rows=[]',
+    '  for host,ip,extra in values:',
+    '    parts=[host,ip,"100","12","1000000","Japan","JP","4","","","","","","",base64.b64encode(text(ip,extra).encode()).decode()]',
+    '    rows.append(",".join(parts))',
+    '  csv=Path(d)/"relays.csv";csv.write_text("\\n".join(rows)+"\\n")',
+    '  hosts={x["Host"] for x in m.parse_candidates(csv,count=10,per_country=10)}',
+    '  assert hosts=={"valid-same","valid-other"},hosts',
+    'print("PASS duplicate malicious-first does not suppress valid same-IP relay")'
+  ].join('\n');
+  const x=cp.spawnSync('python3',['-c',script,path.join(root,'backend/linux/config_factory.py')],{encoding:'utf8',timeout:12000});
+  assert.equal(x.status,0,x.stderr||x.stdout);
+  assert.match(x.stdout,/PASS duplicate malicious-first/);
+});
+
 test('Linux backend implements required actions',()=>{
   const sh=fs.readFileSync(path.join(root,'backend/linux/oig-linux.sh'),'utf8');
   for(const action of ['connect','disconnect','refresh','ensure','auto-install','auto-remove','console-status','console-enable','console-disable']) assert.ok(sh.includes(action));

@@ -229,6 +229,8 @@ def parse_candidates(csv_path, count=48, per_country=6):
             score, speed, sessions = int(p[2]), int(p[4]), int(p[7])
         except Exception:
             continue
+        # Only structurally safe rows may claim a duplicate endpoint.
+        seen.add(key)
         rows.append({
             "Host":p[0],"IP":ip,"Port":port,"Score":score,"Ping":p[3],
             "Speed":speed,"Sessions":sessions,"Text":text,"Source":"VPNGate",

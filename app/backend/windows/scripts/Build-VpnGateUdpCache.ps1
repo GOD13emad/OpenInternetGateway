@@ -84,7 +84,6 @@ foreach($line in Get-Content -LiteralPath $csv){
  $ip=$Matches[1];$port=[int]$Matches[2]
  $key=($transport+':'+$ip+':'+$port)
  if($seen.ContainsKey($key)){continue}
- $seen[$key]=$true
  if($text -notmatch '(?m)^client\s*$'){continue}
  if($text -notmatch '(?m)^dev\s+tun\s*$'){continue}
  if($text -notmatch '(?s)<ca>.+?</ca>'){continue}
@@ -92,6 +91,8 @@ foreach($line in Get-Content -LiteralPath $csv){
  if($text -notmatch '(?s)<key>.+?</key>'){continue}
  # Treat public profiles as data, never executable local policy.
  if($text -match '(?mi)^\s*(?:script-security|up|down|route-up|route-pre-down|ipchange|plugin|client-connect|client-disconnect|learn-address)'){continue}
+ # Only safe, complete profiles can reserve a deduplicated endpoint.
+ $seen[$key]=$true
  $rows += [pscustomobject]@{
    Host=$p[0];IP=$ip;Score=[int64]$p[2];Ping=$p[3];Speed=[int64]$p[4];
    Sessions=[int]$p[7];Port=$port;Text=$text;Source='VPNGate';
