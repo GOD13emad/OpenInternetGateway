@@ -161,6 +161,57 @@ test('untrusted duplicate endpoint cannot suppress a later valid relay profile',
   assert.match(x.stdout,/PASS duplicate malicious-first/);
 });
 
+test('VPN Gate CSV and Base64 input stay bounded and oversized rows fail closed',()=>{
+  const py=fs.readFileSync(path.join(root,'backend/linux/config_factory.py'),'utf8');
+  const winFetch=fs.readFileSync(path.join(root,'backend/windows/scripts/Refresh-VpnGateCache.ps1'),'utf8');
+  const winBuild=fs.readFileSync(path.join(root,'backend/windows/scripts/Build-VpnGateUdpCache.ps1'),'utf8');
+  assert.match(py,/MAX_SOURCE_CSV_BYTES = 24 \* 1024 \* 1024/);
+  assert.match(py,/MAX_CSV_LINE_BYTES = 256 \* 1024/);
+  assert.match(py,/--max-filesize/);
+  assert.match(py,/def bounded_csv_rows/);
+  assert.doesNotMatch(py,/for line in csv_path\.read_text\(/);
+  assert.match(winFetch,/--max-filesize/);
+  assert.match(winFetch,/\$MaxSourceCsvBytes=24\*1024\*1024/);
+  assert.match(winFetch,/\$MaxCsvLineBytes=256\*1024/);
+  assert.match(winFetch,/\$mergedBytes\+/);
+  assert.match(winBuild,/\$MaxCachedCsvBytes=72\*1024\*1024/);
+  assert.match(winBuild,/\$MaxCsvLineBytes=256\*1024/);
+  if(process.platform!=='linux') return;
+  const cp=require('node:child_process');
+  const code=[
+    'import sys,importlib.util,tempfile,base64,types,unittest.mock',
+    'from pathlib import Path',
+    'spec=importlib.util.spec_from_file_location("oig_bounded",sys.argv[1]);m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)',
+    'def config(ip):',
+    '  return "client\\ndev tun\\nproto udp\\nremote %s 1194\\n<ca>\\nCA\\n</ca>\\n<cert>\\nCERT\\n</cert>\\n<key>\\nKEY\\n</key>\\n"%ip',
+    'with tempfile.TemporaryDirectory(prefix="oig-csv-bound-") as t:',
+    '  p=Path(t)/"cache.csv"',
+    '  rows=["bad,203.0.113.15,100,12,1000000,Japan,JP,4,,,,,,,"+"A"*(m.MAX_CSV_LINE_BYTES+1)]',
+    '  for i in range(1,4):',
+    '    ip="203.0.113.%d"%i',
+    '    row=["valid%d"%i,ip,"100","12","1000000","Japan","JP","4","","","","","","",base64.b64encode(config(ip).encode()).decode()]',
+    '    rows.append(",".join(row))',
+    '  p.write_text("\\n".join(rows)+"\\n")',
+    '  hosts={x["Host"] for x in m.parse_candidates(p,count=10,per_country=10)}',
+    '  assert hosts=={"valid1","valid2","valid3"},hosts',
+    '  with p.open("wb") as file:file.truncate(m.MAX_CACHED_CSV_BYTES+1)',
+    '  try:list(m.bounded_csv_rows(p));raise AssertionError("oversized cached file accepted")',
+    '  except RuntimeError:pass',
+    '  huge=b"x"*(m.MAX_SOURCE_CSV_BYTES+1)',
+    '  fake=types.SimpleNamespace(returncode=0,stdout=huge)',
+    '  with unittest.mock.patch.object(m.shutil,"which",return_value="/usr/bin/curl"),unittest.mock.patch.object(m.subprocess,"run",return_value=fake) as run:',
+    '    try:m.fetch("https://example.invalid/api/iphone/");raise AssertionError("oversized response accepted")',
+    '    except RuntimeError:pass',
+    '    argv=run.call_args.args[0]',
+    '    assert "--max-filesize" in argv and str(m.MAX_SOURCE_CSV_BYTES) in argv',
+    'print("PASS oversized response, row and cache all fail closed; 3 safe rows accepted")'
+  ].join('\n');
+  const r=cp.spawnSync('python3',['-c',code,path.join(root,'backend/linux/config_factory.py')],{encoding:'utf8',timeout:20000});
+  assert.equal(r.status,0,r.stderr||r.stdout);
+  assert.match(r.stdout,/PASS oversized response, row and cache/);
+});
+
+
 test('Linux backend implements required actions',()=>{
   const sh=fs.readFileSync(path.join(root,'backend/linux/oig-linux.sh'),'utf8');
   for(const action of ['connect','disconnect','refresh','ensure','auto-install','auto-remove','console-status','console-enable','console-disable']) assert.ok(sh.includes(action));

@@ -11,6 +11,10 @@ SEEDS = [
     "http://150.40.105.24:38827",
 ]
 
+MAX_SOURCE_CSV_BYTES = 24 * 1024 * 1024
+MAX_CSV_LINE_BYTES = 256 * 1024
+MAX_CACHED_CSV_BYTES = 3 * MAX_SOURCE_CSV_BYTES
+
 COUNTRY_PRIORITY = ["JP","KR","US","SG","TH","VN","FR","DE","NL","GB","CA","AU","PT","RU"]
 
 def now():
@@ -36,9 +40,12 @@ def fetch(url, timeout=8, allow_partial=False):
     if curl:
         proc = subprocess.run([
             curl,"-4","-L","--fail","--noproxy","*",
-            "--connect-timeout","2","--max-time",str(timeout),"-sS",url
+            "--connect-timeout","2","--max-time",str(timeout),
+            "--max-filesize",str(MAX_SOURCE_CSV_BYTES),"-sS",url
         ], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
            timeout=timeout+2, check=False)
+        if len(proc.stdout) > MAX_SOURCE_CSV_BYTES:
+            raise RuntimeError("VPN Gate source CSV size exceeded")
         if proc.returncode:
             # curl 28 means the hard transfer deadline fired. For the VPN Gate
             # CSV only, retain bytes already received; refresh_snapshot keeps
@@ -50,7 +57,10 @@ def fetch(url, timeout=8, allow_partial=False):
         return proc.stdout, False
     req = urllib.request.Request(url, headers={"User-Agent":"OpenInternetGateway/2.5"})
     with urllib.request.urlopen(req, timeout=timeout) as r:
-        return r.read(), False
+        data = r.read(MAX_SOURCE_CSV_BYTES + 1)
+        if len(data) > MAX_SOURCE_CSV_BYTES:
+            raise RuntimeError("VPN Gate source CSV size exceeded")
+        return data, False
 
 def refresh_snapshot(evidence, max_sources=3):
     csv_path = evidence / "vpngate-mirror-api.csv"
@@ -84,6 +94,8 @@ def refresh_snapshot(evidence, max_sources=3):
                     lines = lines[:-1]
                 rows = []
                 for line in lines:
+                    if len(line.encode("utf-8")) > MAX_CSV_LINE_BYTES:
+                        continue
                     if not line or line.startswith("*") or line.startswith("#"):
                         continue
                     parts = line.split(",")
@@ -183,9 +195,17 @@ def profile_is_data_only(text):
                 return False
     return block is None and all(seen.get(name) == 1 for name in ("client", "dev", "proto", "remote")) and all(inline_seen.get(name) == 1 for name in ("ca", "cert", "key"))
 
+def bounded_csv_rows(csv_path):
+    if csv_path.stat().st_size > MAX_CACHED_CSV_BYTES:
+        raise RuntimeError("Cached VPN Gate CSV exceeds size limit")
+    with csv_path.open(encoding="utf-8", errors="replace") as stream:
+        for line in stream:
+            if len(line.encode("utf-8")) <= MAX_CSV_LINE_BYTES:
+                yield line.rstrip("\r\n")
+
 def parse_candidates(csv_path, count=48, per_country=6):
     rows, seen = [], set()
-    for line in csv_path.read_text(encoding="utf-8", errors="replace").splitlines():
+    for line in bounded_csv_rows(csv_path):
         if not line or line.startswith("*") or line.startswith("#"):
             continue
         p = line.split(",")
@@ -194,6 +214,8 @@ def parse_candidates(csv_path, count=48, per_country=6):
         country = p[6].strip().upper()
         country_name = p[5].strip()
         if not country:
+            continue
+        if len(p[-1].strip()) > MAX_CSV_LINE_BYTES:
             continue
         try:
             text = base64.b64decode(p[-1].strip()).decode("utf-8", errors="replace")

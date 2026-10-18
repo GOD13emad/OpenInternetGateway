@@ -2,6 +2,9 @@
 param([int]$MaxSources=3)
 $ErrorActionPreference='Stop'
 $Root=Split-Path -Parent $PSScriptRoot
+$MaxSourceCsvBytes=24*1024*1024
+$MaxCsvLineBytes=256*1024
+$MaxCachedCsvBytes=3*$MaxSourceCsvBytes
 $csv=Join-Path $Root 'evidence\vpngate-mirror-api.csv'
 $seedBases=@(
  'https://www.vpngate.net',
@@ -31,7 +34,7 @@ try{
   $psi.FileName='curl.exe'
   $psi.UseShellExecute=$false
   $psi.CreateNoWindow=$true
-  foreach($a in @('-4','-L','--fail','--noproxy','*','--connect-timeout','2','--max-time','8','-sS','-o',$out,($base+'/api/iphone/'))){[void]$psi.ArgumentList.Add([string]$a)}
+  foreach($a in @('-4','-L','--fail','--noproxy','*','--connect-timeout','2','--max-time','8','--max-filesize',([string]$MaxSourceCsvBytes),'-sS','-o',$out,($base+'/api/iphone/'))){[void]$psi.ArgumentList.Add([string]$a)}
   $p=[Diagnostics.Process]::new();$p.StartInfo=$psi
   try{
    if($p.Start()){$jobs.Add([pscustomobject]@{Base=$base;Path=$out;Process=$p})}
@@ -50,9 +53,10 @@ try{
  foreach($j in $jobs){
   if(-not(Test-Path -LiteralPath $j.Path)){continue}
   $size=(Get-Item -LiteralPath $j.Path).Length
-  if($size -lt 100000){continue}
+  if($size -lt 100000 -or $size -gt $MaxSourceCsvBytes){continue}
   $rows=0
   foreach($line in [IO.File]::ReadLines([string]$j.Path)){
+   if($line.Length -gt $MaxCsvLineBytes){continue}
    if([string]::IsNullOrWhiteSpace($line) -or $line.StartsWith('*') -or $line.StartsWith('#')){continue}
    if(($line -split ',').Count -ge 15){$rows++}
   }
@@ -64,23 +68,28 @@ try{
  }
  $chosen=@($usable|Sort-Object @{Expression='Complete';Descending=$true},@{Expression='Rows';Descending=$true}|Select-Object -First ([Math]::Max(1,$MaxSources)))
  $seen=[Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+  $mergedBytes=0
  foreach($j in $chosen){
   $attemptedSources+=,[string]$j.Base
   foreach($line in [IO.File]::ReadLines([string]$j.Path)){
+   if($line.Length -gt $MaxCsvLineBytes){continue}
    if([string]::IsNullOrWhiteSpace($line) -or $line.StartsWith('*') -or $line.StartsWith('#')){continue}
    if(($line -split ',').Count -lt 15){continue}
-   if($seen.Add($line)){$merged.Add($line)}
+   $rowBytes=[Text.Encoding]::UTF8.GetByteCount($line)+1
+    if(($mergedBytes+$rowBytes) -le $MaxCachedCsvBytes -and $seen.Add($line)){$merged.Add($line);$mergedBytes+=$rowBytes}
   }
  }
  $liveMergedRows=$merged.Count
  # A bounded live fetch may time out after returning useful complete rows.
  # Keep those fresh rows first, then fill coverage/diversity from the last
  # complete cache rather than replacing a broad snapshot with a narrow prefix.
- if($liveMergedRows -gt 0 -and $cachedSnapshotExisted){
+ if($liveMergedRows -gt 0 -and $cachedSnapshotExisted -and (Get-Item -LiteralPath $csv).Length -le $MaxCachedCsvBytes){
   foreach($line in [IO.File]::ReadLines($csv)){
+   if($line.Length -gt $MaxCsvLineBytes){continue}
    if([string]::IsNullOrWhiteSpace($line) -or $line.StartsWith('*') -or $line.StartsWith('#')){continue}
    if(($line -split ',').Count -lt 15){continue}
-   if($seen.Add($line)){$merged.Add($line);$cachedAdded++}
+   $rowBytes=[Text.Encoding]::UTF8.GetByteCount($line)+1
+    if(($mergedBytes+$rowBytes) -le $MaxCachedCsvBytes -and $seen.Add($line)){$merged.Add($line);$mergedBytes+=$rowBytes;$cachedAdded++}
   }
  }
  $promoted=$false

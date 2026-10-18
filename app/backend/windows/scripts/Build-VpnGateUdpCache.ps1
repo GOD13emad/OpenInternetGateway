@@ -4,6 +4,9 @@ $ErrorActionPreference='Stop'
 $Root=Split-Path -Parent $PSScriptRoot
 $csv=Join-Path $Root 'evidence\vpngate-mirror-api.csv'
 if(-not(Test-Path $csv)){throw 'VPN Gate mirror API cache missing.'}
+$MaxCachedCsvBytes=72*1024*1024
+$MaxCsvLineBytes=256*1024
+if((Get-Item -LiteralPath $csv).Length -gt $MaxCachedCsvBytes){throw 'VPN Gate mirror CSV exceeds size limit.'}
 
 $factory=Join-Path $Root 'runtime\config-factory'
 $stagingRoot=Join-Path $factory 'staging'
@@ -66,12 +69,14 @@ function Test-SafePublicVpnProfile([string]$text){
 $rows=@()
 $seen=@{}
 foreach($line in Get-Content -LiteralPath $csv){
+ if($line.Length -gt $MaxCsvLineBytes){continue}
  if(-not $line -or $line.StartsWith('*') -or $line.StartsWith('#')){continue}
  $p=$line -split ','
  if($p.Count -lt 15){continue}
  $country=([string]$p[6]).Trim().ToUpperInvariant();$countryName=([string]$p[5]).Trim()
  if([string]::IsNullOrWhiteSpace($country)){continue}
- try{$text=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($p[-1].Trim()))}catch{continue}
+ if(([string]$p[-1]).Length -gt $MaxCsvLineBytes){continue}
+  try{$text=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($p[-1].Trim()))}catch{continue}
  $ls=$text -split '[\r\n]+'
  if(-not(Test-SafePublicVpnProfile $text)){continue}
  $proto=($ls|Where-Object {$_ -match '^proto\s+'}|Select-Object -First 1)
