@@ -311,10 +311,11 @@ def preserve_old(active, stage, meta, success, limit=4):
         if kept>=limit: break
         sha=str(c.get("SHA256","")).lower()
         if not sha or sha in current_shas: continue
+        # Only retain an existing on-disk, bounded, hash-matching file inside
+        # the active pool.  Never follow a symlink or an indexed external path.
+        if not indexed_usable_profiles(active, [c]): continue
         raw=str(c.get("Profile","")).replace("\\","/")
         old_path=active/Path(raw).name
-        if not old_path.exists(): continue
-        if hashlib.sha256(old_path.read_bytes()).hexdigest()!=sha: continue
         text=old_path.read_text(encoding="utf-8",errors="replace")
         if not profile_is_data_only(text): continue
         protocol="udp" if re.search(r"(?m)^proto\s+udp",text) else ("tcp" if re.search(r"(?m)^proto\s+tcp",text) else "unknown")

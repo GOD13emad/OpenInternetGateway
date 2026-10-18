@@ -151,10 +151,20 @@ foreach($wrap in $oldSorted){
  $o=$wrap.Item
  $sha=([string]$o.SHA256).ToLowerInvariant()
  if($meta|Where-Object {([string]$_.SHA256).ToLowerInvariant() -eq $sha}){continue}
- $oldPath=if([IO.Path]::IsPathRooted([string]$o.Profile)){[string]$o.Profile}else{Join-Path $Root ([string]$o.Profile)}
- if(-not(Test-Path $oldPath)){continue}
- if((Get-FileHash -Algorithm SHA256 $oldPath).Hash.ToLowerInvariant() -ne $sha){continue}
- $text=Get-Content -Raw $oldPath
+ # Match Config Factory Status: an old index cannot import a file outside
+ # the active cache, a reparse point, or an unbounded file.
+ $relative=([string]$o.Profile).Replace([char]92,'/')
+ if($relative -cnotmatch '^runtime/udp-cache/([A-Za-z0-9][A-Za-z0-9_.-]*\.ovpn)$'){continue}
+ $leaf=$Matches[1]
+ if($sha -cnotmatch '^[0-9a-f]{64}$'){continue}
+ $oldPath=Join-Path $active $leaf
+ try{
+   if(-not(Test-Path -LiteralPath $oldPath -PathType Leaf)){continue}
+   $entry=Get-Item -LiteralPath $oldPath -ErrorAction Stop
+   if(($entry.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or $entry.Length -gt 131072){continue}
+   if((Get-FileHash -LiteralPath $oldPath -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant() -ne $sha){continue}
+   $text=Get-Content -Raw -LiteralPath $oldPath -ErrorAction Stop
+ }catch{continue}
  if(-not(Test-SafePublicVpnProfile $text)){continue}
  $protocol=if($text -match '(?m)^proto\s+udp'){'udp'}elseif($text -match '(?m)^proto\s+tcp'){'tcp'}else{'unknown'}
  $i++;$kept++

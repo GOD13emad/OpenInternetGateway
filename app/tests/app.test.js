@@ -371,6 +371,72 @@ test('Linux profile dedupe does not let an incomplete candidate reserve a valid 
   assert.match(result.stdout,/PASS invalid prior duplicate/);
 });
 
+test('LKG restore accepts only bounded local hash-verified profiles, never outside paths or symlinks',()=>{
+  const cp=require('node:child_process');
+  const os=require('node:os');
+  const base=fs.mkdtempSync(path.join(os.tmpdir(),'oig-lkg-containment-'));
+  const active=path.join(base,'windows','runtime','udp-cache');
+  const profile=(ip,proto='udp')=>[
+    'client','dev tun','proto '+proto,'remote '+ip+' 1194',
+    '<ca>','a','</ca>','<cert>','b','</cert>','<key>','c','</key>',''
+  ].join('\n');
+  const hash=value=>require('node:crypto').createHash('sha256').update(value).digest('hex');
+  try{
+    fs.mkdirSync(active,{recursive:true});
+    const outside=path.join(base,'outside.ovpn');
+    const outsideData=profile('203.0.113.77','tcp');
+    const localData=profile('203.0.113.88');
+    fs.writeFileSync(outside,outsideData);
+    fs.writeFileSync(path.join(active,'local.ovpn'),localData);
+    const prior=[
+      {Rank:1,Profile:outside,SHA256:hash(outsideData),Country:'JP',Host:'outside',IP:'203.0.113.77',Port:1194,Protocol:'tcp',Score:100,Ping:'20',Speed:20,Sessions:0},
+      {Rank:3,Profile:'runtime/udp-cache/local.ovpn',SHA256:hash(localData),Country:'JP',Host:'local',IP:'203.0.113.88',Port:1194,Protocol:'udp',Score:100,Ping:'20',Speed:20,Sessions:0}
+    ];
+    if(process.platform==='linux'){
+      fs.symlinkSync(outside,path.join(active,'alias.ovpn'));
+      prior.splice(1,0,{...prior[0],Rank:2,Profile:'runtime/udp-cache/alias.ovpn',Host:'alias'});
+    }
+    fs.writeFileSync(path.join(active,'index.json'),JSON.stringify(prior));
+    if(process.platform==='linux'){
+      const source=[
+        'import importlib.util,sys,json',
+        'from pathlib import Path',
+        'spec=importlib.util.spec_from_file_location("oig_factory",sys.argv[1])',
+        'm=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)',
+        'active=Path(sys.argv[2]);stage=Path(sys.argv[3]);stage.mkdir()',
+        'meta=[]',
+        'kept=m.preserve_old(active,stage,meta,{},4)',
+        'assert kept==1 and len(meta)==1 and meta[0]["Host"]=="local",(kept,meta)',
+        'print("PASS LKG local-only")'
+      ].join('\n');
+      const res=cp.spawnSync('python3',['-c',source,path.join(root,'backend/linux/config_factory.py'),active,path.join(base,'staged')],{encoding:'utf8',timeout:15000});
+      assert.equal(res.status,0,res.stderr||res.stdout);
+      assert.match(res.stdout,/PASS LKG local-only/);
+    }else if(process.platform==='win32'){
+      const scripts=path.join(base,'windows','scripts');
+      const evidence=path.join(base,'windows','evidence');
+      fs.mkdirSync(scripts,{recursive:true});
+      fs.mkdirSync(evidence,{recursive:true});
+      for(const file of ['Build-VpnGateUdpCache.ps1','Config-Factory.ps1']){
+        fs.copyFileSync(path.join(root,'backend/windows/scripts',file),path.join(scripts,file));
+      }
+      const row=n=>{
+        const ip='203.0.113.'+n;
+        return ['host'+n,ip,'100','20','200000','Japan','JP','5','0','0','0','0','0','0',Buffer.from(profile(ip)).toString('base64')].join(',');
+      };
+      fs.writeFileSync(path.join(evidence,'vpngate-mirror-api.csv'),[20,21,22].map(row).join('\n')+'\n');
+      const res=cp.spawnSync('pwsh',['-NoProfile','-NonInteractive','-File',path.join(scripts,'Build-VpnGateUdpCache.ps1'),'-Count','3','-PerCountry','3','-PreserveOld','4'],{encoding:'utf8',timeout:20000});
+      assert.equal(res.status,0,res.stderr||res.stdout);
+      const idx=JSON.parse(fs.readFileSync(path.join(active,'index.json'),'utf8'));
+      const retained=idx.filter(x=>x.Source==='LastKnownGood');
+      assert.deepEqual(retained.map(x=>x.Host),['local']);
+      assert.equal(idx.filter(x=>x.Source==='VPNGate').length,3);
+    }
+  }finally{
+    fs.rmSync(base,{recursive:true,force:true});
+  }
+});
+
 test('Linux backend implements required actions',()=>{
   const sh=fs.readFileSync(path.join(root,'backend/linux/oig-linux.sh'),'utf8');
   for(const action of ['connect','disconnect','refresh','ensure','auto-install','auto-remove','console-status','console-enable','console-disable']) assert.ok(sh.includes(action));
