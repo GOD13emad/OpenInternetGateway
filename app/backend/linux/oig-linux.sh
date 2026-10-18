@@ -218,8 +218,15 @@ def quality(c):
     if fresh_iso(f.get("last"),6): score -= 320.0
     if pref and sha==pref: score += 20.0
     fast=num(b.get("fastPingMs"))
+    icmp=num(b.get("icmpPingMs"))
+    tcp=num(b.get("tcpConnectMs"))
     if fresh_iso(b.get("fastAt"),24):
-        if fast is not None: score += max(-80.0,140.0-fast*0.45)
+        # A TCP port accept is NOT an OpenVPN TLS handshake; the direct
+        # socket probe must not outrank a relay with real VPN success.
+        tcp_only_bonus=max(0.0,25.0-(tcp if tcp is not None else fast)*0.1) if (tcp is not None or (fast is not None and b.get("fastMethod")=="tcp-direct")) else 0.0
+        if icmp is not None: score += max(-80.0,140.0-icmp*0.45)
+        elif tcp_only_bonus: score += tcp_only_bonus
+        elif fast is not None and b.get("fastMethod") not in ("tcp-direct","none"): score += max(-80.0,140.0-fast*0.45)
         elif proto=="tcp" and b.get("fastReachable") is False: score -= 180.0
     down=num(b.get("downloadMbps")); up=num(b.get("uploadMbps")); lat=num(b.get("httpsLatencyMs"))
     if fresh_iso(b.get("at"),72) and (down is not None or up is not None or lat is not None):

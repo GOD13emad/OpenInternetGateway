@@ -1347,6 +1347,100 @@ test('native UI typography applies to form controls and select sizing is valid',
   assert.doesNotMatch(css,/font:11px inherit/);
 });
 
+test('TCP socket responsiveness receives bounded ranking credit, not TLS validation credit',()=>{
+  const cp=require('node:child_process');
+  if(process.platform==='linux'){
+    const program=[
+      'from pathlib import Path',
+      'import datetime as dt,math',
+      'src=Path(__import__("sys").argv[1]).read_text()',
+      'code=src.split("def quality(c):",1)[1].split("\\nif only_sha:",1)[0]',
+      'def num(v,default=None):',
+      '  try:',
+      '    x=float(v);return x if math.isfinite(x) else default',
+      '  except Exception:return default',
+      'def fresh_iso(value,hours=48):',
+      '  return value is not None',
+      'ns={"bench":{},"success":{},"failures":{},"pref":"","num":num,"fresh_iso":fresh_iso,"math":math}',
+      'exec("def quality(c):"+code,ns)',
+      'item={"SHA256":"fixture","Protocol":"tcp","Port":443,"Ping":90,"Speed":0,"Score":0}',
+      'base=ns["quality"](item)',
+      'def delta(b):',
+      '  ns["bench"]={"fixture":dict(b,fastAt="2026-10-19T00:00:00Z")}',
+      '  return ns["quality"](item)-base',
+      'tcp=delta({"fastPingMs":1,"tcpConnectMs":1,"fastMethod":"tcp-direct","fastReachable":True})',
+      'icmp=delta({"fastPingMs":50,"icmpPingMs":50,"fastMethod":"icmp-direct","fastReachable":True})',
+      'legacy=delta({"fastPingMs":50,"fastReachable":True})',
+      'assert 0<tcp<=25,(tcp,base)',
+      'assert icmp>100,(icmp,base)',
+      'assert legacy>100,(legacy,base)',
+      'print("PASS real Linux quality: TCP-only lower than ICMP and backward-compatible")'
+    ].join('\n');
+    const r=cp.spawnSync('python3',['-c',program,path.join(root,'backend/linux/oig-linux.sh')],{encoding:'utf8',timeout:6000});
+    assert.equal(r.status,0,r.stderr||r.stdout);
+  }else if(process.platform==='win32'){
+    const script=[
+      '$ErrorActionPreference="Stop"',
+      '$text=[IO.File]::ReadAllText($args[0])',
+      '$match=[regex]::Match($text,"(?s)function Get-Number\(\$Value\)\{.*?(?=function Get-Candidates\()")',
+      'if(-not $match.Success){throw "Windows quality functions missing"}',
+      'Invoke-Expression $match.Value',
+      '$c=@{SHA256="fixture";Protocol="tcp";Port=443;Ping=90;Speed=0;Score=0}',
+      '$base=Get-QualityScore $c "fixture" @{} @{} @{} ""',
+      'function Delta($b){(Get-QualityScore $c "fixture" @{} @{} @{fixture=$b} "")-$base}',
+      '$stamp=(Get-Date).ToString("o")',
+      '$tcp=Delta @{fastAt=$stamp;fastPingMs=1;tcpConnectMs=1;fastMethod="tcp-direct";fastReachable=$true}',
+      '$icmp=Delta @{fastAt=$stamp;fastPingMs=50;icmpPingMs=50;fastMethod="icmp-direct";fastReachable=$true}',
+      '$legacy=Delta @{fastAt=$stamp;fastPingMs=50;fastReachable=$true}',
+      'if($tcp -le 0 -or $tcp -gt 25 -or $icmp -le 100 -or $legacy -le 100){throw ("Quality mismatch: "+$tcp+","+ $icmp+","+$legacy)}',
+      '"PASS native Windows quality: TCP-only reduced and legacy preserved"'
+    ].join(';');
+    const r=cp.spawnSync('pwsh',['-NoProfile','-NonInteractive','-Command',script,path.join(root,'backend/windows/scripts/Headless-Control.ps1')],{encoding:'utf8',timeout:15000});
+    assert.equal(r.status,0,r.stderr||r.stdout);
+  }
+});
+
+test('direct relay reachability separates ICMP from TCP-open without claiming VPN TLS',async()=>{
+  const Backend=require(path.join(root,'src/main/platform-backend.js'));
+  const backend=Object.create(Backend.prototype);
+  const cache=[
+    {SHA256:'a',IP:'203.0.113.11',Port:443,Protocol:'tcp'},
+    {SHA256:'b',IP:'203.0.113.12',Port:443,Protocol:'tcp'},
+    {SHA256:'c',IP:'203.0.113.13',Port:443,Protocol:'tcp'},
+    {SHA256:'d',IP:'203.0.113.14',Port:1194,Protocol:'udp'}
+  ];
+  const mock={
+    a:{fastPingMs:25,icmpPingMs:25,tcpConnectMs:null,fastReachable:true,fastAt:'2026-10-19T00:00:00Z',fastMethod:'icmp-direct'},
+    b:{fastPingMs:40,icmpPingMs:null,tcpConnectMs:40,fastReachable:true,fastAt:'2026-10-19T00:00:00Z',fastMethod:'tcp-direct'},
+    c:{fastPingMs:10,icmpPingMs:16,tcpConnectMs:10,fastReachable:true,fastAt:'2026-10-19T00:00:00Z',fastMethod:'tcp-direct'},
+    d:{fastPingMs:null,icmpPingMs:null,tcpConnectMs:null,fastReachable:false,fastAt:'2026-10-19T00:00:00Z',fastMethod:'none'}
+  };
+  let updated;
+  backend.backendRoot='/synthetic-no-network';
+  backend._profileIndexPath=()=>'/synthetic-no-network/index.json';
+  backend._directInternetPath=async()=>({interface:'eth0',localIP:'198.51.100.2',gateway:'198.51.100.1'});
+  backend._readJson=(file,fallback)=>file.endsWith('index.json')?cache:(file.endsWith('connection-benchmarks.json')?{}:fallback);
+  backend._quickProbeProfile=async(profile)=>mock[profile.sha256];
+  backend._writeJson=(_file,value)=>{updated=value;};
+  const result=await backend.benchmarkAllFast();
+  assert.equal(result.tested,4);
+  assert.equal(result.reachable,3);
+  assert.equal(result.noReply,1);
+  assert.equal(result.icmpReplies,2);
+  assert.equal(result.tcpPortsOpen,2);
+  assert.equal(Object.keys(updated).length,4);
+  const renderer=fs.readFileSync(path.join(root,'src/renderer/app.js'),'utf8');
+  const html=fs.readFileSync(path.join(root,'src/renderer/index.html'),'utf8');
+  const linux=fs.readFileSync(path.join(root,'backend/linux/oig-linux.sh'),'utf8');
+  const windows=fs.readFileSync(path.join(root,'backend/windows/scripts/Headless-Control.ps1'),'utf8');
+  assert.match(renderer,/result\?\.tcpPortsOpen/);
+  assert.match(renderer,/result\?\.icmpReplies/);
+  assert.match(renderer,/TCP port .*TLS not verified/);
+  assert.match(html,/Direct probe <span>/);
+  assert.match(linux,/tcp_only_bonus/);
+  assert.match(windows,/\$tcpOnlyBonus/);
+});
+
 test('all-relay probe covers the full pool and UI explains missing live replies',()=>{
   const backend=fs.readFileSync(path.join(root,'src/main/platform-backend.js'),'utf8');
   const renderer=fs.readFileSync(path.join(root,'src/renderer/app.js'),'utf8');

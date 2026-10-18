@@ -172,7 +172,18 @@ function Get-QualityScore($c,[string]$Key,[hashtable]$Success,[hashtable]$Failur
   try{
    if(Test-Fresh $b.fastAt 24){
     $fast=Get-Number $b.fastPingMs
-    if($null -ne $fast){$score+=[Math]::Max(-80,140-$fast*0.45)}
+    # Older benchmark entries lack these newer fields. Do not let strict
+    # PowerShell member access drop their valid prior quality history.
+    $icmp=if($b.Contains('icmpPingMs')){Get-Number $b['icmpPingMs']}else{$null}
+    $tcp=if($b.Contains('tcpConnectMs')){Get-Number $b['tcpConnectMs']}else{$null}
+    $method=if($b.Contains('fastMethod')){[string]$b['fastMethod']}else{''}
+    # A successful TCP socket connect only verifies a port; no VPN TLS proof.
+    $tcpOnlyBonus=0.0
+    if($null -ne $tcp){$tcpOnlyBonus=[Math]::Max(0,25-$tcp*0.1)}
+    elseif($null -ne $fast -and $method -eq 'tcp-direct'){$tcpOnlyBonus=[Math]::Max(0,25-$fast*0.1)}
+    if($null -ne $icmp){$score+=[Math]::Max(-80,140-$icmp*0.45)}
+    elseif($tcpOnlyBonus -gt 0){$score+=$tcpOnlyBonus}
+    elseif($null -ne $fast -and $method -notin @('tcp-direct','none')){$score+=[Math]::Max(-80,140-$fast*0.45)}
     elseif($proto -eq 'tcp' -and $null -ne $b.fastReachable -and -not [bool]$b.fastReachable){$score-=180}
    }
    if(Test-Fresh $b.at 72){

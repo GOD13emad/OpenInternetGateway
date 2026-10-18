@@ -1018,6 +1018,10 @@ class Backend {
       ok: true,
       tested: results.length,
       reachable: results.filter(x => x?.fastReachable).length,
+      // Reachability is transport-only. TCP SYN/accept can succeed while
+      // OpenVPN TLS negotiation still fails; neither count is a VPN success.
+      icmpReplies: results.filter(x => Number.isFinite(x?.icmpPingMs)).length,
+      tcpPortsOpen: results.filter(x => Number.isFinite(x?.tcpConnectMs)).length,
       noReply: results.filter(x => x && x.fastAt && !x.fastReachable).length,
       elapsedMs: Date.now() - started,
       directPath: { interface: directPath.interface, localIP: directPath.localIP, gateway: directPath.gateway, proxyBypassed: true },
