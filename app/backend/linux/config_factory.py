@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import argparse, base64, concurrent.futures, datetime as dt, fcntl, hashlib, json, os, re, shutil, subprocess, sys, tempfile, urllib.request, urllib.parse
 from pathlib import Path
+import ipaddress
 
 SEEDS = [
     "https://www.vpngate.net",
@@ -264,6 +265,13 @@ def parse_candidates(csv_path, count=48, per_country=6):
         else:
             continue
         ip, port = rm.group(1), int(rm.group(2))
+        # CSV metadata and the executable OpenVPN remote must agree.
+        # Reject mismatches before reserving an endpoint for deduplication.
+        try:
+            if ipaddress.IPv4Address(p[1].strip()) != ipaddress.IPv4Address(ip):
+                continue
+        except ValueError:
+            continue
         key = f"{protocol}:{ip}:{port}"
         if key in seen:
             continue

@@ -87,6 +87,12 @@ foreach($line in Get-Content -LiteralPath $csv){
  else{continue}
  if($remote -notmatch '^remote\s+([0-9\.]+)\s+(\d+)'){continue}
  $ip=$Matches[1];$port=[int]$Matches[2]
+ # Reject mismatched CSV metadata and OpenVPN destination before deduplication.
+ $csvIp=$null;$remoteIp=$null
+ if(-not([Net.IPAddress]::TryParse(([string]$p[1]).Trim(),[ref]$csvIp)) -or
+    -not([Net.IPAddress]::TryParse($ip,[ref]$remoteIp)) -or
+    $csvIp.AddressFamily -ne [Net.Sockets.AddressFamily]::InterNetwork -or
+    -not $csvIp.Equals($remoteIp)){continue}
  $key=($transport+':'+$ip+':'+$port)
  if($seen.ContainsKey($key)){continue}
  if($text -notmatch '(?m)^client\s*$'){continue}

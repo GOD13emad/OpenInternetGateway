@@ -451,6 +451,69 @@ test('Linux profile dedupe does not let an incomplete candidate reserve a valid 
   assert.match(result.stdout,/PASS invalid prior duplicate/);
 });
 
+test('VPN Gate CSV IP must match the OpenVPN remote before endpoint deduplication',()=>{
+  const linux=fs.readFileSync(path.join(root,'backend/linux/config_factory.py'),'utf8');
+  const windows=fs.readFileSync(path.join(root,'backend/windows/scripts/Build-VpnGateUdpCache.ps1'),'utf8');
+  assert.match(linux,/ipaddress\.IPv4Address\(p\[1\]\.strip\(\)\) != ipaddress\.IPv4Address\(ip\)/);
+  assert.match(windows,/\$csvIp\.Equals\(\$remoteIp\)/);
+  const parseScope=linux.slice(linux.indexOf('def parse_candidates('),linux.indexOf('def preserve_old('));
+  assert.ok(parseScope.indexOf('ipaddress.IPv4Address(p[1].strip()) !=')<parseScope.indexOf('seen.add(key)'));
+  assert.ok(windows.indexOf('$csvIp.Equals($remoteIp)')<windows.indexOf('$seen[$key]=$true'));
+  const cp=require('node:child_process');
+  const os=require('node:os');
+  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'oig-csv-remote-consistency-'));
+  const data=ip=>[
+    'client','dev tun','proto udp','remote '+ip+' 1194',
+    '<ca>','a','</ca>','<cert>','b','</cert>','<key>','c','</key>',''
+  ].join('\n');
+  const row=(name,listed,remote)=>[
+    name,listed,'100','12','100000','Japan','JP','4',
+    '0','0','0','0','0','0',Buffer.from(data(remote)).toString('base64')
+  ].join(',');
+  try{
+    const csv=[
+      row('spoofed','203.0.113.50','203.0.113.51'),
+      row('invalid-ip','not-an-ip','203.0.113.51'),
+      row('valid-51','203.0.113.51','203.0.113.51'),
+      row('valid-52','203.0.113.52','203.0.113.52'),
+      row('valid-53','203.0.113.53','203.0.113.53')
+    ].join('\n')+'\n';
+    if(process.platform==='linux'){
+      const csvPath=path.join(dir,'vpngate.csv');
+      fs.writeFileSync(csvPath,csv);
+      const script=[
+        'import importlib.util,sys',
+        'from pathlib import Path',
+        'spec=importlib.util.spec_from_file_location("factory",sys.argv[1])',
+        'module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)',
+        'rows=module.parse_candidates(Path(sys.argv[2]),count=3,per_country=3)',
+        'names=[r["Host"] for r in rows]',
+        'assert names==["valid-51","valid-52","valid-53"],names',
+        'print("PASS csv/remote IP identity and same-endpoint recovery")'
+      ].join('\n');
+      const result=cp.spawnSync('python3',['-c',script,path.join(root,'backend/linux/config_factory.py'),csvPath],{encoding:'utf8',timeout:12000});
+      assert.equal(result.status,0,result.stderr||result.stdout);
+      assert.match(result.stdout,/PASS csv\/remote IP identity/);
+    }else if(process.platform==='win32'){
+      const project=path.join(dir,'windows');
+      const scripts=path.join(project,'scripts');
+      const evidence=path.join(project,'evidence');
+      fs.mkdirSync(scripts,{recursive:true});
+      fs.mkdirSync(evidence,{recursive:true});
+      for(const name of ['Build-VpnGateUdpCache.ps1','Config-Factory.ps1']){
+        fs.copyFileSync(path.join(root,'backend/windows/scripts',name),path.join(scripts,name));
+      }
+      fs.writeFileSync(path.join(evidence,'vpngate-mirror-api.csv'),csv);
+      const result=cp.spawnSync('pwsh',['-NoProfile','-NonInteractive','-File',
+        path.join(scripts,'Build-VpnGateUdpCache.ps1'),'-Count','3',
+        '-PerCountry','3','-PreserveOld','0'],{encoding:'utf8',timeout:20000});
+      assert.equal(result.status,0,result.stderr||result.stdout);
+      const profiles=JSON.parse(fs.readFileSync(path.join(project,'runtime','udp-cache','index.json'),'utf8'));
+      assert.deepEqual(profiles.map(x=>x.Host),['valid-51','valid-52','valid-53']);
+    }
+  }finally{fs.rmSync(dir,{recursive:true,force:true});}
+});
+
 test('Windows malformed VPN Gate metrics cannot abort or poison a valid relay',()=>{
   const ps=fs.readFileSync(path.join(root,'backend/windows/scripts/Build-VpnGateUdpCache.ps1'),'utf8');
   assert.match(ps,/\[long\]::TryParse/);
