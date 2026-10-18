@@ -22,6 +22,47 @@ if(Test-Path $successFile){try{$success=Get-Content -Raw $successFile|ConvertFro
 $stage=Join-Path $stagingRoot ([guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Force -Path $stage|Out-Null
 
+function Test-SafePublicVpnProfile([string]$text){
+ $ls=$text -split '[\r\n]+'
+ # Public OpenVPN profiles are data only: explicitly allow known client directives.
+ # Unlisted directives may invoke local scripts, manage sockets or write files.
+ if([Text.Encoding]::UTF8.GetByteCount($text) -gt 131072 -or $text.Contains([char]0)){return $false}
+ $allowed=@('client','dev','proto','remote','cipher','data-ciphers','data-ciphers-fallback','auth','resolv-retry','nobind','persist-key','persist-tun','verb','mute','tun-mtu','mssfix','sndbuf','rcvbuf','reneg-sec','key-direction','auth-nocache','explicit-exit-notify','tls-client','remote-cert-tls','verify-x509-name','tls-version-min','tls-version-max','tls-cipher','tls-ciphersuites','ping','ping-restart','ping-exit','keepalive','connect-retry','connect-retry-max','connect-timeout','server-poll-timeout')
+ $allowedBlocks=@('ca','cert','key','tls-auth','tls-crypt','tls-crypt-v2')
+ $openBlock='';$seenOps=@{};$seenBlocks=@{};$unsafe=$false
+ foreach($rawLine in $ls){
+   $v=([string]$rawLine).Trim()
+   if(-not $v -or $v.StartsWith('#') -or $v.StartsWith(';')){continue}
+   if($openBlock){
+     if($v.ToLowerInvariant() -eq ('</'+$openBlock+'>')){$openBlock=''}
+     elseif($v -match '^</?[^>]+>$'){$unsafe=$true;break}
+     continue
+   }
+   if($v -match '^<([A-Za-z][A-Za-z0-9-]*)>$'){
+     $tag=$Matches[1].ToLowerInvariant()
+     if($tag -notin $allowedBlocks -or $seenBlocks.ContainsKey($tag)){$unsafe=$true;break}
+     $seenBlocks[$tag]=1;$openBlock=$tag;continue
+   }
+   if($v.StartsWith('<')){$unsafe=$true;break}
+   $fields=@($v -split '\s+')
+   $opt=$fields[0].ToLowerInvariant()
+   if($opt -notin $allowed){$unsafe=$true;break}
+   $seenOps[$opt]=[int]$seenOps[$opt]+1
+   if($opt -in @('client','dev','proto','remote') -and $seenOps[$opt] -ne 1){$unsafe=$true;break}
+   if($opt -eq 'remote'){
+     if($fields.Count -ne 3){$unsafe=$true;break}
+     $parsedIp=$null
+     if(-not [Net.IPAddress]::TryParse($fields[1],[ref]$parsedIp) -or $parsedIp.AddressFamily -ne [Net.Sockets.AddressFamily]::InterNetwork){$unsafe=$true;break}
+     $parsedPort=0
+     if(-not [int]::TryParse($fields[2],[ref]$parsedPort) -or $parsedPort -lt 1 -or $parsedPort -gt 65535){$unsafe=$true;break}
+   }
+ }
+ if($unsafe -or $openBlock){return $false}
+ if(@('client','dev','proto','remote')|Where-Object {$seenOps[$_] -ne 1}){return $false}
+ if(@('ca','cert','key')|Where-Object {$seenBlocks[$_] -ne 1}){return $false}
+ return $true
+}
+
 $rows=@()
 $seen=@{}
 foreach($line in Get-Content -LiteralPath $csv){
@@ -32,6 +73,7 @@ foreach($line in Get-Content -LiteralPath $csv){
  if([string]::IsNullOrWhiteSpace($country)){continue}
  try{$text=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($p[-1].Trim()))}catch{continue}
  $ls=$text -split '[\r\n]+'
+ if(-not(Test-SafePublicVpnProfile $text)){continue}
  $proto=($ls|Where-Object {$_ -match '^proto\s+'}|Select-Object -First 1)
  $remote=($ls|Where-Object {$_ -match '^remote\s+'}|Select-Object -First 1)
  $transport=$null;$transportRank=9
@@ -107,6 +149,7 @@ foreach($wrap in $oldSorted){
  if(-not(Test-Path $oldPath)){continue}
  if((Get-FileHash -Algorithm SHA256 $oldPath).Hash.ToLowerInvariant() -ne $sha){continue}
  $text=Get-Content -Raw $oldPath
+ if(-not(Test-SafePublicVpnProfile $text)){continue}
  $protocol=if($text -match '(?m)^proto\s+udp'){'udp'}elseif($text -match '(?m)^proto\s+tcp'){'tcp'}else{'unknown'}
  $i++;$kept++
  $file=('LKG-{0:D2}-{1}' -f $kept,(Split-Path $oldPath -Leaf))

@@ -96,6 +96,41 @@ test('Linux source transport provenance handles HTTP, HTTPS, mixed, cached and u
   assert.match(r.stdout,/PASS five isolated source-transport fixtures/);
 });
 
+test('Imported OpenVPN profiles fail closed on unknown executable directives and unsafe extra remote, including retained LKG',()=>{
+  const factory=fs.readFileSync(path.join(root,'backend/linux/config_factory.py'),'utf8');
+  const win=fs.readFileSync(path.join(root,'backend/windows/scripts/Build-VpnGateUdpCache.ps1'),'utf8');
+  assert.match(factory,/def profile_is_data_only\(text\):/);
+  assert.match(factory,/if not profile_is_data_only\(text\): continue/);
+  assert.match(win,/function Test-SafePublicVpnProfile\(\[string\]\$text\)/);
+  assert.equal((win.match(/Test-SafePublicVpnProfile \$text/g)||[]).length,2,'must guard both fresh and LKG imports');
+  assert.match(factory,/inline_allowed = \{"ca", "cert", "key"/);
+  assert.match(win,/\$allowedBlocks=@\('ca','cert','key'/);
+  if(process.platform!=='linux') return;
+  const cp=require('node:child_process');
+  const script=[
+    'import sys,importlib.util,tempfile,base64',
+    'from pathlib import Path',
+    'spec=importlib.util.spec_from_file_location("oig_safe",sys.argv[1])',
+    'm=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)',
+    'def config(i,extra):',
+    '  return "client\\ndev tun\\nproto udp\\nremote 203.0.113.%d 1194\\ncipher AES-128-CBC\\nauth SHA1\\nresolv-retry infinite\\nnobind\\npersist-key\\npersist-tun\\nverb 3\\n<ca>\\nCA\\n</ca>\\n<cert>\\nCERT\\n</cert>\\n<key>\\nKEY\\n</key>\\n%s\\n"%(i,extra)',
+    'cases=[("safe1",""),("safe2",""),("safe3",""),("management","management 127.0.0.1 7654"),("config","config /etc/sensitive.conf"),("tls_verify","tls-verify /bin/sh"),("extra_remote","remote 203.0.113.252 9999"),("file_log","log /tmp/untrusted.log"),("inline_script","<connection>\\nup /bin/sh\\n</connection>")]',
+    'with tempfile.TemporaryDirectory(prefix="oig-relay-allowlist-") as tmp:',
+    '  lines=[]',
+    '  for i,(name,extra) in enumerate(cases,1):',
+    '    fields=[name,"203.0.113.%d"%i,"100","12","1000000","Japan","JP","4","","","","","","",base64.b64encode(config(i,extra).encode()).decode()]',
+    '    lines.append(",".join(fields))',
+    '  csv=Path(tmp)/"relay.csv";csv.write_text("\\n".join(lines)+"\\n")',
+    '  kept=m.parse_candidates(csv,count=20,per_country=20)',
+    '  names={x["Host"] for x in kept}',
+    '  assert names=={"safe1","safe2","safe3"},names',
+    '  print("PASS safe=3 malicious_rejected=6")'
+  ].join('\n');
+  const result=cp.spawnSync('python3',['-c',script,path.join(root,'backend/linux/config_factory.py')],{encoding:'utf8',timeout:15000});
+  assert.equal(result.status,0,result.stderr||result.stdout);
+  assert.match(result.stdout,/PASS safe=3 malicious_rejected=6/);
+});
+
 test('Linux backend implements required actions',()=>{
   const sh=fs.readFileSync(path.join(root,'backend/linux/oig-linux.sh'),'utf8');
   for(const action of ['connect','disconnect','refresh','ensure','auto-install','auto-remove','console-status','console-enable','console-disable']) assert.ok(sh.includes(action));

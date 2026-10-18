@@ -124,6 +124,65 @@ def refresh_snapshot(evidence, max_sources=3):
     })
     return csv_path, (used[0] if used else None)
 
+# Imported profiles are untrusted data, never executable local policy.
+# Deny unknown directives, external paths/commands and extra destinations.
+def profile_is_data_only(text):
+    import ipaddress
+    if "\x00" in text or len(text.encode("utf-8")) > 131072:
+        return False
+    allowed = {
+        "client", "dev", "proto", "remote", "cipher", "data-ciphers",
+        "data-ciphers-fallback", "auth", "resolv-retry", "nobind",
+        "persist-key", "persist-tun", "verb", "mute", "tun-mtu",
+        "mssfix", "sndbuf", "rcvbuf", "reneg-sec", "key-direction",
+        "auth-nocache", "explicit-exit-notify", "tls-client",
+        "remote-cert-tls", "verify-x509-name", "tls-version-min",
+        "tls-version-max", "tls-cipher", "tls-ciphersuites",
+        "ping", "ping-restart", "ping-exit", "keepalive",
+        "connect-retry", "connect-retry-max", "connect-timeout",
+        "server-poll-timeout"
+    }
+    inline_allowed = {"ca", "cert", "key", "tls-auth", "tls-crypt", "tls-crypt-v2"}
+    seen, inline_seen = {}, {}
+    block = None
+    for original in text.splitlines():
+        line = original.strip()
+        if not line or line.startswith(("#", ";")):
+            continue
+        if block:
+            if line.lower() == f"</{block}>":
+                block = None
+            elif line.startswith("<") and line.endswith(">"):
+                return False
+            continue
+        opening = re.fullmatch(r"<([a-z][a-z0-9-]*)>", line.lower())
+        if opening:
+            tag = opening.group(1)
+            if tag not in inline_allowed or tag in inline_seen:
+                return False
+            inline_seen[tag] = 1
+            block = tag
+            continue
+        if line.startswith("<"):
+            return False
+        fields = line.split()
+        directive = fields[0].lower()
+        if directive not in allowed:
+            return False
+        seen[directive] = seen.get(directive, 0) + 1
+        if directive in {"client", "dev", "proto", "remote"} and seen[directive] > 1:
+            return False
+        if directive == "remote":
+            if len(fields) != 3:
+                return False
+            try:
+                ipaddress.IPv4Address(fields[1])
+                if not (1 <= int(fields[2]) <= 65535):
+                    return False
+            except ValueError:
+                return False
+    return block is None and all(seen.get(name) == 1 for name in ("client", "dev", "proto", "remote")) and all(inline_seen.get(name) == 1 for name in ("ca", "cert", "key"))
+
 def parse_candidates(csv_path, count=48, per_country=6):
     rows, seen = [], set()
     for line in csv_path.read_text(encoding="utf-8", errors="replace").splitlines():
@@ -140,6 +199,7 @@ def parse_candidates(csv_path, count=48, per_country=6):
             text = base64.b64decode(p[-1].strip()).decode("utf-8", errors="replace")
         except Exception:
             continue
+        if not profile_is_data_only(text): continue
         pm = re.search(r"(?m)^proto\s+(\S+)\s*$", text)
         rm = re.search(r"(?m)^remote\s+([0-9.]+)\s+(\d+)\s*$", text)
         if not pm or not rm:
@@ -217,6 +277,7 @@ def preserve_old(active, stage, meta, success, limit=4):
         if not old_path.exists(): continue
         if hashlib.sha256(old_path.read_bytes()).hexdigest()!=sha: continue
         text=old_path.read_text(encoding="utf-8",errors="replace")
+        if not profile_is_data_only(text): continue
         protocol="udp" if re.search(r"(?m)^proto\s+udp",text) else ("tcp" if re.search(r"(?m)^proto\s+tcp",text) else "unknown")
         kept+=1
         name=f"LKG-{kept:02d}-{old_path.name}"

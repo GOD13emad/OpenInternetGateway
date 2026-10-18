@@ -26,8 +26,8 @@ jobs:
           git merge-base --is-ancestor dab919f66b555a620af8bf7c7716ccd1a33429d7 HEAD
           if ($LASTEXITCODE -ne 0) { throw 'SOURCE_BASE_NOT_ANCESTOR' }
           $changed=@(git diff --name-only dab919f66b555a620af8bf7c7716ccd1a33429d7 HEAD)
-          $allowed=@('.github/workflows/windows11-arm64-offline-gui.yml','.github/workflows/hosted-first-connect-acceptance.yml','app/backend/linux/config_factory.py','app/backend/linux/oig-linux.sh','app/backend/windows/scripts/Config-Factory.ps1','app/src/main/platform-backend.js','app/src/renderer/app.js','app/src/renderer/index.html','app/src/renderer/styles.css','app/tests/app.test.js','app/tests/native-electron-ipc-smoke.cjs','.github/workflows/build.yml','app/tests/hosted-published-updater-ui.cjs','app/tests/hosted-published-updater-ci.ps1','app/tests/physical-ip-argv.test.js','README.md')
-          if ($changed.Count -ne 16 -or @($changed | Where-Object { $_ -notin $allowed }).Count) { throw 'UNEXPECTED_SOURCE_CHANGE' }
+          $allowed=@('.github/workflows/windows11-arm64-offline-gui.yml','.github/workflows/hosted-first-connect-acceptance.yml','app/backend/linux/config_factory.py','app/backend/linux/oig-linux.sh','app/backend/windows/scripts/Build-VpnGateUdpCache.ps1','app/backend/windows/scripts/Config-Factory.ps1','app/src/main/platform-backend.js','app/src/renderer/app.js','app/src/renderer/index.html','app/src/renderer/styles.css','app/tests/app.test.js','app/tests/native-electron-ipc-smoke.cjs','.github/workflows/build.yml','app/tests/hosted-published-updater-ui.cjs','app/tests/hosted-published-updater-ci.ps1','app/tests/physical-ip-argv.test.js','README.md')
+          if ($changed.Count -ne 17 -or @($changed | Where-Object { $_ -notin $allowed }).Count) { throw 'UNEXPECTED_SOURCE_CHANGE' }
           $caption=(Get-CimInstance Win32_OperatingSystem).Caption
           $arch=[System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()
           if ($caption -notmatch 'Windows 11' -or $arch -ne 'Arm64') { throw 'UNEXPECTED_RUNNER_OS_OR_ARCH' }
