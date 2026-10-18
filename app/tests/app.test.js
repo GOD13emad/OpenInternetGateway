@@ -451,6 +451,49 @@ test('Linux profile dedupe does not let an incomplete candidate reserve a valid 
   assert.match(result.stdout,/PASS invalid prior duplicate/);
 });
 
+test('Windows malformed VPN Gate metrics cannot abort or poison a valid relay',()=>{
+  const ps=fs.readFileSync(path.join(root,'backend/windows/scripts/Build-VpnGateUdpCache.ps1'),'utf8');
+  assert.match(ps,/\[long\]::TryParse/);
+  assert.match(ps,/\[int\]::TryParse/);
+  assert.ok(ps.indexOf('TryParse(([string]$p[7])') < ps.indexOf('$seen[$key]=$true'));
+  if(process.platform!=='win32') return;
+  const cp=require('node:child_process');
+  const os=require('node:os');
+  const temp=fs.mkdtempSync(path.join(os.tmpdir(),'oig-metric-row-'));
+  try{
+    const base=path.join(temp,'windows');
+    const scripts=path.join(base,'scripts');
+    const evidence=path.join(base,'evidence');
+    fs.mkdirSync(scripts,{recursive:true});
+    fs.mkdirSync(evidence,{recursive:true});
+    for(const file of ['Build-VpnGateUdpCache.ps1','Config-Factory.ps1']){
+      fs.copyFileSync(path.join(root,'backend/windows/scripts',file),path.join(scripts,file));
+    }
+    const data=(ip)=>[
+      'client','dev tun','proto udp','remote '+ip+' 1194',
+      '<ca>','a','</ca>','<cert>','b','</cert>','<key>','c','</key>',''
+    ].join('\n');
+    const row=(name,n,score='100',speed='100000',sessions='4')=>{
+      const ip='203.0.113.'+n;
+      return [name,ip,score,'12',speed,'Japan','JP',sessions,
+        '0','0','0','0','0','0',Buffer.from(data(ip)).toString('base64')].join(',');
+    };
+    const rows=[
+      row('bad-score',20,'invalid'),
+      row('bad-speed',20,'100','overflow'),
+      row('bad-sessions',20,'100','100000','invalid'),
+      row('good-20',20),row('good-21',21),row('good-22',22)
+    ];
+    fs.writeFileSync(path.join(evidence,'vpngate-mirror-api.csv'),rows.join('\n')+'\n');
+    const exec=cp.spawnSync('pwsh',['-NoProfile','-NonInteractive','-File',
+      path.join(scripts,'Build-VpnGateUdpCache.ps1'),'-Count','3','-PerCountry','3',
+      '-PreserveOld','0'],{encoding:'utf8',timeout:20000});
+    assert.equal(exec.status,0,exec.stderr||exec.stdout);
+    const index=JSON.parse(fs.readFileSync(path.join(base,'runtime','udp-cache','index.json'),'utf8'));
+    assert.deepEqual(index.map(x=>x.Host),['good-20','good-21','good-22']);
+  }finally{fs.rmSync(temp,{force:true,recursive:true});}
+});
+
 test('LKG restore accepts only bounded local hash-verified profiles, never outside paths or symlinks',()=>{
   const cp=require('node:child_process');
   const os=require('node:os');

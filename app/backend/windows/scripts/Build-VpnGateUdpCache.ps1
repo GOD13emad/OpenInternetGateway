@@ -96,11 +96,17 @@ foreach($line in Get-Content -LiteralPath $csv){
  if($text -notmatch '(?s)<key>.+?</key>'){continue}
  # Treat public profiles as data, never executable local policy.
  if($text -match '(?mi)^\s*(?:script-security|up|down|route-up|route-pre-down|ipchange|plugin|client-connect|client-disconnect|learn-address)'){continue}
+ # A malformed provider metric must reject this row, not abort pool refresh.
+ # Parse before reserving the endpoint so a later valid duplicate survives.
+ $scoreValue=[long]0;$speedValue=[long]0;$sessionValue=[int]0
+ if(-not([long]::TryParse(([string]$p[2]).Trim(),[ref]$scoreValue)) -or
+    -not([long]::TryParse(([string]$p[4]).Trim(),[ref]$speedValue)) -or
+    -not([int]::TryParse(([string]$p[7]).Trim(),[ref]$sessionValue))){continue}
  # Only safe, complete profiles can reserve a deduplicated endpoint.
  $seen[$key]=$true
  $rows += [pscustomobject]@{
-   Host=$p[0];IP=$ip;Score=[int64]$p[2];Ping=$p[3];Speed=[int64]$p[4];
-   Sessions=[int]$p[7];Port=$port;Text=$text;Source='VPNGate';
+   Host=$p[0];IP=$ip;Score=$scoreValue;Ping=$p[3];Speed=$speedValue;
+   Sessions=$sessionValue;Port=$port;Text=$text;Source='VPNGate';
    Protocol=$transport;TransportRank=$transportRank;Country=$country;CountryName=$countryName
  }
 }
