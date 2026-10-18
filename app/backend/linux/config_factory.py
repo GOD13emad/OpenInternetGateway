@@ -252,7 +252,7 @@ def parse_candidates(csv_path, count=48, per_country=6):
         key = f"{protocol}:{ip}:{port}"
         if key in seen:
             continue
-        seen.add(key)
+        # Do not reserve an endpoint until the entire candidate qualifies.
         if not re.search(r"(?m)^client\s*$", text): continue
         if not re.search(r"(?m)^dev\s+tun\s*$", text): continue
         if not re.search(r"(?s)<ca>.+?</ca>", text): continue

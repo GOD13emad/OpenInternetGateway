@@ -347,6 +347,30 @@ test('Config Factory health verifies indexed OpenVPN files and SHA256, not only 
   assert.match(result.stdout,/PASS missing \/ valid \/ tampered \/ traversal/);
 });
 
+test('Linux profile dedupe does not let an incomplete candidate reserve a valid endpoint',()=>{
+  if(process.platform!=='linux') return;
+  const cp=require('node:child_process');
+  const fixture=[
+    'import base64,importlib.util,sys,tempfile',
+    'from pathlib import Path',
+    'spec=importlib.util.spec_from_file_location("factory",sys.argv[1])',
+    'm=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)',
+    'def row(dev):',
+    '  profile="client\\ndev "+dev+"\\nproto udp\\nremote 203.0.113.5 1194\\n<ca>\\na\\n</ca>\\n<cert>\\nb\\n</cert>\\n<key>\\nc\\n</key>\\n"',
+    '  parts=["example","203.0.113.5","10","10","1000","Japan","JP","5","0","0","0","0","0","0",base64.b64encode(profile.encode()).decode()]',
+    '  return ",".join(parts)',
+    'with tempfile.TemporaryDirectory(prefix="oig-endpoint-dedupe-") as td:',
+    '  cache=Path(td)/"provider.csv"',
+    '  cache.write_text(row("tap")+"\\n"+row("tun")+"\\n"+row("tun")+"\\n")',
+    '  selected=m.parse_candidates(cache)',
+    '  assert len(selected)==1 and "dev tun" in selected[0]["Text"],selected',
+    'print("PASS invalid prior duplicate cannot shadow valid endpoint")'
+  ].join('\n');
+  const result=cp.spawnSync('python3',['-c',fixture,path.join(root,'backend/linux/config_factory.py')],{encoding:'utf8',timeout:12000});
+  assert.equal(result.status,0,result.stderr||result.stdout);
+  assert.match(result.stdout,/PASS invalid prior duplicate/);
+});
+
 test('Linux backend implements required actions',()=>{
   const sh=fs.readFileSync(path.join(root,'backend/linux/oig-linux.sh'),'utf8');
   for(const action of ['connect','disconnect','refresh','ensure','auto-install','auto-remove','console-status','console-enable','console-disable']) assert.ok(sh.includes(action));
