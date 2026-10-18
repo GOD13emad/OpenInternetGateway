@@ -33,7 +33,7 @@ function Test-AllowedRelayIp([Net.IPAddress]$Address){
  if($a -eq 100 -and $c -ge 64 -and $c -le 127){return $false}
  if($a -eq 169 -and $c -eq 254){return $false}
  if($a -eq 172 -and $c -ge 16 -and $c -le 31){return $false}
- if($a -eq 192 -and $c -in @(0,168)){return $false}
+ if($a -eq 192 -and (($c -eq 0 -and [int]$b[2] -eq 0) -or $c -eq 168)){return $false}
  if($a -eq 198 -and $c -in @(18,19)){return $false}
  return $true
 }

@@ -470,7 +470,7 @@ test('Public relay pool never imports local, private, link-local or reserved tun
     '0','0','0','0','0','0',Buffer.from(config(ip)).toString('base64')].join(',');
   const denied=['0.1.2.3','10.0.0.1','100.64.0.1','127.0.0.1','169.254.169.254',
     '172.16.0.1','192.0.0.2','192.168.0.1','198.18.0.1','224.0.0.1','255.255.255.255'];
-  const allowed=['203.0.113.80','203.0.113.81','203.0.113.82'];
+  const allowed=['203.0.113.80','203.0.113.81','203.0.113.82','192.0.3.10'];
   const csv=[...denied.map((ip,i)=>row('blocked-'+i,ip)),
     ...allowed.map((ip,i)=>row('relay-'+i,ip))].join('\n')+'\n';
   try {
@@ -482,7 +482,7 @@ test('Public relay pool never imports local, private, link-local or reserved tun
         'm=importlib.util.module_from_spec(sp);sp.loader.exec_module(m)',
         'base=Path(sys.argv[2]);csv=base/"feed.csv"',
         'rows=m.parse_candidates(csv,count=30,per_country=30)',
-        'assert [r["Host"] for r in rows]==["relay-0","relay-1","relay-2"],rows',
+        'assert [r["Host"] for r in rows]==["relay-0","relay-1","relay-2","relay-3"],rows',
         'stage=base/"stage";stage.mkdir();active=base/"active";active.mkdir()',
         'prior=[]',
         'for n,ip in enumerate(["127.0.0.1","203.0.113.83"]):',
@@ -520,10 +520,10 @@ test('Public relay pool never imports local, private, link-local or reserved tun
       }
       fs.writeFileSync(path.join(active,'index.json'),JSON.stringify(prior));
       const r=cp.spawnSync('pwsh',['-NoProfile','-NonInteractive','-File',path.join(scripts,'Build-VpnGateUdpCache.ps1'),
-        '-Count','3','-PerCountry','3','-PreserveOld','4'],{encoding:'utf8',timeout:20000});
+        '-Count','4','-PerCountry','4','-PreserveOld','4'],{encoding:'utf8',timeout:20000});
       assert.equal(r.status,0,r.stderr||r.stdout);
       const index=JSON.parse(fs.readFileSync(path.join(active,'index.json'),'utf8'));
-      assert.deepEqual(index.filter(x=>x.Source==='VPNGate').map(x=>x.Host),['relay-0','relay-1','relay-2']);
+      assert.deepEqual(index.filter(x=>x.Source==='VPNGate').map(x=>x.Host),['relay-0','relay-1','relay-2','relay-3']);
       assert.deepEqual(index.filter(x=>x.Source==='LastKnownGood').map(x=>x.Host),['prior-1']);
     }
   }finally{fs.rmSync(dir,{recursive:true,force:true});}
