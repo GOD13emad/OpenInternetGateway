@@ -212,6 +212,53 @@ test('VPN Gate CSV and Base64 input stay bounded and oversized rows fail closed'
 });
 
 
+test('Mirror refresh never clobbers healthy cached CSV with unsafe profiles or lets short source poison dedupe',()=>{
+  const python=fs.readFileSync(path.join(root,'backend/linux/config_factory.py'),'utf8');
+  const win=fs.readFileSync(path.join(root,'backend/windows/scripts/Refresh-VpnGateCache.ps1'),'utf8');
+  assert.match(python,/source_seen = set\(\)/);
+  assert.match(python,/seen\.update\(source_seen\)/);
+  assert.match(python,/len\(parse_candidates\(tmp, count=48, per_country=6\)\) < 3/);
+  assert.match(win,/\$priorCsv=Join-Path \$tmpRoot "prior-complete\.csv"/);
+  assert.match(win,/Copy-Item -LiteralPath \$priorCsv -Destination \$csv -Force/);
+  assert.match(win,/Remove-Item -LiteralPath \$csv -Force -ErrorAction SilentlyContinue/);
+  if(process.platform!=='linux') return;
+  const cp=require('node:child_process');
+  const src=[
+    'import sys,importlib.util,tempfile,base64,time,json',
+    'from pathlib import Path',
+    'spec=importlib.util.spec_from_file_location("oig",sys.argv[1])',
+    'm=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)',
+    'def data(n,unsafe=False):',
+    '  rows=[]',
+    '  for i in range(1,n+1):',
+    '    cfg="client\\ndev tun\\nproto udp\\nremote 203.0.113.%d 1194\\n<ca>\\nCA\\n</ca>\\n<cert>\\nCERT\\n</cert>\\n<key>\\nKEY\\n</key>\\n"%i',
+    '    if unsafe:cfg+="management 127.0.0.1 7654\\n"',
+    '    fields=["relay%d"%i,"203.0.113.%d"%i,"100","12","1000000","Japan","JP","4","","","","","","",base64.b64encode(cfg.encode()).decode()]',
+    '    rows.append(",".join(fields))',
+    '  return ("\\n".join(rows)+"\\n").encode()',
+    'with tempfile.TemporaryDirectory(prefix="oig-atomic-mirror-") as d:',
+    '  p=Path(d);old=data(9);(p/"vpngate-mirror-api.csv").write_bytes(old)',
+    '  m.SEEDS=["http://bad.invalid"];m.fetch=lambda url,**kw:(data(9,True),False)',
+    '  m.refresh_snapshot(p,max_sources=1)',
+    '  assert (p/"vpngate-mirror-api.csv").read_bytes()==old',
+    '  receipt=json.loads((p/"mirror-refresh-last.json").read_text())',
+    '  assert not receipt["refresh"] and receipt["sourceCount"]==0',
+    'with tempfile.TemporaryDirectory(prefix="oig-short-source-") as d:',
+    '  p=Path(d);m.SEEDS=["http://short.invalid","http://healthy.invalid"]',
+    '  def mock(url,**kw):',
+    '    if "short.invalid" in url:return data(7),False',
+    '    time.sleep(0.07);return data(9),False',
+    '  m.fetch=mock',
+    '  m.refresh_snapshot(p,max_sources=2)',
+    '  assert len((p/"vpngate-mirror-api.csv").read_text().splitlines())==9',
+    '  assert len(m.parse_candidates(p/"vpngate-mirror-api.csv",count=48,per_country=6))>=3',
+    'print("PASS unsafe body cannot replace cache; seven-row source cannot suppress healthy mirror")'
+  ].join('\n');
+  const r=cp.spawnSync('python3',['-c',src,path.join(root,'backend/linux/config_factory.py')],{encoding:'utf8',timeout:15000});
+  assert.equal(r.status,0,r.stderr||r.stdout);
+  assert.match(r.stdout,/PASS unsafe body cannot replace cache/);
+});
+
 test('Linux backend implements required actions',()=>{
   const sh=fs.readFileSync(path.join(root,'backend/linux/oig-linux.sh'),'utf8');
   for(const action of ['connect','disconnect','refresh','ensure','auto-install','auto-remove','console-status','console-enable','console-disable']) assert.ok(sh.includes(action));

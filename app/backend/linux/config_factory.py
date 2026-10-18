@@ -93,6 +93,7 @@ def refresh_snapshot(evidence, max_sources=3):
                 if partial and data and not data.endswith((b"\n", b"\r")) and lines:
                     lines = lines[:-1]
                 rows = []
+                source_seen = set()
                 for line in lines:
                     if len(line.encode("utf-8")) > MAX_CSV_LINE_BYTES:
                         continue
@@ -104,15 +105,16 @@ def refresh_snapshot(evidence, max_sources=3):
                     # Deduplicate identical OpenVPN endpoints/configs across
                     # mirrors while retaining different transports/profiles.
                     key = (parts[0].strip(), parts[1].strip(), parts[-1].strip())
-                    if key in seen:
+                    if key in seen or key in source_seen:
                         continue
-                    seen.add(key)
+                    source_seen.add(key)
                     rows.append(line)
                 # Eight complete rows are enough to exceed the release/runtime
                 # minimum after structural OpenVPN validation, without turning
                 # a network timeout into an unbounded retry.
                 if len(rows) >= 8:
                     merged.extend(rows)
+                    seen.update(source_seen)
                     used.append(base)
                     if partial:
                         partial_sources += 1
@@ -122,9 +124,22 @@ def refresh_snapshot(evidence, max_sources=3):
                     break
 
         if merged:
+            # Parse into a temporary candidate before replacing a known-good
+            # snapshot. CSV column counts are not OpenVPN profile validity.
             tmp = csv_path.with_suffix(".partial")
-            tmp.write_text("\n".join(merged) + "\n", encoding="utf-8")
-            tmp.replace(csv_path)
+            try:
+                encoded = ("\n".join(merged) + "\n").encode("utf-8")
+                if len(encoded) > MAX_CACHED_CSV_BYTES:
+                    raise ValueError("Merged VPN Gate CSV exceeds size limit")
+                tmp.write_bytes(encoded)
+                if len(parse_candidates(tmp, count=48, per_country=6)) < 3:
+                    raise ValueError("No usable OpenVPN profiles in downloaded CSV")
+                tmp.replace(csv_path)
+            except (ValueError, RuntimeError, OSError):
+                # Leave the previous complete CSV untouched, if any.
+                tmp.unlink(missing_ok=True)
+                used.clear()
+                partial_sources = 0
 
     if not csv_path.exists():
         raise RuntimeError("No live VPN Gate mirror and no cached API snapshot.")

@@ -93,7 +93,9 @@ try{
   }
  }
  $promoted=$false
+ $priorCsv=Join-Path $tmpRoot "prior-complete.csv"
  if($liveMergedRows -ge 8){
+   if($cachedSnapshotExisted){Copy-Item -LiteralPath $csv -Destination $priorCsv -Force}
   New-Item -ItemType Directory -Force -Path (Split-Path $csv -Parent)|Out-Null
   $partial=$csv+'.partial'
   [IO.File]::WriteAllLines($partial,$merged,[Text.UTF8Encoding]::new($false))
@@ -104,6 +106,21 @@ try{
  }elseif($cachedSnapshotExisted){
   Write-Warning ('Live VPN Gate fetch produced only '+$liveMergedRows+' complete rows; preserving cached snapshot.')
  }else{throw ('No usable VPN Gate snapshot: only '+$liveMergedRows+' complete live rows and no cache.')}
+ # The cache snapshot must not be committed until the real profile builder
+ # accepts its decoded OpenVPN directives. Restore old bytes on any failure.
+ try {
+   & (Join-Path $PSScriptRoot 'Build-VpnGateUdpCache.ps1')
+   if(-not $?){throw 'VPN Gate profile build failed.'}
+ }catch {
+   if($promoted){
+     if($cachedSnapshotExisted -and (Test-Path -LiteralPath $priorCsv)){
+       Copy-Item -LiteralPath $priorCsv -Destination $csv -Force
+     }elseif(-not $cachedSnapshotExisted){
+       Remove-Item -LiteralPath $csv -Force -ErrorAction SilentlyContinue
+     }
+   }
+   throw
+ }
 }finally{
  foreach($j in $jobs){try{if(-not $j.Process.HasExited){$j.Process.Kill($true)}}catch{};try{$j.Process.Dispose()}catch{}}
  Remove-Item -LiteralPath $tmpRoot -Recurse -Force -ErrorAction SilentlyContinue
@@ -115,4 +132,3 @@ $partialCount=@($chosen|Where-Object {-not $_.Complete}).Count
  usedMirrors=@($used);attemptedSources=@($attemptedSources);sourceCount=$used.Count;partialSourceCount=$partialCount;
  liveMergedRows=$liveMergedRows;cachedMergedRows=$cachedAdded;mergedRows=$merged.Count;discoveredMirrors=$bases.Count;source=$source
 }|ConvertTo-Json -Depth 5|Set-Content -Encoding UTF8 (Join-Path $Root 'evidence\mirror-refresh-last.json')
-& (Join-Path $PSScriptRoot 'Build-VpnGateUdpCache.ps1')
