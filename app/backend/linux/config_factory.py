@@ -371,13 +371,21 @@ def promote(common, evidence, count=48, keep_generations=4, preserve_count=8):
         if not p.exists() or hashlib.sha256(p.read_bytes()).hexdigest()!=c["SHA256"]:
             raise RuntimeError("Staged profile validation failed: "+str(p))
 
+    archive = None
     if active.exists():
         if (active/"index.json").exists():
             archive=generations/dt.datetime.now().strftime("%Y%m%d-%H%M%S%f")
             active.rename(archive)
         else:
             shutil.rmtree(active,ignore_errors=True)
-    stage.rename(active)
+    try:
+        stage.rename(active)
+    except Exception:
+        # A failed activation must never strand a verified previous pool
+        # inside generations/ with no active index.json.
+        if archive is not None and archive.exists() and not active.exists():
+            archive.rename(active)
+        raise
 
     old=sorted([p for p in generations.iterdir() if p.is_dir()],reverse=True)
     for p in old[keep_generations:]:

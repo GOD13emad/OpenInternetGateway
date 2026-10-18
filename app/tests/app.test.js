@@ -259,6 +259,50 @@ test('Mirror refresh never clobbers healthy cached CSV with unsafe profiles or l
   assert.match(r.stdout,/PASS unsafe body cannot replace cache/);
 });
 
+test('Config Factory restores the previous active generation when new stage activation fails',()=>{
+  const linux=fs.readFileSync(path.join(root,'backend/linux/config_factory.py'),'utf8');
+  const windows=fs.readFileSync(path.join(root,'backend/windows/scripts/Build-VpnGateUdpCache.ps1'),'utf8');
+  assert.match(linux,/archive = None[\s\S]*?try:\s*\n\s*stage\.rename\(active\)[\s\S]*?except Exception:[\s\S]*?archive\.rename\(active\)/);
+  assert.match(windows,/\$archivedPrevious=\$null[\s\S]*?try\s*\{\s*Move-Item -LiteralPath \$stage -Destination \$active[\s\S]*?catch\s*\{[\s\S]*?Move-Item -LiteralPath \$archivedPrevious -Destination \$active/);
+  if(process.platform!=='linux') return;
+  const cp=require('node:child_process');
+  const code=[
+    'import sys,tempfile,importlib.util,base64,hashlib,json',
+    'from pathlib import Path',
+    'from unittest import mock',
+    's=importlib.util.spec_from_file_location("cf",sys.argv[1]);m=importlib.util.module_from_spec(s);s.loader.exec_module(m)',
+    'def config(i):',
+    '  return "client\\ndev tun\\nproto udp\\nremote 203.0.113.%d 1194\\n<ca>\\nCA\\n</ca>\\n<cert>\\nCERT\\n</cert>\\n<key>\\nKEY\\n</key>\\n"%i',
+    'with tempfile.TemporaryDirectory(prefix="oig-activate-rollback-") as d:',
+    '  common=Path(d)/"common";ev=common/"evidence";ev.mkdir(parents=True)',
+    '  active=common/"runtime/udp-cache";active.mkdir(parents=True)',
+    '  old=config(77).encode();(active/"old.ovpn").write_bytes(old)',
+    '  metadata=[{"Rank":1,"Host":"previous","IP":"203.0.113.77","Port":1194,"Protocol":"udp","Profile":"runtime/udp-cache/old.ovpn","SHA256":hashlib.sha256(old).hexdigest()}]',
+    '  (active/"index.json").write_text(json.dumps(metadata))',
+    '  index_before=(active/"index.json").read_bytes()',
+    '  lines=[]',
+    '  for i in range(1,5):',
+    '    cols=["relay%d"%i,"203.0.113.%d"%i,"100","12","1000000","Japan","JP","4","","","","","","",base64.b64encode(config(i).encode()).decode()]',
+    '    lines.append(",".join(cols))',
+    '  (ev/"vpngate-mirror-api.csv").write_text("\\n".join(lines)+"\\n")',
+    '  original=Path.rename',
+    '  def rename(path,destination):',
+    '    if path.name.startswith("pool-") and destination==active:',
+    '      raise OSError("OFFLINE_ACTIVATION_FAILURE_INJECTED")',
+    '    return original(path,destination)',
+    '  with mock.patch.object(Path,"rename",rename):',
+    '    try:m.promote(common,ev,count=4,preserve_count=0);raise AssertionError("fault not triggered")',
+    '    except OSError as exc:assert "OFFLINE_ACTIVATION_FAILURE" in str(exc),exc',
+    '  assert (active/"index.json").read_bytes()==index_before',
+    '  assert (active/"old.ovpn").read_bytes()==old',
+    '  assert not list((common/"runtime/config-factory/generations").iterdir())',
+    'print("PASS stage rename failure restored previous index and profile without losing active pool")'
+  ].join('\n');
+  const result=cp.spawnSync('python3',['-c',code,path.join(root,'backend/linux/config_factory.py')],{encoding:'utf8',timeout:20000});
+  assert.equal(result.status,0,result.stderr||result.stdout);
+  assert.match(result.stdout,/PASS stage rename failure restored previous index/);
+});
+
 test('Linux backend implements required actions',()=>{
   const sh=fs.readFileSync(path.join(root,'backend/linux/oig-linux.sh'),'utf8');
   for(const action of ['connect','disconnect','refresh','ensure','auto-install','auto-remove','console-status','console-enable','console-disable']) assert.ok(sh.includes(action));

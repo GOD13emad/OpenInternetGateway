@@ -179,14 +179,24 @@ foreach($c in $meta){
  if($sha -ne $c.SHA256){throw "Staged hash mismatch: $leaf"}
 }
 
+$archivedPrevious=$null
 if(Test-Path $active){
  $hasIndex=Test-Path (Join-Path $active 'index.json')
  if($hasIndex){
    $stamp=(Get-Date).ToString('yyyyMMdd-HHmmssfff')
-   Move-Item -LiteralPath $active -Destination (Join-Path $generations $stamp)
+   $archivedPrevious=Join-Path $generations $stamp
+   Move-Item -LiteralPath $active -Destination $archivedPrevious
  }else{Remove-Item $active -Recurse -Force -ErrorAction SilentlyContinue}
 }
-Move-Item -LiteralPath $stage -Destination $active
+try{
+ Move-Item -LiteralPath $stage -Destination $active
+}catch{
+ # A failed stage activation must preserve the previous verified pool.
+ if($archivedPrevious -and (Test-Path -LiteralPath $archivedPrevious) -and -not(Test-Path -LiteralPath $active)){
+   Move-Item -LiteralPath $archivedPrevious -Destination $active
+ }
+ throw
+}
 
 $old=@(Get-ChildItem $generations -Directory -ErrorAction SilentlyContinue|Sort-Object Name -Descending)
 if($old.Count -gt $KeepGenerations){
