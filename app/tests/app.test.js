@@ -465,8 +465,9 @@ test('LastKnownGood deduplicates the final normalized server-role profile hash',
     const evidence=path.join(base,'evidence'),active=path.join(base,'runtime','udp-cache');
     fs.mkdirSync(evidence,{recursive:true});fs.mkdirSync(active,{recursive:true});
     fs.writeFileSync(path.join(evidence,'vpngate-mirror-api.csv'),csv);
-    const old=[['prior-duplicate','203.0.113.80'],['prior-distinct','203.0.113.83']].map(([Host,IP],i)=>{
-      const value=profile(IP),name='prior-'+i+'.ovpn';
+    const old=[['prior-duplicate','203.0.113.80',0],['prior-distinct','203.0.113.83',0],
+      ['prior-normalized-duplicate','203.0.113.83',1],['prior-next','203.0.113.84',0]].map(([Host,IP,extra],i)=>{
+      const value=profile(IP)+'\n'.repeat(extra),name='prior-'+i+'.ovpn';
       fs.writeFileSync(path.join(active,name),value);
       return {Rank:i+1,Host,IP,Port:1194,Protocol:'udp',Country:'JP',
         Profile:'runtime/udp-cache/'+name,SHA256:crypto.createHash('sha256').update(value).digest('hex')};
@@ -482,10 +483,10 @@ test('LastKnownGood deduplicates the final normalized server-role profile hash',
         'from pathlib import Path',
         'spec=importlib.util.spec_from_file_location("m",sys.argv[1])',
         'm=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)',
-        'base=Path(sys.argv[2]);meta,kept=m.promote(base,base/"evidence",count=3,preserve_count=1)',
-        'assert kept==1 and len(meta)==4,(kept,meta)',
-        'assert [r["Host"] for r in meta]==["new-0","new-1","new-2","prior-distinct"],meta',
-        'assert len(set(r["SHA256"] for r in meta))==4,meta',
+        'base=Path(sys.argv[2]);meta,kept=m.promote(base,base/"evidence",count=3,preserve_count=2)',
+        'assert kept==2 and len(meta)==5,(kept,meta)',
+        'assert [r["Host"] for r in meta]==["new-0","new-1","new-2","prior-distinct","prior-next"],meta',
+        'assert len(set(r["SHA256"] for r in meta))==5,meta',
         'for r in meta:',
         '  contents=(base/"runtime"/"udp-cache"/Path(r["Profile"]).name).read_bytes()',
         '  assert hashlib.sha256(contents).hexdigest()==r["SHA256"]',
@@ -502,11 +503,11 @@ test('LastKnownGood deduplicates the final normalized server-role profile hash',
       }
       const result=cp.spawnSync('pwsh',['-NoProfile','-NonInteractive','-File',
         path.join(scripts,'Build-VpnGateUdpCache.ps1'),'-Count','3','-PerCountry','3',
-        '-PreserveOld','1'],{encoding:'utf8',timeout:20000});
+        '-PreserveOld','2'],{encoding:'utf8',timeout:20000});
       assert.equal(result.status,0,result.stderr||result.stdout);
       const index=JSON.parse(fs.readFileSync(path.join(active,'index.json'),'utf8'));
-      assert.deepEqual(index.map(x=>x.Host),['new-0','new-1','new-2','prior-distinct']);
-      assert.equal(new Set(index.map(x=>x.SHA256)).size,4);
+      assert.deepEqual(index.map(x=>x.Host),['new-0','new-1','new-2','prior-distinct','prior-next']);
+      assert.equal(new Set(index.map(x=>x.SHA256)).size,5);
       for(const item of index){
         const body=fs.readFileSync(path.join(active,path.basename(item.Profile)));
         assert.equal(crypto.createHash('sha256').update(body).digest('hex'),item.SHA256);

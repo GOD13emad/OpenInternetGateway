@@ -395,6 +395,7 @@ def preserve_old(active, stage, meta, success, limit=4):
             "Source":"LastKnownGood","GeneratedAt":now()
         })
         current_shas.add(sha)
+        current_shas.add(staged_sha)
     return kept
 
 def promote(common, evidence, count=48, keep_generations=4, preserve_count=8):
