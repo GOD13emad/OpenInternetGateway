@@ -1327,7 +1327,7 @@ try {
   if($p.ExitCode -ne 0){throw ('NSIS updater failed with exit code '+$p.ExitCode)}
   if(-not(Test-Path -LiteralPath $Target)){throw 'Per-user installation target was not created.'}
   $installed=[string](Get-Item -LiteralPath $Target).VersionInfo.ProductVersion
-  if($installed -notlike ($Version+'*')){throw ('Installed version mismatch: '+$installed)}
+  if($installed -notmatch ('^' + [regex]::Escape($Version) + '(?:\.\d+)?$')){throw ('Installed version mismatch: '+$installed)}
   Save-Result @{ok=$true;version=$Version;sha256=$actual;target=$Target;installScope='current-user';exitCode=$p.ExitCode}
   Start-Process -FilePath $Target
   exit 0

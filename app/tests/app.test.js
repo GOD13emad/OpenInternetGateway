@@ -1401,6 +1401,41 @@ test('public 2.5.18 failed updater has separate verified per-user recovery evide
   assert.match(negative,/DISPOSABLE_WINDOWS_SERVER_X64_ONLY|Assert-Offline/);
 });
 
+test('Windows update helper rejects ProductVersion prefix collisions after NSIS',()=>{
+  const source=fs.readFileSync(path.join(root,'src/main/platform-backend.js'),'utf8');
+  const match=source.match(/^\s*(if\(\$installed -not(?:match|like) .+Installed version mismatch:.+)$/m);
+  assert.ok(match,'Windows installed-version verification missing');
+  const check=match[1].trim();
+  assert.match(check,/\$installed -notmatch /,'prefix or wildcard-only acceptance is unsafe');
+  assert.match(check,/\[regex\]::Escape\(\$Version\)/);
+  assert.match(check,/\\d\+/,'allow a numeric fourth ProductVersion component only');
+  const accepted=['2.5.19','2.5.19.0','2.5.19.12'];
+  const rejected=['2.5.190','2.5.19evil','2.5.19-rc1','2.5.19.0evil','2.5.19.0.extra','2.5.1'];
+  if(process.platform==='win32'){
+    const {spawnSync}=require('node:child_process');
+    const powershell=[
+      "$ErrorActionPreference='Stop'",
+      "$Version='2.5.19'",
+      "$cases=@("+[...accepted,...rejected].map(v=>"'"+v+"'").join(',')+")",
+      '$results=@()',
+      'foreach($installed in $cases){',
+      '  $allowed=$true',
+      '  try { '+check+' } catch { $allowed=$false }',
+      '  $results+=@{version=$installed;allowed=$allowed}',
+      '}',
+      'ConvertTo-Json -InputObject $results -Compress -Depth 3'
+    ].join('\n');
+    const result=spawnSync('pwsh',['-NoProfile','-NonInteractive','-Command',powershell],
+      {encoding:'utf8',timeout:10000,windowsHide:true});
+    assert.equal(result.status,0,result.stderr||result.error?.message);
+    const outcomes=JSON.parse(result.stdout);
+    for(const v of accepted)assert.equal(outcomes.find(x=>x.version===v)?.allowed,true,'must accept '+v);
+    for(const v of rejected)assert.equal(outcomes.find(x=>x.version===v)?.allowed,false,'must reject '+v);
+  }else{
+    assert.match(check,/\\\.\s*\\d/,'numeric component must be dot-delimited');
+  }
+});
+
 test('Windows update helper uses an isolated copy of bundled PowerShell instead of PATH lookup',()=>{
   const backend=fs.readFileSync(path.join(root,'src/main/platform-backend.js'),'utf8').replace(/\r\n/g,'\n');
   const start=backend.indexOf('async launchDownloadedUpdate');
