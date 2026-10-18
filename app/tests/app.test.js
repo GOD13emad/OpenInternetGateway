@@ -32,6 +32,23 @@ test('Windows backend rejects inherited prototype action keys before launching P
   }finally{fs.rmSync(tmp,{recursive:true,force:true});}
 });
 
+test('dashboard explicitly separates VPN route health from relay certificate identity',()=>{
+  const html=fs.readFileSync(path.join(root,'src/renderer/index.html'),'utf8');
+  const styles=fs.readFileSync(path.join(root,'src/renderer/styles.css'),'utf8');
+  const ui=fs.readFileSync(path.join(root,'src/renderer/app.js'),'utf8');
+  const overview=html.slice(html.indexOf('id="page-overview"'),html.indexOf('id="page-connections"'));
+  const connections=html.slice(html.indexOf('id="page-connections"'),html.indexOf('id="page-diagnostics"'));
+  assert.match(overview,/VPN TUNNEL/);
+  assert.match(overview,/class="relay-identity-note" role="note"/);
+  assert.match(overview,/healthy VPN route does not verify the server certificate/i);
+  assert.match(connections,/class="relay-identity-note" role="note"/);
+  assert.match(connections,/share a CA and omit server-identity checks/i);
+  assert.match(styles,/\.connection-copy \.relay-identity-note\{/);
+  assert.match(ui,/connected \? 'VPN active' : 'Direct connection'/);
+  assert.doesNotMatch(ui,/Internet protected|Validated endpoint/);
+  assert.doesNotMatch(html,/SECURE TUNNEL/);
+});
+
 test('Linux backend implements required actions',()=>{
   const sh=fs.readFileSync(path.join(root,'backend/linux/oig-linux.sh'),'utf8');
   for(const action of ['connect','disconnect','refresh','ensure','auto-install','auto-remove','console-status','console-enable','console-disable']) assert.ok(sh.includes(action));

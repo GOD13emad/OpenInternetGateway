@@ -73,16 +73,16 @@ function renderStatus(s) {
   syncConnectionInventoryToStatus(s);
   $('powerButton').classList.toggle('connected', connected);
   $('sidebarDot').classList.toggle('online', connected);
-  setText('sidebarStatus', connected ? 'Protected' : 'Direct connection');
+  setText('sidebarStatus', connected ? 'VPN active' : 'Direct connection');
   setText('sidebarCountry', connected ? ((s.country || 'Foreign') + ' egress') : 'Tunnel disconnected');
-  setText('connectionTitle', connected ? 'Internet protected' : 'Protection is off');
-  setText('connectionDetail', connected ? ('Traffic exits through ' + (s.country || 'validated relay') + ' · ' + (s.ip || 'IP pending')) : 'Connect to establish a validated full-device route.');
+  setText('connectionTitle', connected ? 'VPN route active' : 'VPN is off');
+  setText('connectionDetail', connected ? ('Traffic exits through ' + (s.country || 'selected relay') + ' · ' + (s.ip || 'IP pending')) : 'Connect to establish a full-device VPN route.');
   setText('ipStat', s.ip || '—');
   setText('countryStat', s.country || 'Direct');
   setText('dnsStat', safeArray(s.dns).join(' · ') || '—');
   setText('routesStat', String(s.fullRoutes ?? 0) + ' / 2');
-  setText('relayName', s.relay || (connected ? 'Validated relay' : 'Not connected'));
-  setText('relayMeta', connected ? ((s.engine === 'HeadlessConnector' ? 'Headless · sticky' : (s.interface || 'Tunnel interface')) + ' · anti-flap') : 'Validated endpoint · stable mode');
+  setText('relayName', s.relay || (connected ? 'Active relay' : 'Not connected'));
+  setText('relayMeta', connected ? ((s.engine === 'HeadlessConnector' ? 'Headless · sticky' : (s.interface || 'Tunnel interface')) + ' · anti-flap') : 'Relay identity unverified · stable mode');
 
   const routeOk = Number(s.fullRoutes || 0) >= 2;
   const dnsOk = s.poison === false;
