@@ -303,6 +303,50 @@ test('Config Factory restores the previous active generation when new stage acti
   assert.match(result.stdout,/PASS stage rename failure restored previous index/);
 });
 
+test('Config Factory health verifies indexed OpenVPN files and SHA256, not only index row count',()=>{
+  const linux=fs.readFileSync(path.join(root,'backend/linux/config_factory.py'),'utf8');
+  const windows=fs.readFileSync(path.join(root,'backend/windows/scripts/Config-Factory.ps1'),'utf8');
+  assert.match(linux,/def indexed_usable_profiles\(active, idx\):/);
+  assert.match(linux,/hashlib\.sha256\(file\.read_bytes\(\)\)/);
+  assert.match(linux,/"integrityInvalid":len\(idx\)-len\(usable\)/);
+  assert.match(linux,/"healthy":len\(usable\)>=min_pool/);
+  assert.match(windows,/function Test-UsableIndexedProfile\(\$Item\)/);
+  assert.match(windows,/Get-FileHash -LiteralPath \$file -Algorithm SHA256/);
+  assert.match(windows,/integrityInvalid=\(\$items\.Count-\$usable\.Count\)/);
+  assert.match(windows,/healthy=\(\$usable\.Count -ge \$MinPool\)/);
+  if(process.platform!=='linux') return;
+  const cp=require('node:child_process');
+  const fixture=[
+    'import importlib.util,sys,tempfile,json,hashlib',
+    'from pathlib import Path',
+    'spec=importlib.util.spec_from_file_location("factory",sys.argv[1])',
+    'm=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)',
+    'with tempfile.TemporaryDirectory(prefix="oig-verified-health-") as d:',
+    '  base=Path(d)/"common";active=base/"runtime/udp-cache";ev=base/"evidence";active.mkdir(parents=True);ev.mkdir()',
+    '  records=[]',
+    '  for i in range(1,7):',
+    '    name="profile%d.ovpn"%i',
+    '    records.append({"Rank":i,"Host":"relay%d"%i,"IP":"203.0.113.%d"%i,"Port":1194,"Protocol":"udp","Country":"JP","Profile":"runtime/udp-cache/"+name,"SHA256":hashlib.sha256(("profile %d"%i).encode()).hexdigest()})',
+    '  (active/"index.json").write_text(json.dumps(records))',
+    '  report=m.status(base,ev)',
+    '  assert report["pool"]==6 and report["usable"]==0 and report["integrityInvalid"]==6 and not report["healthy"],report',
+    '  for i in range(1,7):(active/("profile%d.ovpn"%i)).write_bytes(("profile %d"%i).encode())',
+    '  report=m.status(base,ev)',
+    '  assert report["usable"]==6 and report["healthy"] and report["integrityInvalid"]==0,report',
+    '  (active/"profile6.ovpn").write_bytes(b"tampered")',
+    '  report=m.status(base,ev)',
+    '  assert report["usable"]==5 and report["integrityInvalid"]==1 and not report["healthy"],report',
+    '  records[5]["Profile"]="runtime/udp-cache/../outside.ovpn"',
+    '  (active/"index.json").write_text(json.dumps(records))',
+    '  report=m.status(base,ev)',
+    '  assert report["usable"]==5 and not report["healthy"],report',
+    'print("PASS missing / valid / tampered / traversal indexed profile cases")'
+  ].join('\n');
+  const result=cp.spawnSync('python3',['-c',fixture,path.join(root,'backend/linux/config_factory.py')],{encoding:'utf8',timeout:15000});
+  assert.equal(result.status,0,result.stderr||result.stdout);
+  assert.match(result.stdout,/PASS missing \/ valid \/ tampered \/ traversal/);
+});
+
 test('Linux backend implements required actions',()=>{
   const sh=fs.readFileSync(path.join(root,'backend/linux/oig-linux.sh'),'utf8');
   for(const action of ['connect','disconnect','refresh','ensure','auto-install','auto-remove','console-status','console-enable','console-disable']) assert.ok(sh.includes(action));

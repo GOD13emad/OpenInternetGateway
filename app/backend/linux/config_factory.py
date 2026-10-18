@@ -397,13 +397,37 @@ def promote(common, evidence, count=48, keep_generations=4, preserve_count=8):
         except Exception: pass
     return meta, kept
 
+def indexed_usable_profiles(active, idx):
+    """Check indexed profile location, file bounds and content hash."""
+    valid = []
+    for item in idx if isinstance(idx, list) else []:
+        if not isinstance(item, dict):
+            continue
+        raw = str(item.get("Profile", "")).replace("\\", "/")
+        match = re.fullmatch(r"runtime/udp-cache/([A-Za-z0-9][A-Za-z0-9_.-]*\.ovpn)", raw)
+        sha = str(item.get("SHA256", "")).lower()
+        if not match or not re.fullmatch(r"[0-9a-f]{64}", sha):
+            continue
+        file = active / match.group(1)
+        try:
+            if file.is_symlink() or not file.is_file() or file.stat().st_size > 131072:
+                continue
+            if hashlib.sha256(file.read_bytes()).hexdigest() != sha:
+                continue
+        except OSError:
+            continue
+        valid.append(item)
+    return valid
+
 def status(common, evidence, min_pool=6):
     active=common/"runtime"/"udp-cache"
     factory=common/"runtime"/"config-factory"
     idx=read_json(active/"index.json",[])
+    if not isinstance(idx, list): idx=[]
+    usable=indexed_usable_profiles(active,idx)
     success=read_json(factory/"successes.json",{})
     quarantine=read_json(factory/"quarantine.json",{})
-    validated=sum(1 for c in idx if str(c.get("SHA256","")).lower() in success)
+    validated=sum(1 for c in usable if str(c.get("SHA256","")).lower() in success)
     last=None
     source="Bundled VPN Gate snapshot" if idx else ""
     mirror=read_json(evidence/"mirror-refresh-last.json",{})
@@ -435,19 +459,20 @@ def status(common, evidence, min_pool=6):
     generations=len([p for p in (factory/"generations").glob("*") if p.is_dir()]) if (factory/"generations").exists() else 0
     protocols={}
     countries={}
-    for c in idx:
+    for c in usable:
         pr=str(c.get("Protocol","unknown"))
         protocols[pr]=protocols.get(pr,0)+1
         cc=str(c.get("Country","") or "??")
         countries[cc]=countries.get(cc,0)+1
-    metadata_complete=all(bool(str(c.get("Country","")).strip()) for c in idx) if idx else False
+    metadata_complete=all(bool(str(c.get("Country","")).strip()) for c in usable) if usable else False
     obj={
-        "at":now(),"schemaVersion":2,"pool":len(idx),"validated":validated,
-        "standby":max(0,len(idx)-validated),"quarantined":len(quarantine),
+        "at":now(),"schemaVersion":2,"pool":len(idx),"usable":len(usable),
+        "integrityInvalid":len(idx)-len(usable),"validated":validated,
+        "standby":max(0,len(usable)-validated),"quarantined":len(quarantine),
         "generations":generations,"lastRefresh":last,"ageHours":age,
         "source":source,"lastFetchTransport":last_fetch_transport,
         "lastFetchTransportTlsOnly":last_fetch_transport=="https","profileOriginAuthenticated":False,
-        "healthy":len(idx)>=min_pool,"metadataComplete":metadata_complete,
+        "healthy":len(usable)>=min_pool,"metadataComplete":metadata_complete,
         "protocols":protocols,"countries":countries
     }
     write_json(factory/"status.json",obj)
@@ -470,7 +495,7 @@ def ensure(common,evidence,min_pool=6,max_age=8):
     s=status(common,evidence,min_pool)
     stale=s["ageHours"] is None or s["ageHours"]>max_age
     migration_needed=not bool(s.get("metadataComplete"))
-    if s["pool"]<min_pool or stale or migration_needed:
+    if not s["healthy"] or stale or migration_needed:
         try:
             refresh_snapshot(evidence)
             promote(common,evidence)
