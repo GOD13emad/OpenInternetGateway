@@ -519,6 +519,29 @@ test('TCP fast probe requires socket connectivity even if host ICMP responds', a
   assert.match(windows,/if\(\$proto -eq 'tcp'.*fastReachable.*\$score-=180\}\s+elseif\(\$null -ne \$fast\)/);
 });
 
+test('Linux direct TCP probe closes curl stdin and measures an actual loopback connection', { skip: process.platform !== 'linux' }, async()=>{
+  const net=require('node:net');
+  const Backend=require('../src/main/platform-backend');
+  const sockets=new Set();
+  const server=net.createServer(socket=>{
+    sockets.add(socket);
+    socket.on('close',()=>sockets.delete(socket));
+  });
+  await new Promise((resolve,reject)=>{
+    server.once('error',reject);
+    server.listen(0,'127.0.0.1',resolve);
+  });
+  try {
+    const b=new Backend({});
+    const latency=await b._directTcpConnectMs('127.0.0.1',server.address().port,
+      { curlInterface:'if!lo' },0.4);
+    assert.ok(latency !== null && latency >= 0, 'A live loopback socket must not become a false TCP-negative from an open stdin pipe');
+  } finally {
+    for (const socket of sockets) socket.destroy();
+    await new Promise(resolve=>server.close(resolve));
+  }
+});
+
 test('direct ISP benchmark binds physical Internet and bypasses proxies',()=>{
   const backend=fs.readFileSync(path.join(root,'src/main/platform-backend.js'),'utf8');
   const renderer=fs.readFileSync(path.join(root,'src/renderer/app.js'),'utf8');
