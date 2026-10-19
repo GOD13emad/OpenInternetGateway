@@ -1130,11 +1130,30 @@ class Backend {
     };
   }
 
-  async _httpsLatencyMs(sink) {
+  _activeTunnelCurlArgs(status) {
+    // Connected by itself is not proof that a speed transfer uses the VPN.
+    // Refuse to label physical-ISP traffic as tunnel throughput when the
+    // actual effective routes have not been verified.
+    if (!status?.connected || Number(status.fullRoutes || 0) < 2) {
+      throw new Error('An active full-route VPN is required for tunnel speed measurement.');
+    }
+    if (this.platform === 'linux') {
+      const vpnInterface = String(status.interface || '');
+      if (!/^(?:tun|tap)[A-Za-z0-9_.:-]{0,12}$/.test(vpnInterface)) {
+        throw new Error('VPN tunnel interface cannot be verified; speed test refused to use the physical ISP.');
+      }
+      // A bound transfer cannot silently fall back to the physical interface
+      // when NetworkManager disconnects during a speed test.
+      return ['-4', '--noproxy', '*', '--interface', 'if!' + vpnInterface];
+    }
+    return ['-4', '--noproxy', '*'];
+  }
+
+  async _httpsLatencyMs(sink, curlPathArgs = ['-4', '--noproxy', '*']) {
     const samples = [];
     for (let i = 0; i < 2; i++) {
       const r = await run('curl', [
-        '-4','--noproxy','*','-L','--max-time','5','-sS','-o',sink,'-w','%{http_code}|%{time_starttransfer}',
+        ...curlPathArgs,'-L','--max-time','5','-sS','-o',sink,'-w','%{http_code}|%{time_starttransfer}',
         'https://www.cloudflare.com/cdn-cgi/trace'
       ], { timeout: 7000, allowFailure: true });
       const [code, seconds] = String(r.stdout || '').trim().split('|');
@@ -1149,19 +1168,20 @@ class Backend {
   async benchmarkActive() {
     const status = await this.status();
     if (!status.connected) throw new Error('Connect a relay before running a real throughput test.');
+    const tunnelCurlArgs = this._activeTunnelCurlArgs(status);
     const inventory = await this.profiles(status);
     const active = inventory.profiles.find(p => p.active);
     if (!active) throw new Error('The active relay could not be mapped to the config inventory.');
 
     const sink = this.platform === 'win32' ? 'NUL' : '/dev/null';
     const [latencyMs, icmpPingMs] = await Promise.all([
-      this._httpsLatencyMs(sink),
+      this._httpsLatencyMs(sink, tunnelCurlArgs),
       this._icmpPing(active.ip)
     ]);
 
     const downBytes = 2_000_000;
     const down = await run('curl', [
-      '-4','--noproxy','*','-L','--max-time','12','-sS','-o',sink,'-w','%{http_code}|%{time_total}|%{speed_download}',
+      ...tunnelCurlArgs,'-L','--max-time','12','-sS','-o',sink,'-w','%{http_code}|%{time_total}|%{speed_download}',
       'https://speed.cloudflare.com/__down?bytes=' + String(downBytes)
     ], { timeout: 15000, allowFailure: true });
     const [downCode, downTime, downSpeed] = String(down.stdout || '').trim().split('|');
@@ -1175,7 +1195,7 @@ class Backend {
     let uploadAttempts = 0;
     try {
       const uploadArgs = [
-        '-4','--noproxy','*','-L','--connect-timeout','8','--max-time','20','-sS','-o',sink,'-w','%{http_code}|%{time_total}|%{speed_upload}',
+        ...tunnelCurlArgs,'-L','--connect-timeout','8','--max-time','20','-sS','-o',sink,'-w','%{http_code}|%{time_total}|%{speed_upload}',
         '-X','POST','--data-binary','@' + tempUpload,'https://speed.cloudflare.com/__up'
       ];
       for (let attempt = 0; attempt < 2; attempt++) {
@@ -1190,6 +1210,13 @@ class Backend {
     const [upCode, upTime, upSpeed] = String(up?.stdout || '').trim().split('|');
     if (upCode !== '200' || !(Number(upSpeed) > 0)) throw new Error('Real upload test did not complete successfully after a bounded retry.');
 
+    const endStatus = await this.status();
+    if (!endStatus.connected || Number(endStatus.fullRoutes || 0) < 2 ||
+        (this.platform === 'linux' && endStatus.interface !== status.interface) ||
+        (status.activeSha && endStatus.activeSha !== status.activeSha)) {
+      throw new Error('Tunnel route or active connection changed during the speed test; result discarded.');
+    }
+
     const previous = active.benchmark || {};
     const result = {
       ...previous,
@@ -1199,6 +1226,9 @@ class Backend {
       serverIP: active.ip,
       country: status.country || active.country,
       publicIP: status.ip || '',
+      throughputPath: this.platform === 'linux' ? 'vpn-interface-bound' : 'verified-os-full-route',
+      throughputInterface: String(status.interface || ''),
+      tunnelRouteVerifiedAfterTransfer: true,
       icmpPingMs,
       httpsLatencyMs: latencyMs,
       downloadMbps: Math.round(Number(downSpeed) * 8 / 1_000_000 * 100) / 100,

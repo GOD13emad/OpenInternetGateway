@@ -1209,3 +1209,46 @@ test('Windows update helper uses an isolated copy of bundled PowerShell instead 
   assert.match(block,/spawn\(updatePwsh, pwshArgs/);
   assert.doesNotMatch(block,/where\.exe pwsh\.exe|process\.env\.ComSpec|apply-update\.cmd/);
 });
+
+
+test('real VPN throughput rejects physical ISP routes and binds Linux transfers to the tunnel', async()=>{
+  const Backend = require('../src/main/platform-backend');
+  const b = new Backend({
+    version: '2.5.20', appPath: root, resourcesPath: root,
+    userData: root, emit: () => {}
+  });
+  b.platform = 'linux';
+  b.profiles = async () => { throw new Error('Must not read inventory before tunnel guard'); };
+  b.status = async () => ({ connected: true, fullRoutes: 0, interface: 'enp1s0' });
+  await assert.rejects(b.benchmarkActive(), /active full-route VPN/);
+  b.status = async () => ({ connected: true, fullRoutes: 2, interface: 'enp1s0' });
+  await assert.rejects(b.benchmarkActive(), /VPN tunnel interface cannot be verified/);
+  assert.deepEqual(
+    b._activeTunnelCurlArgs({ connected: true, fullRoutes: 2, interface: 'tun0' }),
+    ['-4','--noproxy','*','--interface','if!tun0']
+  );
+  for (const suspicious of ['enp1s0', 'wg0', 'tun0;id', '--option', '']) {
+    assert.throws(
+      () => b._activeTunnelCurlArgs({ connected: true, fullRoutes: 2, interface: suspicious }),
+      /VPN tunnel interface cannot be verified/
+    );
+  }
+  b.platform = 'win32';
+  assert.throws(() => b._activeTunnelCurlArgs({ connected: true, fullRoutes: 0 }),
+    /active full-route VPN/);
+  assert.deepEqual(
+    b._activeTunnelCurlArgs({ connected: true, fullRoutes: 2 }),
+    ['-4','--noproxy','*']
+  );
+  const source = fs.readFileSync(path.join(root, 'src/main/platform-backend.js'), 'utf8');
+  const active = source.slice(source.indexOf('  async benchmarkActive()'),
+    source.indexOf('  _githubHeaders()', source.indexOf('  async benchmarkActive()')));
+  assert.ok((active.match(/\.\.\.tunnelCurlArgs/g) || []).length >= 2,
+    'VPN download and upload both require the verified tunnel args');
+  assert.match(active, /this\._httpsLatencyMs\(sink, tunnelCurlArgs\)/);
+  assert.match(active, /const endStatus = await this\.status\(\)/);
+  assert.match(active, /result discarded/);
+  assert.ok(active.indexOf('const endStatus = await this.status()') <
+            active.indexOf('this._writeJson('),
+    'Do not persist a throughput claim after the VPN route changed');
+});
