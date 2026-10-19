@@ -877,7 +877,7 @@ class Backend {
       const script = [
         "$routes=@(Get-NetRoute -AddressFamily IPv4 -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue|Where-Object{$_.InterfaceAlias -notmatch 'OpenVPN|TAP|Wintun|OIG|WireGuard|Cloudflare|vEthernet|Loopback'}|Sort-Object RouteMetric,InterfaceMetric)",
         "$r=$routes|Where-Object{(Get-NetAdapter -InterfaceIndex $_.InterfaceIndex -ErrorAction SilentlyContinue).HardwareInterface}|Select-Object -First 1",
-        "if(-not $r){$r=$routes|Select-Object -First 1}",
+        // A virtual fallback cannot be certified as an ISP physical adapter.
         "if(-not $r){throw 'No physical IPv4 Internet route was found.'}",
         "$a=Get-NetAdapter -InterfaceIndex $r.InterfaceIndex -ErrorAction SilentlyContinue",
         "$ip=Get-NetIPAddress -AddressFamily IPv4 -InterfaceIndex $r.InterfaceIndex -ErrorAction SilentlyContinue|Where-Object{$_.IPAddress -notlike '169.254*'}|Select-Object -First 1",
@@ -886,7 +886,7 @@ class Backend {
       ].join(';');
       const r = await run(this._requireWindowsPwsh(), ['-NoProfile','-Command',script], { timeout: 5000 });
       const info = JSON.parse(r.stdout || '{}');
-      return {
+      const physical = {
         interface: String(info.interface || ''),
         index: Number(info.index || 0),
         localIP: String(info.ip || ''),
@@ -894,6 +894,10 @@ class Backend {
         curlInterface: 'host!' + String(info.ip || ''),
         bindMode: 'physical-ip'
       };
+      // Windows curl host!IP binds the source, not the winning route.
+      // Validate the physical egress route without modifying the OS.
+      await this._assertWindowsDirectEgress(physical, '1.1.1.1');
+      return physical;
     }
 
     if (this.platform === 'linux') {
@@ -931,6 +935,44 @@ class Backend {
     throw new Error('Direct Internet test is supported only on Windows and Linux.');
   }
 
+  async _assertWindowsDirectEgress(pathInfo, remoteIPv4) {
+    if (this.platform !== 'win32') return;
+    const destination = String(remoteIPv4 || '').trim();
+    const local = String(pathInfo?.localIP || '').trim();
+    const index = Number(pathInfo?.index);
+    if (net.isIP(destination) !== 4 || net.isIP(local) !== 4 ||
+        !Number.isSafeInteger(index) || index < 1) {
+      throw new Error('Cannot validate direct ISP route: invalid remote/source address or physical adapter.');
+    }
+    const script = [
+      "$ErrorActionPreference='Stop'",
+      "$chosen=@(Find-NetRoute -RemoteIPAddress $env:OIG_DIRECT_REMOTE_IPV4 -ErrorAction Stop)",
+      "$sources=@($chosen|Where-Object{$_.IPAddress -and -not $_.DestinationPrefix})",
+      "$routes=@($chosen|Where-Object{$_.DestinationPrefix})",
+      "if($sources.Count -ne 1 -or $routes.Count -ne 1){throw 'Effective IPv4 route is absent or ambiguous'}",
+      "if([int]$sources[0].InterfaceIndex -ne [int]$env:OIG_DIRECT_IFINDEX -or [int]$routes[0].InterfaceIndex -ne [int]$env:OIG_DIRECT_IFINDEX){throw 'VPN or another route overrides the physical ISP interface'}",
+      "if([string]$sources[0].IPAddress -ne [string]$env:OIG_DIRECT_LOCAL_IPV4){throw 'Effective egress source differs from physical ISP address'}",
+      "'VERIFIED_DIRECT_ROUTE'"
+    ].join(';');
+    let result;
+    try {
+      result = await run(this._requireWindowsPwsh(),
+        ['-NoProfile','-NonInteractive','-Command',script], {
+          timeout: 7500,
+          env: {
+            OIG_DIRECT_REMOTE_IPV4: destination,
+            OIG_DIRECT_LOCAL_IPV4: local,
+            OIG_DIRECT_IFINDEX: String(index)
+          }
+        });
+    } catch {
+      throw new Error('Direct ISP route cannot be verified on Windows (VPN/split routing may be active); test refused without changing network settings.');
+    }
+    if (String(result.stdout || '').trim() !== 'VERIFIED_DIRECT_ROUTE') {
+      throw new Error('Direct ISP route could not be verified; test refused rather than attributing VPN traffic to the ISP.');
+    }
+  }
+
   _directCurlArgs(pathInfo) {
     return ['-4','--noproxy','*','--interface',pathInfo.curlInterface];
   }
@@ -939,7 +981,7 @@ class Backend {
     const marker = '__OIG_DIRECT_META__';
     const r = await run('curl', [
       ...this._directCurlArgs(pathInfo),'-L','--fail','--connect-timeout','5','--max-time','8',
-      '-sS','-w','\\n' + marker + '%{http_code}|%{time_starttransfer}',
+      '-sS','-w','\\n' + marker + '%{http_code}|%{time_starttransfer}|%{remote_ip}',
       'https://www.cloudflare.com/cdn-cgi/trace'
     ], { timeout: 11000, allowFailure: true });
     const raw = String(r.stdout || '');
@@ -956,7 +998,8 @@ class Backend {
       publicIP: ip,
       country,
       colo,
-      httpsLatencyMs: Number.isFinite(seconds) ? Math.round(seconds * 1000 * 10) / 10 : null
+      httpsLatencyMs: Number.isFinite(seconds) ? Math.round(seconds * 1000 * 10) / 10 : null,
+      remoteIP: String(meta[2] || '').trim()
     };
   }
 
@@ -1039,10 +1082,10 @@ class Backend {
     const downBytes = 5_000_000;
     const down = await run('curl', [
       ...this._directCurlArgs(pathInfo),'-L','--fail','--connect-timeout','6','--max-time','20',
-      '-sS','-o',sink,'-w','%{http_code}|%{time_total}|%{speed_download}',
+      '-sS','-o',sink,'-w','%{http_code}|%{time_total}|%{speed_download}|%{remote_ip}',
       'https://speed.cloudflare.com/__down?bytes=' + String(downBytes)
     ], { timeout: 24000, allowFailure: true });
-    const [downCode, downTime, downSpeed] = String(down.stdout || '').trim().split('|');
+    const [downCode, downTime, downSpeed, downloadRemoteIP] = String(down.stdout || '').trim().split('|');
     if (downCode !== '200' || !(Number(downSpeed) > 0)) throw new Error('Direct ISP download test did not complete successfully.');
 
     const upBytes = 1_000_000;
@@ -1053,13 +1096,13 @@ class Backend {
     try {
       up = await run('curl', [
         ...this._directCurlArgs(pathInfo),'-L','--fail','--connect-timeout','6','--max-time','20',
-        '-sS','-o',sink,'-w','%{http_code}|%{time_total}|%{speed_upload}',
+        '-sS','-o',sink,'-w','%{http_code}|%{time_total}|%{speed_upload}|%{remote_ip}',
         '-X','POST','--data-binary','@' + tempUpload,'https://speed.cloudflare.com/__up'
       ], { timeout: 24000, allowFailure: true });
     } finally {
       try { fs.unlinkSync(tempUpload); } catch {}
     }
-    const [upCode, upTime, upSpeed] = String(up.stdout || '').trim().split('|');
+    const [upCode, upTime, upSpeed, uploadRemoteIP] = String(up.stdout || '').trim().split('|');
     if (upCode !== '200' || !(Number(upSpeed) > 0)) throw new Error('Direct ISP upload test did not complete successfully.');
 
     let normalEgress = { ip: '', country: '' };
@@ -1072,6 +1115,14 @@ class Backend {
       };
     } catch {}
 
+    // Validate the actual Cloudflare remote IPv4 addresses after transfer,
+    // not only the 1.1.1.1 preflight; no routing or DNS changes are made.
+    if (this.platform === 'win32') {
+      for (const remoteIP of new Set([trace.remoteIP, downloadRemoteIP, uploadRemoteIP])) {
+        await this._assertWindowsDirectEgress(pathInfo, remoteIP);
+      }
+    }
+
     const result = {
       at: new Date().toISOString(),
       mode: 'direct-physical-internet',
@@ -1080,6 +1131,7 @@ class Backend {
       gateway: pathInfo.gateway,
       bindMode: pathInfo.bindMode,
       proxyBypassed: true,
+      effectiveRouteVerified: this.platform === 'win32' ? true : null,
       publicIP: trace.publicIP,
       country: trace.country,
       colo: trace.colo,

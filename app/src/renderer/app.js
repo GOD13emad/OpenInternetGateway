@@ -203,8 +203,8 @@ function renderDirectInternet() {
   setText('directIP', b?.publicIP || '—');
   setText('directCountry', b?.country || '—');
   const pathText = b
-    ? ((b.interface || 'Physical adapter') + ' · ' + (b.localIP || 'local IP unavailable') + (b.gateway ? (' · gateway ' + b.gateway) : '') + ' · proxy bypass ON')
-    : 'Not tested yet · VPN/proxy bypass is enforced by binding the physical adapter.';
+    ? ((b.interface || 'Physical adapter') + ' · ' + (b.localIP || 'local IP unavailable') + (b.gateway ? (' · gateway ' + b.gateway) : '') + ' · proxy bypass ON' + (b.effectiveRouteVerified ? ' · effective ISP route checked' : ''))
+    : 'Not tested yet · physical binding and (on Windows) effective-route verification occur during the test.';
   setText('directPath', pathText);
   const proof = $('directVerification');
   if (proof) {

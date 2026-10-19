@@ -1428,3 +1428,79 @@ test('Windows packaged capture QA is fail-closed and never writes the real insta
     fs.rmSync(tmp,{recursive:true,force:true});
   }
 });
+
+test('Windows direct ISP requires the winning physical route before claiming physical speed',async()=>{
+  const vm=require('node:vm');
+  const os=require('node:os');
+  const {EventEmitter}=require('node:events');
+  const source=fs.readFileSync(path.join(root,'src/main/platform-backend.js'),'utf8');
+  const calls=[];
+  let redirectedDestination='';
+  const spawnMock=(program,args,options)=>{
+    const cmd=args.at(-1);
+    let response='';
+    if(program==='qa-pwsh.exe'){
+      const to=options.env.OIG_DIRECT_REMOTE_IPV4;
+      assert.match(cmd,/Find-NetRoute -RemoteIPAddress/);
+      assert.equal(options.env.OIG_DIRECT_LOCAL_IPV4,'192.0.2.10');
+      assert.equal(options.env.OIG_DIRECT_IFINDEX,'17');
+      calls.push(to);
+      response=to===redirectedDestination?'REJECTED_FAKE_VPN_ROUTE':'VERIFIED_DIRECT_ROUTE';
+    }else if(program==='curl'){
+      if(args.includes('--data-binary'))response='200|1|900000|203.0.113.21';
+      else if(args.some(a=>String(a).includes('__down')))response='200|1|1800000|203.0.113.20';
+      else response='ip=203.0.113.50\\nloc=US';
+    }else throw Error('Unexpected external process in QA route fixtures '+program);
+    const child=new EventEmitter();child.stdin=new EventEmitter();child.stdin.end=()=>{};
+    child.stdout=new EventEmitter();child.stderr=new EventEmitter();
+    process.nextTick(()=>{child.stdout.emit('data',Buffer.from(response));child.emit('close',0)});
+    return child;
+  };
+  const mod={exports:{}};
+  vm.runInNewContext(source,{
+    module:mod,exports:mod.exports,process,Buffer,setTimeout,clearTimeout,
+    require:n=>n==='child_process'?{spawn:spawnMock}:require(n)
+  },{filename:'windows-direct-route-no-real-network-fixture.js'});
+  const temp=fs.mkdtempSync(path.join(os.tmpdir(),'oig-win-direct-winning-route-'));
+  try {
+    const b=new mod.exports({version:'2.5.20',appPath:root,resourcesPath:root,userData:temp});
+    b.platform='win32';b.backendRoot=temp;b._requireWindowsPwsh=()=> 'qa-pwsh.exe';
+    const routeSelection = source.slice(source.indexOf("  async _directInternetPath()"),
+      source.indexOf("  async _assertWindowsDirectEgress("));
+    assert.match(routeSelection,/\.HardwareInterface/,
+      'Only a physical hardware adapter can qualify as ISP');
+    assert.doesNotMatch(routeSelection,/if\(-not \$r\)\{\$r=\$routes/,
+      'Do not fall back to a virtual Windows route when no hardware adapter exists');
+    const physical={interface:'Ethernet QA',index:17,localIP:'192.0.2.10',gateway:'192.0.2.1',
+      curlInterface:'host!192.0.2.10',bindMode:'physical-ip'};
+    for(const invalid of ['', 'not-an-ip', '::1','127.0.0.1/8']){
+      await assert.rejects(b._assertWindowsDirectEgress(physical,invalid),/invalid remote\/source/);
+    }
+    await b._assertWindowsDirectEgress(physical,'1.1.1.1');
+    assert.equal(calls.at(-1),'1.1.1.1');
+    redirectedDestination='203.0.113.21';
+    await assert.rejects(b._assertWindowsDirectEgress(physical,'203.0.113.21'),
+      /refused rather than attributing VPN traffic/);
+    assert.equal(calls.at(-1),'203.0.113.21');
+    const tempJson=path.join(temp,'state','direct-internet-benchmark.json');
+    b._directInternetPath=async()=>physical;
+    b._directTrace=async()=>({publicIP:'203.0.113.50',country:'US',colo:'QA',
+      httpsLatencyMs:20,remoteIP:'203.0.113.19'});
+    b._icmpPing=async()=>42;
+    await assert.rejects(b.benchmarkDirectInternet(),
+      /refused rather than attributing VPN traffic/);
+    assert.equal(fs.existsSync(tempJson),false,
+      'Windows direct ISP result must not be persisted after winning route changed');
+    assert.equal(fs.existsSync(path.join(temp,'state','direct-benchmark-upload.bin')),false,
+      'QA upload payload must be removed on refusal');
+    redirectedDestination='';
+    const ok=await b.benchmarkDirectInternet();
+    assert.equal(ok.ok,true);
+    assert.equal(ok.benchmark.effectiveRouteVerified,true);
+    assert.equal(ok.benchmark.interface,'Ethernet QA');
+    assert.equal(ok.benchmark.downloadMbps,14.4);
+    assert.equal(ok.benchmark.uploadMbps,7.2);
+    assert.deepEqual(calls.slice(-3),['203.0.113.19','203.0.113.20','203.0.113.21']);
+    assert.equal(JSON.parse(fs.readFileSync(tempJson,'utf8')).effectiveRouteVerified,true);
+  }finally{fs.rmSync(temp,{recursive:true,force:true})}
+});
