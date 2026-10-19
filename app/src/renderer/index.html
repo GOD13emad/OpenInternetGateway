@@ -244,6 +244,37 @@
               <button class="btn ghost danger" id="removeRecovery">Remove</button>
             </div>
           </article>
+
+          <article class="panel settings-card wide" id="operatorProfileCard" hidden>
+            <span class="eyebrow">OPTIONAL · LINUX · OFFLINE ONLY</span>
+            <h3>Import operator-pinned OpenVPN profile</h3>
+            <p>Select a provider-issued VPNBook .ovpn file and provide the CA certificate DER SHA-256 and exact server certificate CN from an independently trusted source. Neither value is derived from the selected file.</p>
+            <div class="operator-import-fields">
+              <label for="operatorCaPin">Independent CA SHA-256</label>
+              <input id="operatorCaPin" type="text" maxlength="95" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="64 hex characters (colon separators permitted)">
+              <label for="operatorPeerName">Expected server certificate CN</label>
+              <input id="operatorPeerName" type="text" maxlength="128" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="Exact operator-authenticated CN">
+            </div>
+            <div class="button-row">
+              <button class="btn secondary" id="operatorStageButton">Select and validate .ovpn</button>
+              <button class="btn ghost" id="operatorNativeCheckButton" disabled>Check NetworkManager import (no connection)</button>
+            </div>
+            <div class="operator-import-fields" id="operatorTrialFields">
+              <label for="operatorUsername">Provider username (temporary)</label>
+              <input id="operatorUsername" type="text" maxlength="96" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="Provider login username">
+              <label for="operatorPassword">Provider password (temporary)</label>
+              <input id="operatorPassword" type="password" maxlength="256" autocomplete="off" spellcheck="false" placeholder="Not stored or saved">
+            </div>
+            <label class="measurement-note" style="display:block;margin-top:14px">
+              <input type="checkbox" id="operatorTrialConsent">
+              I understand this starts a temporary VPN trial on Linux, keeps default Internet routing unchanged, and automatically removes the test connection.
+            </label>
+            <div class="button-row">
+              <button class="btn ghost" id="operatorTrialButton" disabled>Trial transport briefly (auto disconnect)</button>
+            </div>
+            <p class="measurement-note" id="operatorTrialResult">No live VPN trial performed; a successful import is not an authenticated connection test.</p>
+            <p class="measurement-note" id="operatorStageStatus">No operator profile staged. Staging stores a private client-key copy (0600) but never a VPN login password; it does not connect or change route/DNS.</p>
+          </article>
           <article class="panel settings-card wide">
             <span class="eyebrow">SYSTEM</span><h3>Runtime information</h3>
             <div id="systemInfo" class="system-info"></div>

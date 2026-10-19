@@ -104,3 +104,10 @@ html[data-theme="light"] .panel{background:var(--panel)}
 .direct-internet-metrics{display:grid;grid-template-columns:repeat(5,1fr);gap:9px;margin-top:12px}.direct-internet-metrics span{border:1px solid var(--line);border-radius:11px;padding:10px 11px;background:rgba(0,0,0,.08)}.direct-internet-metrics small,.direct-internet-metrics b{display:block}.direct-internet-metrics small{color:var(--muted);font-size:8px;text-transform:uppercase;letter-spacing:.5px}.direct-internet-metrics b{font-size:12px;margin-top:4px;overflow-wrap:anywhere}
 .direct-verification{margin:10px 0 0;color:var(--muted);font-size:9px}.direct-verification.verified{color:var(--accent)}.speed-section-label{font-size:8px;letter-spacing:.7px;color:var(--muted);font-weight:700;margin:14px 2px 0}
 @media(max-width:1050px){.direct-internet-head{flex-direction:column}.direct-internet-metrics{grid-template-columns:1fr 1fr}}
+
+/* Explicit offline operator profile import: no active VPN control here. */
+.operator-import-fields{display:grid;grid-template-columns:minmax(140px,1fr) 2fr;align-items:center;gap:9px;margin-top:13px}
+.operator-import-fields label{font-size:11px;color:var(--muted)}
+.operator-import-fields input{width:100%;min-width:0;padding:9px 11px;border:1px solid var(--line);border-radius:9px;background:var(--panel-strong);color:var(--text);font-size:12px}
+#operatorProfileCard[hidden]{display:none}
+@media(max-width:740px){.operator-import-fields{grid-template-columns:1fr}}

@@ -1209,3 +1209,302 @@ test('Windows update helper uses an isolated copy of bundled PowerShell instead 
   assert.match(block,/spawn\(updatePwsh, pwshArgs/);
   assert.doesNotMatch(block,/where\.exe pwsh\.exe|process\.env\.ComSpec|apply-update\.cmd/);
 });
+
+
+test('real VPN throughput rejects physical ISP routes and binds Linux transfers to the tunnel', async()=>{
+  const Backend = require('../src/main/platform-backend');
+  const b = new Backend({
+    version: '2.5.20', appPath: root, resourcesPath: root,
+    userData: root, emit: () => {}
+  });
+  b.platform = 'linux';
+  b.profiles = async () => { throw new Error('Must not read inventory before tunnel guard'); };
+  b.status = async () => ({ connected: true, fullRoutes: 0, interface: 'enp1s0' });
+  await assert.rejects(b.benchmarkActive(), /active full-route VPN/);
+  b.status = async () => ({ connected: true, fullRoutes: 2, interface: 'enp1s0' });
+  await assert.rejects(b.benchmarkActive(), /VPN tunnel interface cannot be verified/);
+  assert.deepEqual(
+    await b._activeTunnelCurlArgs({ connected: true, fullRoutes: 2, interface: 'tun0' }),
+    ['-4','--noproxy','*','--interface','if!tun0']
+  );
+  for (const suspicious of ['enp1s0', 'wg0', 'tun0;id', '--option', '']) {
+    await assert.rejects(
+      () => b._activeTunnelCurlArgs({ connected: true, fullRoutes: 2, interface: suspicious }),
+      /VPN tunnel interface cannot be verified/
+    );
+  }
+  b.platform = 'win32';
+  await assert.rejects(() => b._activeTunnelCurlArgs({ connected: true, fullRoutes: 0 }),
+    /active full-route VPN/);
+  await assert.rejects(() => b._activeTunnelCurlArgs({ connected: true, fullRoutes: 2 }),
+    /Windows managed VPN interface is missing/);
+  const source = fs.readFileSync(path.join(root, 'src/main/platform-backend.js'), 'utf8');
+  const active = source.slice(source.indexOf('  async benchmarkActive()'),
+    source.indexOf('  _githubHeaders()', source.indexOf('  async benchmarkActive()')));
+  assert.ok((active.match(/\.\.\.tunnelCurlArgs/g) || []).length >= 2,
+    'VPN download and upload both require the verified tunnel args');
+  assert.match(active, /this\._httpsLatencyMs\(sink, tunnelCurlArgs\)/);
+  assert.match(active, /const endStatus = await this\.status\(\)/);
+  assert.match(active, /result discarded/);
+  assert.ok(active.indexOf('const endStatus = await this.status()') <
+            active.indexOf('this._writeJson('),
+    'Do not persist a throughput claim after the VPN route changed');
+});
+
+test('Windows tunnel speed is bound to a uniquely verified VPN IPv4 source, never an unbound physical connection',async()=>{
+  const vm = require('node:vm');
+  const {EventEmitter} = require('node:events');
+  const source = fs.readFileSync(path.join(root,'src/main/platform-backend.js'),'utf8');
+  const calls = [];
+  let output = '10.19.0.8';
+  // Intercept only the child process API in this isolated VM. No PowerShell,
+  // Windows network, OpenVPN connector, or actual Internet request is invoked.
+  const fakeSpawn = (program,argv,options)=>{
+    const child = new EventEmitter();
+    child.stdin = new EventEmitter();
+    child.stdin.end = ()=>{};
+    child.stdout = new EventEmitter();
+    child.stderr = new EventEmitter();
+    calls.push({program,argv,options});
+    process.nextTick(()=>{
+      child.stdout.emit('data',Buffer.from(output));
+      child.emit('close',0);
+    });
+    return child;
+  };
+  const moduleObj = {exports:{}};
+  vm.runInNewContext(source,{
+    module:moduleObj,exports:moduleObj.exports,process,Buffer,setTimeout,clearTimeout,
+    require:n=>n==='child_process'?{spawn:fakeSpawn}:require(n)
+  },{filename:'platform-backend-test-vm.js'});
+  const b=new moduleObj.exports({version:'2.5.20',appPath:root,resourcesPath:root,userData:root});
+  b.platform='win32';
+  b._requireWindowsPwsh=()=> 'qa-fake-pwsh.exe';
+  const route = {connected:true,fullRoutes:2,interface:'OIG OpenVPN QA Device'};
+  const args = await b._activeTunnelCurlArgs(route);
+  assert.deepEqual(Array.from(args),['-4','--noproxy','*','--interface','host!10.19.0.8']);
+  assert.equal(calls.length,1);
+  assert.equal(calls[0].program,'qa-fake-pwsh.exe');
+  assert.equal(calls[0].options.env.OIG_SPEED_TUNNEL_IFACE,route.interface);
+  const ps=calls[0].argv.at(-1);
+  assert.match(ps,/Get-NetRoute -AddressFamily IPv4/);
+  assert.match(ps,/0\.0\.0\.0\/1/);
+  assert.match(ps,/128\.0\.0\.0\/1/);
+  assert.match(ps,/\$routes\.Count -ne 2/);
+  assert.match(ps,/\$indexes\.Count -ne 1/);
+  assert.match(ps,/Get-NetIPAddress -AddressFamily IPv4 -InterfaceIndex/);
+  assert.doesNotMatch(ps,/OIG OpenVPN QA Device/,'VPN alias must never be shell-interpolated');
+  for(const invalid of ['127.0.0.1','169.254.1.2','bad-response','10.19.0.8\n10.19.0.9']){
+    output=invalid;
+    await assert.rejects(b._activeTunnelCurlArgs(route),/no trustworthy IPv4 source/);
+  }
+  assert.equal(calls.length,5);
+  await assert.rejects(
+    b._activeTunnelCurlArgs({...route,interface:'VPN\nmalicious'}),
+    /Windows managed VPN interface is missing or invalid/
+  );
+  const active=source.slice(source.indexOf('  async benchmarkActive()'),
+    source.indexOf('  _githubHeaders()',source.indexOf('  async benchmarkActive()')));
+  assert.match(active,/await this\._activeTunnelCurlArgs\(status\)/);
+  assert.match(active,/endStatus\.interface !== status\.interface/);
+  assert.match(active,/vpn-source-ip-bound/);
+});
+
+test('real throughput never persists measurements when VPN source or active relay changes mid-transfer',async()=>{
+  const vm = require('node:vm');
+  const os = require('node:os');
+  const {EventEmitter} = require('node:events');
+  const source = fs.readFileSync(path.join(root,'src/main/platform-backend.js'),'utf8');
+  const fakeSpawn = (file,args)=>{
+    assert.equal(file,'curl','Only inert mocked curl transfers may execute');
+    const child=new EventEmitter();
+    child.stdin=new EventEmitter();child.stdin.end=()=>{};
+    child.stdout=new EventEmitter();child.stderr=new EventEmitter();
+    process.nextTick(()=>{
+      const upload=args.includes('-X');
+      child.stdout.emit('data',Buffer.from(upload?'200|1|62500':'200|1|1250000'));
+      child.emit('close',0);
+    });
+    return child;
+  };
+  const mod={exports:{}};
+  vm.runInNewContext(source,{module:mod,exports:mod.exports,process,Buffer,setTimeout,clearTimeout,
+    require:n=>n==='child_process'?{spawn:fakeSpawn}:require(n)},{filename:'backend-no-real-traffic-test.js'});
+  const profileSha='a'.repeat(64);
+  async function exercise(mode){
+    const temp=fs.mkdtempSync(path.join(os.tmpdir(),'oig-throughput-route-guard-'));
+    try{
+      const b=new mod.exports({version:'2.5.20',appPath:root,resourcesPath:root,userData:temp});
+      b.platform='win32';b.backendRoot=temp;
+      let statusReads=0;let profileReads=0;let tunnelIp='10.19.0.2';
+      b.status=async()=>{
+        statusReads++;
+        if(mode==='source-change' && statusReads===2)tunnelIp='10.19.0.3';
+        return {connected:mode!=='disconnect'||statusReads===1,fullRoutes:2,interface:'OIG VPN Alias'};
+      };
+      b._activeTunnelCurlArgs=async()=>['-4','--noproxy','*','--interface','host!'+tunnelIp];
+      b.profiles=async()=>{
+        profileReads++;
+        const moved=mode==='relay-change'&&profileReads>1;
+        return {activeSha:moved?'b'.repeat(64):profileSha,
+          profiles:[{active:true,sha256:moved?'b'.repeat(64):profileSha,ip:'198.51.100.1',
+            host:'synthetic.test',country:'US',benchmark:null}]};
+      };
+      b._httpsLatencyMs=async()=>55;
+      b._icmpPing=async()=>77;
+      const persisted=path.join(temp,'state','connection-benchmarks.json');
+      if(mode==='stable'){
+        const x=await b.benchmarkActive();
+        assert.equal(x.ok,true);
+        assert.equal(x.benchmark.throughputPath,'vpn-source-ip-bound');
+        assert.ok(x.benchmark.downloadMbps>0&&x.benchmark.uploadMbps>0);
+        assert.equal(x.benchmark.tunnelRouteVerifiedAfterTransfer,true);
+        assert.equal(JSON.parse(fs.readFileSync(persisted,'utf8'))[profileSha].sha256,profileSha);
+        assert.equal(statusReads,2);
+        assert.equal(profileReads,2);
+      }else{
+        const error=mode==='source-change'?/tunnel source changed/:
+          mode==='relay-change'?/Active VPN relay rotated/:/route or active connection changed/;
+        await assert.rejects(b.benchmarkActive(),error);
+        assert.equal(fs.existsSync(persisted),false,
+          'Never persist stale speed values after tunnel change '+mode);
+      }
+    }finally{fs.rmSync(temp,{recursive:true,force:true})}
+  }
+  for(const mode of ['stable','source-change','relay-change','disconnect'])await exercise(mode);
+});
+
+test('Windows packaged capture QA is fail-closed and never writes the real installed backend or registers autostart', async()=>{
+  const Backend=require('../src/main/platform-backend');
+  const os=require('node:os');
+  const tmp=fs.mkdtempSync(path.join(os.tmpdir(),'oig-passive-win-capture-'));
+  const vars=['OIG_CAPTURE_ONLY','OIG_CAPTURE_ROOT','LOCALAPPDATA'];
+  const previous=Object.fromEntries(vars.map(name=>[name,process.env[name]]));
+  try {
+    const fakeResource=path.join(tmp,'app','backend','windows');
+    fs.mkdirSync(fakeResource,{recursive:true});
+    fs.writeFileSync(path.join(fakeResource,'OpenInternetGateway.ps1'),'# harmless fixture');
+    const realUserLocal=path.join(tmp,'real-user-local');
+    const installed=path.join(realUserLocal,'OpenInternetGateway');
+    fs.mkdirSync(installed,{recursive:true});
+    const sentinel=path.join(installed,'OpenInternetGateway.ps1');
+    fs.writeFileSync(sentinel,'USER_BACKEND_MUST_NOT_BE_REPLACED');
+    process.env.LOCALAPPDATA=realUserLocal;
+    process.env.OIG_CAPTURE_ONLY='1';
+    delete process.env.OIG_CAPTURE_ROOT;
+    const makeBackend=()=>{
+      const b=new Backend({version:'2.5.20',appPath:path.join(tmp,'app'),
+        resourcesPath:path.join(tmp,'app'),userData:path.join(tmp,'user-data')});
+      b.platform='win32';
+      return b;
+    };
+    await assert.rejects(makeBackend().initialize(),/isolated absolute OIG_CAPTURE_ROOT/);
+    process.env.OIG_CAPTURE_ROOT='relative-scratch';
+    await assert.rejects(makeBackend().initialize(),/isolated absolute OIG_CAPTURE_ROOT/);
+    const privateRoot=path.join(tmp,'capture-only-qa');
+    process.env.OIG_CAPTURE_ROOT=privateRoot;
+    const b=makeBackend();
+    await b.initialize();
+    assert.equal(b.backendRoot,path.join(privateRoot,'backend-windows'));
+    assert.equal(fs.readFileSync(path.join(b.backendRoot,'OpenInternetGateway.ps1'),'utf8'),
+      '# harmless fixture');
+    assert.equal(fs.readFileSync(sentinel,'utf8'),'USER_BACKEND_MUST_NOT_BE_REPLACED');
+    const entry=fs.readFileSync(path.join(root,'src/main/main.js'),'utf8');
+    assert.match(entry,/app\.isPackaged && process\.env\.OIG_CAPTURE_ONLY !== '1'/,
+      "QA must not register the user's Windows login autostart");
+    assert.match(entry,/process\.platform !== 'win32' \|\| process\.env\.OIG_CAPTURE_ONLY !== '1'\) createTray\(\)/,
+      'QA must not create a notification icon in the real Windows tray');
+    const frame=entry.slice(entry.indexOf("win.once('ready-to-show'"),
+      entry.indexOf("win.on('close'"));
+    assert.ok(frame.indexOf('fs.writeFileSync(process.env.OIG_CAPTURE_PATH') >= 0,
+      'Capture frame must be stored before quitting');
+    assert.ok(frame.indexOf('app.exit(0)') >
+      frame.indexOf('fs.writeFileSync(process.env.OIG_CAPTURE_PATH'),
+      'Capture must exit the Electron process unconditionally after writing the frame');
+  } finally {
+    for(const name of vars){
+      if(previous[name]===undefined)delete process.env[name];else process.env[name]=previous[name];
+    }
+    fs.rmSync(tmp,{recursive:true,force:true});
+  }
+});
+
+test('Windows direct ISP requires the winning physical route before claiming physical speed',async()=>{
+  const vm=require('node:vm');
+  const os=require('node:os');
+  const {EventEmitter}=require('node:events');
+  const source=fs.readFileSync(path.join(root,'src/main/platform-backend.js'),'utf8');
+  const calls=[];
+  let redirectedDestination='';
+  const spawnMock=(program,args,options)=>{
+    const cmd=args.at(-1);
+    let response='';
+    if(program==='qa-pwsh.exe'){
+      const to=options.env.OIG_DIRECT_REMOTE_IPV4;
+      assert.match(cmd,/Find-NetRoute -RemoteIPAddress/);
+      assert.equal(options.env.OIG_DIRECT_LOCAL_IPV4,'192.0.2.10');
+      assert.equal(options.env.OIG_DIRECT_IFINDEX,'17');
+      calls.push(to);
+      response=to===redirectedDestination?'REJECTED_FAKE_VPN_ROUTE':'VERIFIED_DIRECT_ROUTE';
+    }else if(program==='curl'){
+      if(args.includes('--data-binary'))response='200|1|900000|203.0.113.21';
+      else if(args.some(a=>String(a).includes('__down')))response='200|1|1800000|203.0.113.20';
+      else response='ip=203.0.113.50\\nloc=US';
+    }else throw Error('Unexpected external process in QA route fixtures '+program);
+    const child=new EventEmitter();child.stdin=new EventEmitter();child.stdin.end=()=>{};
+    child.stdout=new EventEmitter();child.stderr=new EventEmitter();
+    process.nextTick(()=>{child.stdout.emit('data',Buffer.from(response));child.emit('close',0)});
+    return child;
+  };
+  const mod={exports:{}};
+  vm.runInNewContext(source,{
+    module:mod,exports:mod.exports,process,Buffer,setTimeout,clearTimeout,
+    require:n=>n==='child_process'?{spawn:spawnMock}:require(n)
+  },{filename:'windows-direct-route-no-real-network-fixture.js'});
+  const temp=fs.mkdtempSync(path.join(os.tmpdir(),'oig-win-direct-winning-route-'));
+  try {
+    const b=new mod.exports({version:'2.5.20',appPath:root,resourcesPath:root,userData:temp});
+    b.platform='win32';b.backendRoot=temp;b._requireWindowsPwsh=()=> 'qa-pwsh.exe';
+    const routeSelection = source.slice(source.indexOf("  async _directInternetPath()"),
+      source.indexOf("  async _assertWindowsDirectEgress("));
+    assert.match(routeSelection,/\.HardwareInterface/,
+      'Only a physical hardware adapter can qualify as ISP');
+    assert.match(routeSelection,/Find-NetRoute -RemoteIPAddress '1\.1\.1\.1'/,
+      'Pick the adapter from the actual winning route when multiple physical adapters exist');
+    assert.doesNotMatch(routeSelection,/Sort-Object RouteMetric,InterfaceMetric/,
+      'Do not pick the first physical 0\/0 route on a multi-NIC system');
+    assert.doesNotMatch(routeSelection,/if\(-not \$r\)\{\$r=\$routes/,
+      'Do not fall back to a virtual Windows route when no hardware adapter exists');
+    const physical={interface:'Ethernet QA',index:17,localIP:'192.0.2.10',gateway:'192.0.2.1',
+      curlInterface:'host!192.0.2.10',bindMode:'physical-ip'};
+    for(const invalid of ['', 'not-an-ip', '::1','127.0.0.1/8']){
+      await assert.rejects(b._assertWindowsDirectEgress(physical,invalid),/invalid remote\/source/);
+    }
+    await b._assertWindowsDirectEgress(physical,'1.1.1.1');
+    assert.equal(calls.at(-1),'1.1.1.1');
+    redirectedDestination='203.0.113.21';
+    await assert.rejects(b._assertWindowsDirectEgress(physical,'203.0.113.21'),
+      /refused rather than attributing VPN traffic/);
+    assert.equal(calls.at(-1),'203.0.113.21');
+    const tempJson=path.join(temp,'state','direct-internet-benchmark.json');
+    b._directInternetPath=async()=>physical;
+    b._directTrace=async()=>({publicIP:'203.0.113.50',country:'US',colo:'QA',
+      httpsLatencyMs:20,remoteIP:'203.0.113.19'});
+    b._icmpPing=async()=>42;
+    await assert.rejects(b.benchmarkDirectInternet(),
+      /refused rather than attributing VPN traffic/);
+    assert.equal(fs.existsSync(tempJson),false,
+      'Windows direct ISP result must not be persisted after winning route changed');
+    assert.equal(fs.existsSync(path.join(temp,'state','direct-benchmark-upload.bin')),false,
+      'QA upload payload must be removed on refusal');
+    redirectedDestination='';
+    const ok=await b.benchmarkDirectInternet();
+    assert.equal(ok.ok,true);
+    assert.equal(ok.benchmark.effectiveRouteVerified,true);
+    assert.equal(ok.benchmark.interface,'Ethernet QA');
+    assert.equal(ok.benchmark.downloadMbps,14.4);
+    assert.equal(ok.benchmark.uploadMbps,7.2);
+    assert.deepEqual(calls.slice(-3),['203.0.113.19','203.0.113.20','203.0.113.21']);
+    assert.equal(JSON.parse(fs.readFileSync(tempJson,'utf8')).effectiveRouteVerified,true);
+  }finally{fs.rmSync(temp,{recursive:true,force:true})}
+});

@@ -11,12 +11,14 @@ The Windows and Linux backends are different, but both sit behind the same Elect
 The Connections page exposes the current relay inventory with country, endpoint, protocol, source metadata, locally measured latency, real tunnel throughput results, and relay status. Connections active state follows the authoritative live tunnel on every status refresh, including Auto-Recovery changes; if the active tunnel profile is absent from the latest pool, OIG still shows it as an ACTIVE managed relay.
 
 - **Test all relays** performs bounded parallel reachability/latency probes for every row in the current pool from the physical Internet adapter, bypassing the active OIG VPN route and HTTP/SOCKS proxy settings without switching or disconnecting the tunnel. **No reply** means the direct ICMP/TCP probe completed but the relay did not answer it; **Not tested** is reserved for rows that have not yet been probed.
-- **Test direct Internet** measures the user's own ISP baseline: ping, real download, real upload, direct public IP and country. Windows binds the physical adapter IPv4 address; Linux binds the physical interface.
-- **Speed** on a relay performs a real throughput measurement through that selected VPN tunnel; app-level proxy settings are disabled so the measurement is the VPN path itself.
+- **Test direct Internet** measures the user's own ISP baseline: ping, real download, real upload, direct public IP and country. Linux binds the physical interface. On Windows a source-IP bind alone is not proof of the network path: OIG now uses read-only `Find-NetRoute` to check that the winning route/source pair to an initial public target and the actual remote IPv4s of HTTPS latency/download/upload all select the same physical adapter. With VPN or split routing that overrides the physical route, the ISP measurement **fails closed** instead of claiming VPN traffic as direct ISP. It does not change Windows VPN, routes, DNS or network settings.
+- **Speed** on a relay measures actual download/upload only after the active managed VPN has been verified as a full route. Linux binds its HTTPS latency, download and upload sockets to the verified tun/tap device so a disconnected VPN cannot silently fall back to the physical ISP. Both platforms recheck the active VPN route, bound source interface/IP and active relay profile SHA after transfer; the measurement is discarded if the tunnel disconnects, switches relay or changes the bound source mid-test. On Windows the speed test additionally verifies that both managed `/1` routes use one interface, resolves a single assigned preferred IPv4 address for that adapter, and binds curl transfers to it with `--interface host!<VPN IPv4>`. If route ownership or the VPN source address is missing or ambiguous, speed testing fails closed rather than falling back to the ISP. This does not replace a real connected Windows acceptance test. Proxy settings are bypassed. A tunnel-speed result is never inferred from the physical ISP baseline.
 - Columns are sortable by country, relay, protocol, source ping, live ping, measured download, measured upload, and status.
 - Source metadata and device-measured results are kept separate; missing or blocked measurements are shown as unavailable rather than fabricated.
 
 The Config Factory keeps a diversified multi-country pool with last-known-good retention, validation history, failure quarantine, and refresh behavior.
+
+For **passive Windows packaged-GUI QA**, set `OIG_CAPTURE_ONLY=1`, an explicit absolute private `OIG_CAPTURE_ROOT` scratch directory, and a private `APPDATA`/`LOCALAPPDATA` for the child process before launching with `--background` and `OIG_CAPTURE_PATH`. Capture-only mode stores backend script copies under the QA scratch root, never overwrites the user's installed backend, and does not register Windows login autostart or a notification-area icon. It rejects capture-mode startup when the scratch root is absent/relative. This QA mode is **not** an installed-app or live VPN acceptance test.
 
 ### Direct ISP truth boundary
 
@@ -116,7 +118,7 @@ Validated on Ubuntu 24.04-class systems with:
 - systemd user services
 - `curl`
 
-The Debian package remains the preferred system-managed Linux install. Linux Debian installs to `/opt/open-internet-gateway` so Chromium's setuid sandbox does not inherit a path containing spaces. Automatic in-app updates use the AppImage release extracted into `~/.local/opt` so they do not require root; some distributions may require FUSE compatibility only when launching AppImage directly.
+The Debian package remains the preferred system-managed Linux install. Linux Debian installs to `/opt/open-internet-gateway` so Chromium's setuid sandbox does not inherit a path containing spaces. The Debian artifact post-build step repairs the desktop launcher and icon to mode `0644` and repacks with broadly supported `gzip` compression at level 1 to keep QA packaging bounded. It also normalizes the generated uninstall maintainer script's `update-alternatives --remove` target to `/opt/open-internet-gateway/open-internet-gateway`; the older product-name path was inconsistent with the installed payload. The desktop Quit action and Chromium sandbox modes are validated in a user-namespace install-script smoke test, not by installation on the host. Automatic in-app updates use the AppImage release extracted into `~/.local/opt` so they do not require root; some distributions may require FUSE compatibility only when launching AppImage directly.
 
 ## Building
 
@@ -140,6 +142,140 @@ npm run dist:linux
 ```
 
 Generated relay profiles, local runtime state, machine evidence, dependencies, and release outputs are intentionally excluded from Git. A source build must generate/seed its local relay pool before packaging.
+
+
+## Opt-in operator-pinned OpenVPN profile gate (Linux development only)
+
+An independently trusted operator may provide a `.ovpn` file, the DER SHA-256
+fingerprint of its **CA certificate** from an authenticated independent source,
+and the exact expected server certificate CN. The offline trust gate
+`app/backend/linux/operator_profile.py` checks these inputs before any
+NetworkManager import. It currently accepts a narrow VPNBook-compatible
+inline-profile grammar, one `*.vpnbook.com` remote endpoint, an inlined CA,
+client certificate/private key and only allowlisted non-executable options.
+
+The official VPNBook API profile can include `redirect-gateway` (with no
+arguments or `def1`). In isolated QA only, the parser recognizes these
+exact directives but removes them from the staged copy. Other redirect
+variants and executable options remain rejected. Both the original source
+SHA-256 and normalized profile SHA-256 are recorded in private metadata.
+This does not enable full-device protection.
+
+On 2026-10-19 a fresh official `uk205.vpnbook.com:443` TCP profile was
+retrieved as raw HTTPS `application/x-openvpn-profile` and its CA matched
+independent earlier pinned evidence. The narrowed profile passed a real
+Linux NetworkManager import/removal without route or DNS changes. OpenVPN
+2.7 subsequently verified the actual remote CA and `server.vpnbook.com`
+certificate name in a rootless TLS handshake; a wrong name was rejected.
+An intentionally invalid test login received `AUTH_FAILED`. These results
+do **not** establish a successful provider login, tunneled throughput,
+full-device VPN protection or production release.
+
+
+In the Linux desktop app, open **Settings → Import operator-pinned OpenVPN profile**,
+enter the trusted CA fingerprint and exact server certificate CN, then select a
+local `.ovpn` file in the native file chooser. Staging is completely separate
+from **Connect**, the dynamic VPN Gate pool, and Auto-Recovery. The Windows
+Settings page does not show this experimental Linux-only control.
+After staging, **Check NetworkManager import (no connection)** uses a bounded
+`nmcli connection import --temporary` to verify that the local NetworkManager
+OpenVPN plugin can parse the profile. It identifies the newly imported UUID,
+deletes that exact temporary profile and checks that deletion completed. It
+never invokes `connection up`, requests provider credentials, or changes
+the live VPN. A successful import proves **only parser compatibility**, not
+provider identity, external TLS authentication, routing or data transfer.
+
+For **inspection only** (no writes), run:
+
+```bash
+python3 app/backend/linux/operator_profile.py check \
+  --profile /path/to/provider.ovpn \
+  --ca-sha256 YOUR_INDEPENDENT_CA_DER_SHA256 \
+  --peer-cn YOUR_INDEPENDENT_EXPECTED_SERVER_CN
+```
+
+For explicit **private staging only**, add `stage` and
+`--common "$HOME/.local/share/OpenInternetGateway/common"`.
+Staging creates a user-private `operator-profiles` directory and a
+`current.json` record. It **does copy the inline client private key** into a
+mode-0600 private file. Neither command downloads a config, accepts or stores
+VPN login passwords, creates NetworkManager profiles, connects a VPN, changes
+routing, or marks the relay as live-authenticated. It is **not integrated into Connect,
+auto-recovery, or the Windows engine**. An import that passes a supplied CA pin
+and name is not an external TLS/data-plane PASS; the pin's provenance and
+provider account/credentials remain operator responsibilities. Do not stage
+private key material under a Git checkout, and never commit it.
+
+### Independent Linux QA rollback (not enabled for normal Connect)
+
+The experimental helper `app/backend/linux/operator_rollback.py` supports
+`arm` (an independent transient `systemd --user` timer) and `cleanup`
+(UUID-scoped removal) for a randomly named
+`OIG-Operator-QA-<12-hex>` *temporary* NetworkManager profile. It refuses
+to delete existing profiles with a different name, does not activate VPN,
+and does not change network routes. The timer is armed **before** any future
+opt-in connection attempt; `AccuracySec=1s` bounds scheduling jitter.
+Its cleanup runner is copied byte-for-byte to the private persistent user-data
+`qa-rollback` directory (0700/0600) before systemd is armed, so a crash or
+AppImage unmount cannot invalidate the timer's script path. If the helper
+cannot be pinned or verified, the trial fails before connection activation.
+A regression test deletes the simulated AppImage source and runs the stored
+cleanup independently. A real synthetic, inactive NetworkManager QA profile was deleted by
+the independent timer; this is not validation of connection rollback under
+live traffic. The helper is **not invoked by the production Connect button**
+and must not be used for automatic activation, credential storage, or Windows.
+
+### Explicit memory-only Linux provider QA (Linux Settings experimental control; not released)
+
+The separate `app/backend/linux/operator_trial.py` tool is **not** wired to
+the normal Connect button or automatic recovery. Linux **Settings** exposes a
+separately consented **Trial transport briefly** control only when a privately
+staged profile remains hash-valid; the ordinary gateway must have saved
+`desired-state=off`. It is intentionally a
+short, opt-in Linux-only provider trial, requiring a current `.ovpn`,
+an independently authenticated CA DER SHA-256 + exact server CN, and
+username/password JSON delivered over **stdin** (never command arguments or
+environment). Do not put credentials into shell history or logs.
+
+The password is transferred to NetworkManager using an anonymous Linux
+`memfd` exposed to one child through `/proc/self/fd/N` as
+`vpn.secrets.password` in the documented `nmcli connection up passwd-file`
+format. The username is briefly passed as a `nmcli` argument during
+temporary profile setup and remains visible in local process inspection.
+The temporary profile is configured `autoconnect=no`,
+IPv4/IPv6 `never-default=yes`, `ignore-auto-dns=yes`, and
+`ignore-auto-routes=yes`, verified before the systemd user-session rollback
+timer is armed. The last setting also suppresses automatically supplied
+specific or split-default routes; `never-default` alone is insufficient for
+that scope. These settings passed a real temporary NetworkManager import,
+readback and removal with full IPv4/IPv6 route tables and DNS unchanged.
+Live server-pushed route handling is still untested until a real authenticated
+provider trial. **Only after
+confirmed independent rollback** may `connection up` be attempted.
+Immediate UUID/name-scoped cleanup is attempted in all normal/failure
+paths; the independent timer remains armed when immediate cleanup fails.
+A successful command reports transport activation only—not externally
+verified server identity, full-device routing, DNS integrity or throughput.
+
+While a scoped trial runs, the backend refuses ordinary Connect/refresh and
+profile replacement/re-import; the app also blocks applying an update or
+explicit Quit until the trial cleans up. Import and Native Check now share a
+process-local lease: a trial cannot begin until either profile task finishes,
+and a second profile task cannot modify files during the first. Quit and update
+handoff also wait for these tasks to complete. Emergency Disconnect remains
+available. An update in progress blocks starting a trial. These guards are
+process-local; an external crash still relies on the independent systemd
+rollback timer, and active-tunnel cleanup remains unverified.
+
+The whole Settings → IPC → backend → stdin → Python → NetworkManager path
+has only passed with **synthetic credentials and an isolated NetworkManager
+stub**; no real provider username/password or VPN has been connected by this
+feature. No provider password is saved to application settings.
+
+Only mocked credential transport/ordering/failure branches have passed;
+the current provider credentials and a real in-app authenticated tunnel
+remain unverified. The test command is deliberately not exposed as a
+general-purpose application connection or Windows feature.
 
 ## Security model
 

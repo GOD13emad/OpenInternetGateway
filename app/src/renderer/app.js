@@ -203,8 +203,8 @@ function renderDirectInternet() {
   setText('directIP', b?.publicIP || '—');
   setText('directCountry', b?.country || '—');
   const pathText = b
-    ? ((b.interface || 'Physical adapter') + ' · ' + (b.localIP || 'local IP unavailable') + (b.gateway ? (' · gateway ' + b.gateway) : '') + ' · proxy bypass ON')
-    : 'Not tested yet · VPN/proxy bypass is enforced by binding the physical adapter.';
+    ? ((b.interface || 'Physical adapter') + ' · ' + (b.localIP || 'local IP unavailable') + (b.gateway ? (' · gateway ' + b.gateway) : '') + ' · proxy bypass ON' + (b.effectiveRouteVerified ? ' · effective ISP route checked' : ''))
+    : 'Not tested yet · physical binding and (on Windows) effective-route verification occur during the test.';
   setText('directPath', pathText);
   const proof = $('directVerification');
   if (proof) {
@@ -575,9 +575,116 @@ function setPage(name) {
   if (name === 'updates') loadUpdates(false);
 }
 
+async function loadOperatorProfileStatus() {
+  if (state.platform?.platform !== 'linux') return;
+  try {
+    const info = await window.gateway.operatorProfileStatus();
+    const label = info?.staged
+      ? ('Staged offline: VPNBook ' + String(info.remoteHost || '') + ':' +
+        String(info.remotePort || '') +
+        ' · local policy checked. NOT connected; TLS/traffic and auto-connect NOT verified.')
+      : 'No operator profile staged. Only locally validated profiles appear here; this is not a live VPN connection.';
+    setText('operatorStageStatus', label);
+    state.operatorStaged = !!info?.staged;
+    $('operatorNativeCheckButton').disabled = !info?.staged;
+    $('operatorTrialButton').disabled = !info?.staged || !$('operatorTrialConsent').checked;
+  } catch {
+    setText('operatorStageStatus', 'Offline operator-profile status unavailable; no connection was attempted.');
+  }
+}
+
+async function checkOperatorNativeCompatibility() {
+  if (state.busy || state.platform?.platform !== 'linux') return;
+  const button = $('operatorNativeCheckButton');
+  button.disabled = true;
+  try {
+    const result = await window.gateway.operatorNativeCheck();
+    if (!result?.nativeImportCompatible || !result?.temporaryProfileRemoved ||
+        result?.connectionActivated !== false) {
+      throw new Error('Native import did not finish with verified cleanup.');
+    }
+    setText('operatorStageStatus',
+      'Offline profile is NetworkManager-importable; temporary profile removed. No VPN connection or TLS/throughput verification.');
+    showToast('Temporary NetworkManager import succeeded and was removed; VPN was NOT connected.');
+  } catch (error) {
+    showToast(userErrorMessage(error, 'Native compatibility check rejected.'), true);
+    await loadOperatorProfileStatus();
+  } finally {
+    try {
+      const current = await window.gateway.operatorProfileStatus();
+      button.disabled = !current?.staged;
+    } catch {
+      button.disabled = true;
+    }
+  }
+}
+
+async function runOperatorTransportTrial() {
+  if (state.busy || state.platform?.platform !== 'linux' ||
+      !state.operatorStaged || !$('operatorTrialConsent').checked) return;
+  const user = String($('operatorUsername').value || '').trim();
+  let password = $('operatorPassword').value;
+  $('operatorPassword').value = ''; // never persist provider secrets in the DOM
+  if (!/^[A-Za-z0-9._@+-]{1,96}$/.test(user) ||
+      password.length < 1 || password.length > 256 || /[^\x20-\x7e]/.test(password)) {
+    showToast('Enter valid temporary provider credentials.', true);
+    return;
+  }
+  $('operatorTrialConsent').checked = false;
+  $('operatorTrialButton').disabled = true;
+  setBusy(true, 'operator-trial',
+    'Starting a scoped Linux transport trial; independently armed timer will disconnect it.');
+  try {
+    const result = await window.gateway.operatorTrial(user, password);
+    password = '';
+    if (!result?.ok || !result?.tempProfileRemoved ||
+        result?.identityVerifiedByApp !== false) {
+      throw new Error('Trial did not verify the temporary connection cleanup.');
+    }
+    setText('operatorTrialResult',
+      'Temporary VPN transport trial completed and removed. Server identity, full-device routing and throughput remain unverified.');
+    showToast('Temporary VPN trial was removed. This is not a validated full-device VPN connection.');
+  } catch (error) {
+    password = '';
+    setText('operatorTrialResult',
+      'Trial failed or did not complete; inspect the Linux QA connection inventory before retrying.');
+    showToast(userErrorMessage(error, 'Temporary operator trial could not complete safely.'), true);
+  } finally {
+    setBusy(false);
+    await loadOperatorProfileStatus();
+  }
+}
+
+async function stageOperatorProfileFromPicker() {
+  if (state.busy || state.platform?.platform !== 'linux') return;
+  const rawPin = String($('operatorCaPin').value || '').trim();
+  const cn = String($('operatorPeerName').value || '').trim();
+  const normalized = rawPin.replace(/:/g, '');
+  if (!/^[0-9A-Fa-f]{64}$/.test(normalized) ||
+      !/^[A-Za-z0-9._-]{1,128}$/.test(cn)) {
+    showToast('Enter the independent CA SHA-256 and exact operator-approved server CN.', true);
+    return;
+  }
+  const button = $('operatorStageButton');
+  button.disabled = true;
+  try {
+    const result = await window.gateway.stageOperatorProfile(rawPin, cn);
+    if (result?.canceled) return;
+    if (!result?.imported || !result?.staged || result?.readyForAutomaticConnection !== false) {
+      throw new Error('Offline operator-profile import was not verified.');
+    }
+    await loadOperatorProfileStatus();
+    showToast('Profile staged offline. VPN was NOT connected; credentials were not entered.');
+  } catch (error) {
+    showToast(userErrorMessage(error, 'Operator profile rejected.'), true);
+  } finally {
+    button.disabled = false;
+  }
+}
+
 async function init() {
   document.querySelectorAll('.nav-item').forEach(b => b.addEventListener('click', () => setPage(b.dataset.page)));
-  $('powerButton').addEventListener('click', () => runAction(state.status?.connected ? 'disconnect' : 'connect', state.status?.connected ? 'Disconnected.' : 'Connected and validated.'));
+  $('powerButton').addEventListener('click', () => runAction(state.status?.connected ? 'disconnect' : 'connect', state.status?.connected ? 'Disconnected.' : 'Connection attempt completed; check protection and relay identity status.'));
   $('reloadConnections').addEventListener('click', loadConnections);
   $('benchmarkCurrent').addEventListener('click', benchmarkCurrent);
   $('benchmarkDirect').addEventListener('click', benchmarkDirectInternet);
@@ -605,6 +712,12 @@ async function init() {
   $('installRecovery').addEventListener('click', () => runAction('auto-install', 'Auto-Recovery installed.'));
   $('removeRecovery').addEventListener('click', () => runAction('auto-remove', 'Auto-Recovery removed.'));
   $('openLogs').addEventListener('click', () => window.gateway.openLogs());
+  $('operatorStageButton').addEventListener('click', stageOperatorProfileFromPicker);
+  $('operatorNativeCheckButton').addEventListener('click', checkOperatorNativeCompatibility);
+  $('operatorTrialConsent').addEventListener('change', () => {
+    $('operatorTrialButton').disabled = !state.operatorStaged || !$('operatorTrialConsent').checked;
+  });
+  $('operatorTrialButton').addEventListener('click', runOperatorTransportTrial);
   $('checkUpdates').addEventListener('click', () => loadUpdates(true));
   $('installUpdate').addEventListener('click', installUpdate);
   $('openRelease').addEventListener('click', () => window.gateway.openRelease());
@@ -641,6 +754,8 @@ async function init() {
   themeBtn?.click();
 
   state.platform = await window.gateway.platform();
+  $('operatorProfileCard').hidden = state.platform.platform !== 'linux';
+  if (state.platform.platform === 'linux') await loadOperatorProfileStatus();
   setText('platformBadge', (state.platform.platform === 'win32' ? 'Windows' : 'Linux') + ' · ' + state.platform.arch);
   setText('appVersion', 'v' + (state.platform.version || '—') + ' · Stable Headless');
   setText('updateCurrent', state.platform.version || '—');
