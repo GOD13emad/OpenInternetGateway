@@ -60,6 +60,20 @@ cleanup_imported_material() {
   python3 "$FACTORY_PY" cleanup-nm --common "$OIG_COMMON" --profile-file "$1" >/dev/null 2>&1 || true
 }
 
+import_temporary_profile_uuid() {
+  # UUID delta uniquely binds a newly imported profile to this operation.
+  # Never delete, rename or select another user's connection by filename.
+  local profile="$1" before after uuid
+  before="$(nmcli -t -g UUID connection show)" || return 1
+  nmcli connection import --temporary type openvpn file "$profile" >/dev/null 2>&1 || return 1
+  after="$(nmcli -t -g UUID connection show)" || return 1
+  uuid="$(comm -13 <(printf '%s\n' "$before" | sed '/^$/d' | sort -u) \
+                       <(printf '%s\n' "$after" | sed '/^$/d' | sort -u))"
+  [[ "$uuid" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]] || return 1
+  [[ "$(nmcli -g connection.type connection show uuid "$uuid")" == "vpn" ]] || return 1
+  printf '%s\n' "$uuid"
+}
+
 delete_named_connections() {
   delete_connection_name "$PREFLIGHT_CONN"
   delete_connection_name "$CONN"
@@ -287,17 +301,17 @@ preflight_one() {
   fi
 
   delete_connection_name "$PREFLIGHT_CONN"
-  local import_name imported uuid before_route before_dns after_route after_dns
-  import_name="$(basename "$profile" .ovpn)"
-  delete_connection_name "$import_name"
+  local uuid before_route before_dns after_route after_dns
   before_route="$(ip -4 route get 1.1.1.1 2>/dev/null | head -1 || true)"
   before_dns="$(dns_server_fingerprint)"
 
-  imported="$(nmcli connection import type openvpn file "$profile" 2>&1)" || return 12
-  uuid="$(nmcli -t -f UUID,NAME connection show | awk -F: -v n="$import_name" '$2==n {print $1; exit}')"
-  [[ -n "$uuid" ]] || return 12
-  nmcli connection modify uuid "$uuid" connection.id "$PREFLIGHT_CONN" connection.autoconnect no \
-    ipv6.method disabled ipv4.never-default yes ipv4.ignore-auto-routes yes ipv4.ignore-auto-dns yes
+  uuid="$(import_temporary_profile_uuid "$profile")" || return 12
+  if ! nmcli connection modify uuid "$uuid" connection.id "$PREFLIGHT_CONN" connection.autoconnect no \
+    ipv6.method disabled ipv4.never-default yes ipv4.ignore-auto-routes yes ipv4.ignore-auto-dns yes; then
+    nmcli connection delete uuid "$uuid" >/dev/null 2>&1 || true
+    cleanup_imported_material "$profile"
+    return 12
+  fi
 
   if ! nmcli -w 10 connection up uuid "$uuid" >/dev/null 2>&1; then
     nmcli connection delete uuid "$uuid" >/dev/null 2>&1 || true
@@ -368,15 +382,14 @@ connect_one() {
   if [[ -f "$state_file" ]]; then cp -f "$state_file" "$previous_state"; else rm -f "$previous_state"; fi
 
   delete_named_connections
-  local import_name imported uuid
-  import_name="$(basename "$profile" .ovpn)"
-  delete_connection_name "$import_name"
+  local uuid
+  uuid="$(import_temporary_profile_uuid "$profile")" || return 12
 
-  imported="$(nmcli connection import type openvpn file "$profile" 2>&1)" || return 12
-  uuid="$(nmcli -t -f UUID,NAME connection show | awk -F: -v n="$import_name" '$2==n {print $1; exit}')"
-  [[ -n "$uuid" ]] || return 12
-
-  nmcli connection modify uuid "$uuid" connection.id "$CONN" connection.autoconnect no ipv6.method disabled ipv4.never-default no
+  if ! nmcli connection modify uuid "$uuid" connection.id "$CONN" connection.autoconnect no ipv6.method disabled ipv4.never-default no; then
+    nmcli connection delete uuid "$uuid" >/dev/null 2>&1 || true
+    cleanup_imported_material "$profile"
+    return 12
+  fi
   if ! nmcli -w 30 connection up uuid "$uuid" >/dev/null 2>&1; then
     nmcli connection delete uuid "$uuid" >/dev/null 2>&1 || true
     cleanup_imported_material "$profile"

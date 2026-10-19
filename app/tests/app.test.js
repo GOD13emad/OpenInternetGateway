@@ -519,6 +519,55 @@ test('LastKnownGood deduplicates the final normalized server-role profile hash',
   }finally{fs.rmSync(temp,{recursive:true,force:true});}
 });
 
+test('Linux temp VPN import chooses the new UUID, never deletes an existing profile with same name',()=>{
+  const linux=fs.readFileSync(path.join(root,'backend/linux/oig-linux.sh'),'utf8');
+  const helper=linux.slice(linux.indexOf('import_temporary_profile_uuid() {'),linux.indexOf('\ndelete_named_connections() {'));
+  const pre=linux.slice(linux.indexOf('preflight_one() {'),linux.indexOf('\nwrite_profile_state() {'));
+  const connect=linux.slice(linux.indexOf('connect_one() {'),linux.indexOf('\nrecord_success() {'));
+  assert.match(helper,/nmcli connection import --temporary type openvpn file/);
+  assert.match(helper,/comm -13/);
+  assert.doesNotMatch(pre,/delete_connection_name "\$import_name"/);
+  assert.doesNotMatch(connect,/delete_connection_name "\$import_name"/);
+  assert.match(pre,/import_temporary_profile_uuid "\$profile"/);
+  assert.match(connect,/import_temporary_profile_uuid "\$profile"/);
+  if(process.platform!=='linux') return;
+  const cp=require('node:child_process');
+  const script=[
+    'set -euo pipefail',
+    'old=aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa',
+    'new=bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb',
+    'state=before',
+    'nmcli(){',
+    '  if [[ "$*" == "-t -g UUID connection show" ]]; then',
+    '    printf "%s\\n" "$old"',
+    '    [[ "$state" == before ]] || printf "%s\\n" "$new"',
+    '  elif [[ "$1 $2 $3" == "connection import --temporary" ]]; then',
+    '    state=after',
+    '  elif [[ "$*" == "-g connection.type connection show uuid $new" ]]; then',
+    '    echo vpn',
+    '  else echo "Unexpected simulated nmcli invocation: $*" >&2;return 9;fi',
+    '}',
+    helper,
+    'actual="$(import_temporary_profile_uuid /tmp/colliding-filename.ovpn)"',
+    '[[ "$actual" == "$new" ]] || exit 7',
+    'echo "PASS independent new UUID / persistent same-name user profile untouched"',
+    'state=before',
+    'many=cccccccc-cccc-cccc-cccc-cccccccccccc',
+    'nmcli(){',
+    '  if [[ "$*" == "-t -g UUID connection show" ]]; then',
+    '    printf "%s\\n" "$old"',
+    '    if [[ "$state" != before ]]; then printf "%s\\n%s\\n" "$new" "$many"; fi',
+    '  elif [[ "$1 $2 $3" == "connection import --temporary" ]]; then state=after',
+    '  elif [[ "$*" == "-g connection.type connection show uuid $new" ]]; then echo vpn',
+    '  else return 9; fi',
+    '}',
+    'if import_temporary_profile_uuid /tmp/colliding-filename.ovpn >/dev/null;then exit 6;fi',
+    'echo "PASS multiple new UUID ambiguity rejected, no user profiles deleted"'
+  ].join('\n');
+  const r=cp.spawnSync('bash',['-c',script],{encoding:'utf8',timeout:3000});
+  assert.equal(r.status,0,r.stderr||r.stdout);
+});
+
 test('Linux NetworkManager inline PEM cleanup only removes exact unreferenced OIG copies',()=>{
   const cp=require('node:child_process');
   const linux=fs.readFileSync(path.join(root,'backend/linux/oig-linux.sh'),'utf8');
