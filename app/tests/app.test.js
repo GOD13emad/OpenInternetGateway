@@ -1373,3 +1373,51 @@ test('real throughput never persists measurements when VPN source or active rela
   }
   for(const mode of ['stable','source-change','relay-change','disconnect'])await exercise(mode);
 });
+
+test('Windows packaged capture QA is fail-closed and never writes the real installed backend or registers autostart', async()=>{
+  const Backend=require('../src/main/platform-backend');
+  const os=require('node:os');
+  const tmp=fs.mkdtempSync(path.join(os.tmpdir(),'oig-passive-win-capture-'));
+  const vars=['OIG_CAPTURE_ONLY','OIG_CAPTURE_ROOT','LOCALAPPDATA'];
+  const previous=Object.fromEntries(vars.map(name=>[name,process.env[name]]));
+  try {
+    const fakeResource=path.join(tmp,'app','backend','windows');
+    fs.mkdirSync(fakeResource,{recursive:true});
+    fs.writeFileSync(path.join(fakeResource,'OpenInternetGateway.ps1'),'# harmless fixture');
+    const realUserLocal=path.join(tmp,'real-user-local');
+    const installed=path.join(realUserLocal,'OpenInternetGateway');
+    fs.mkdirSync(installed,{recursive:true});
+    const sentinel=path.join(installed,'OpenInternetGateway.ps1');
+    fs.writeFileSync(sentinel,'USER_BACKEND_MUST_NOT_BE_REPLACED');
+    process.env.LOCALAPPDATA=realUserLocal;
+    process.env.OIG_CAPTURE_ONLY='1';
+    delete process.env.OIG_CAPTURE_ROOT;
+    const makeBackend=()=>{
+      const b=new Backend({version:'2.5.20',appPath:path.join(tmp,'app'),
+        resourcesPath:path.join(tmp,'app'),userData:path.join(tmp,'user-data')});
+      b.platform='win32';
+      return b;
+    };
+    await assert.rejects(makeBackend().initialize(),/isolated absolute OIG_CAPTURE_ROOT/);
+    process.env.OIG_CAPTURE_ROOT='relative-scratch';
+    await assert.rejects(makeBackend().initialize(),/isolated absolute OIG_CAPTURE_ROOT/);
+    const privateRoot=path.join(tmp,'capture-only-qa');
+    process.env.OIG_CAPTURE_ROOT=privateRoot;
+    const b=makeBackend();
+    await b.initialize();
+    assert.equal(b.backendRoot,path.join(privateRoot,'backend-windows'));
+    assert.equal(fs.readFileSync(path.join(b.backendRoot,'OpenInternetGateway.ps1'),'utf8'),
+      '# harmless fixture');
+    assert.equal(fs.readFileSync(sentinel,'utf8'),'USER_BACKEND_MUST_NOT_BE_REPLACED');
+    const entry=fs.readFileSync(path.join(root,'src/main/main.js'),'utf8');
+    assert.match(entry,/app\.isPackaged && process\.env\.OIG_CAPTURE_ONLY !== '1'/,
+      "QA must not register the user's Windows login autostart");
+    assert.match(entry,/process\.platform !== 'win32' \|\| process\.env\.OIG_CAPTURE_ONLY !== '1'\) createTray\(\)/,
+      'QA must not create a notification icon in the real Windows tray');
+  } finally {
+    for(const name of vars){
+      if(previous[name]===undefined)delete process.env[name];else process.env[name]=previous[name];
+    }
+    fs.rmSync(tmp,{recursive:true,force:true});
+  }
+});

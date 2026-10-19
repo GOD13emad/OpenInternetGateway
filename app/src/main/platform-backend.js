@@ -132,7 +132,17 @@ class Backend {
 
   async initialize() {
     if (this.platform === 'win32') {
-      const installed = path.join(process.env.LOCALAPPDATA || os.homedir(), 'OpenInternetGateway');
+      // Passive packaged-app QA must never replace the real user's backend.
+      // Require an explicit absolute scratch root and fail closed otherwise.
+      const captureOnly = process.env.OIG_CAPTURE_ONLY === '1';
+      const captureRoot = String(process.env.OIG_CAPTURE_ROOT || '');
+      if (captureOnly && (!path.isAbsolute(captureRoot) ||
+          path.parse(captureRoot).root === path.resolve(captureRoot))) {
+        throw new Error('Windows capture-only QA requires an isolated absolute OIG_CAPTURE_ROOT.');
+      }
+      const installed = captureOnly
+        ? path.join(captureRoot, 'backend-windows')
+        : path.join(process.env.LOCALAPPDATA || os.homedir(), 'OpenInternetGateway');
       const packaged = path.join(this.resourcesPath, 'backend', 'windows');
       const development = path.join(this.appPath, 'backend', 'windows');
       const resource = fs.existsSync(packaged) ? packaged : development;

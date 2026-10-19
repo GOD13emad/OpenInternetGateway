@@ -18,6 +18,8 @@ The Connections page exposes the current relay inventory with country, endpoint,
 
 The Config Factory keeps a diversified multi-country pool with last-known-good retention, validation history, failure quarantine, and refresh behavior.
 
+For **passive Windows packaged-GUI QA**, set `OIG_CAPTURE_ONLY=1`, an explicit absolute private `OIG_CAPTURE_ROOT` scratch directory, and a private `APPDATA`/`LOCALAPPDATA` for the child process before launching with `--background` and `OIG_CAPTURE_PATH`. Capture-only mode stores backend script copies under the QA scratch root, never overwrites the user's installed backend, and does not register Windows login autostart or a notification-area icon. It rejects capture-mode startup when the scratch root is absent/relative. This QA mode is **not** an installed-app or live VPN acceptance test.
+
 ### Direct ISP truth boundary
 
 OIG's Direct Internet test binds the physical network path and disables ordinary HTTP/SOCKS proxy use. The UI records the physical adapter/local IP/gateway plus direct public egress. When the active routed egress differs from the direct public egress, the bypass is explicitly marked as observed. A third-party kernel/WFP/endpoint-security product that intercepts traffic below normal socket routing can still override OS routing; OIG surfaces the observed egress instead of assuming bypass succeeded.

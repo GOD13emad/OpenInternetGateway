@@ -323,12 +323,13 @@ app.on('second-instance', (_event, argv, _workingDirectory, additionalData) => {
     }
     startLinuxExitWatchdog();
     if (quitRequestedAtLaunch) { requestQuit(); return; }
-    if (process.platform === 'win32' && app.isPackaged) {
+    if (process.platform === 'win32' && app.isPackaged && process.env.OIG_CAPTURE_ONLY !== '1') {
       app.setLoginItemSettings({ openAtLogin: true, path: process.execPath, args: ['--background'] });
     }
     registerIpc();
     createWindow();
-    createTray();
+    // A passive Windows QA capture must not register a host notification icon.
+    if (process.platform !== 'win32' || process.env.OIG_CAPTURE_ONLY !== '1') createTray();
   });
   
   app.on('activate', () => {
