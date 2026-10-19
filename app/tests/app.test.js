@@ -1469,6 +1469,10 @@ test('Windows direct ISP requires the winning physical route before claiming phy
       source.indexOf("  async _assertWindowsDirectEgress("));
     assert.match(routeSelection,/\.HardwareInterface/,
       'Only a physical hardware adapter can qualify as ISP');
+    assert.match(routeSelection,/Find-NetRoute -RemoteIPAddress '1\.1\.1\.1'/,
+      'Pick the adapter from the actual winning route when multiple physical adapters exist');
+    assert.doesNotMatch(routeSelection,/Sort-Object RouteMetric,InterfaceMetric/,
+      'Do not pick the first physical 0\/0 route on a multi-NIC system');
     assert.doesNotMatch(routeSelection,/if\(-not \$r\)\{\$r=\$routes/,
       'Do not fall back to a virtual Windows route when no hardware adapter exists');
     const physical={interface:'Ethernet QA',index:17,localIP:'192.0.2.10',gateway:'192.0.2.1',

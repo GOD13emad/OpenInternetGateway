@@ -875,13 +875,19 @@ class Backend {
   async _directInternetPath() {
     if (this.platform === 'win32') {
       const script = [
-        "$routes=@(Get-NetRoute -AddressFamily IPv4 -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue|Where-Object{$_.InterfaceAlias -notmatch 'OpenVPN|TAP|Wintun|OIG|WireGuard|Cloudflare|vEthernet|Loopback'}|Sort-Object RouteMetric,InterfaceMetric)",
-        "$r=$routes|Where-Object{(Get-NetAdapter -InterfaceIndex $_.InterfaceIndex -ErrorAction SilentlyContinue).HardwareInterface}|Select-Object -First 1",
-        // A virtual fallback cannot be certified as an ISP physical adapter.
-        "if(-not $r){throw 'No physical IPv4 Internet route was found.'}",
-        "$a=Get-NetAdapter -InterfaceIndex $r.InterfaceIndex -ErrorAction SilentlyContinue",
-        "$ip=Get-NetIPAddress -AddressFamily IPv4 -InterfaceIndex $r.InterfaceIndex -ErrorAction SilentlyContinue|Where-Object{$_.IPAddress -notlike '169.254*'}|Select-Object -First 1",
-        "if(-not $ip){throw 'Physical Internet adapter has no IPv4 address.'}",
+        "$ErrorActionPreference='Stop'",
+        // Several physical adapters can each retain a 0/0 route. Select the
+        // Windows *effective* source and route, not the first physical 0/0.
+        "$chosen=@(Find-NetRoute -RemoteIPAddress '1.1.1.1' -ErrorAction Stop)",
+        "$sources=@($chosen|Where-Object{$_.IPAddress -and -not $_.DestinationPrefix})",
+        "$routes=@($chosen|Where-Object{$_.DestinationPrefix})",
+        "if($sources.Count -ne 1 -or $routes.Count -ne 1){throw 'Effective ISP route is missing or ambiguous'}",
+        "$r=$routes[0]",
+        "$a=Get-NetAdapter -InterfaceIndex $r.InterfaceIndex -ErrorAction Stop",
+        "if(-not $a.HardwareInterface -or $a.Name -match 'OpenVPN|TAP|Wintun|OIG|WireGuard|Cloudflare|vEthernet|Loopback'){throw 'Winning route is not a physical ISP adapter'}",
+        "if([int]$sources[0].InterfaceIndex -ne [int]$r.InterfaceIndex){throw 'Winning route and source adapter mismatch'}",
+        "$ip=Get-NetIPAddress -AddressFamily IPv4 -InterfaceIndex $r.InterfaceIndex -ErrorAction Stop|Where-Object{$_.IPAddress -eq [string]$sources[0].IPAddress -and $_.AddressState -eq 'Preferred'}|Select-Object -First 1",
+        "if(-not $ip){throw 'Winning physical adapter source IPv4 is missing or not preferred'}",
         "[ordered]@{interface=[string]$a.Name;index=[int]$r.InterfaceIndex;ip=[string]$ip.IPAddress;gateway=[string]$r.NextHop}|ConvertTo-Json -Compress"
       ].join(';');
       const r = await run(this._requireWindowsPwsh(), ['-NoProfile','-Command',script], { timeout: 5000 });
