@@ -50,13 +50,15 @@ function Write-Status {
    if($countries.ContainsKey($cc)){$countries[$cc]=[int]$countries[$cc]+1}else{$countries[$cc]=1}
  }
  $source=''
- $mirror=Join-Path $Root 'evidence\mirror-refresh-last.json'
+ $sourceSecurity='unknown'
  $lastRefresh=$generatedAt
- if(Test-Path $mirror){
+ $promotedSource=Join-Path $active 'source-provenance.json'
+ if(Test-Path $promotedSource){
    try{
-     $m=Get-Content -Raw $mirror|ConvertFrom-Json
-     if($m.usedMirror){$source=[string]$m.usedMirror}else{$source='cached VPN Gate mirror snapshot'}
-     if($m.at){$lastRefresh=[string]$m.at}
+     $p=Get-Content -Raw $promotedSource|ConvertFrom-Json
+     if($p.sourceSecurity -in @('https-only','http-fallback')){$sourceSecurity=[string]$p.sourceSecurity}
+     if($p.source){$source=[string]$p.source}
+     if($p.sourceAt){$lastRefresh=[string]$p.sourceAt}
    }catch{}
  }
  $ageHours=$null
@@ -73,6 +75,7 @@ function Write-Status {
    lastRefresh=$lastRefresh
    ageHours=$ageHours
    source=$source
+   sourceSecurity=$sourceSecurity
    healthy=($items.Count -ge $MinPool)
    metadataComplete=$metadataComplete
    protocols=$protocols

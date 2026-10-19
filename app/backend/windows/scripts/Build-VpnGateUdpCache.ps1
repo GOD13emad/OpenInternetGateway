@@ -121,6 +121,23 @@ foreach($wrap in $oldSorted){
  }
 }
 
+# Promotion provenance follows the actual active snapshot, including rollback.
+# Preserved prior profiles make whole-pool provenance unknown by construction.
+$sourceSecurity='unknown';$sourceLabel='cached VPN Gate mirror snapshot';$sourceAt=$null
+$mirrorFile=Join-Path $Root 'evidence\mirror-refresh-last.json'
+if(Test-Path $mirrorFile){
+ try{
+  $m=Get-Content -Raw $mirrorFile|ConvertFrom-Json
+  if($m.source){$sourceLabel=[string]$m.source}
+  if($m.refresh -and $m.sourceSecurity -in @('https-only','http-fallback') -and $kept -eq 0){
+   $sourceSecurity=[string]$m.sourceSecurity;$sourceAt=[string]$m.at
+  }
+ }catch{}
+}
+[ordered]@{
+ sourceSecurity=$sourceSecurity;source=$sourceLabel;sourceAt=$sourceAt
+ preservedProfiles=$kept;promotedAt=(Get-Date).ToString('o')
+}|ConvertTo-Json -Depth 4|Set-Content -Encoding UTF8 (Join-Path $stage 'source-provenance.json')
 $meta|ConvertTo-Json -Depth 6|Set-Content -Encoding UTF8 (Join-Path $stage 'index.json')
 foreach($c in $meta){
  $leaf=Split-Path $c.Profile -Leaf

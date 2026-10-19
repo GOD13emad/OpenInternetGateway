@@ -5,6 +5,7 @@ $Root=Split-Path -Parent $PSScriptRoot
 $csv=Join-Path $Root 'evidence\vpngate-mirror-api.csv'
 $seedBases=@(
  'https://www.vpngate.net',
+ 'https://download.vpngate.jp',
  'http://210.222.246.148:12814',
  'http://150.40.105.19:35399',
  'http://150.40.105.6:11803',
@@ -31,7 +32,9 @@ try{
   $psi.FileName='curl.exe'
   $psi.UseShellExecute=$false
   $psi.CreateNoWindow=$true
-  foreach($a in @('-4','-L','--fail','--noproxy','*','--connect-timeout','2','--max-time','8','-sS','-o',$out,($base+'/api/iphone/'))){[void]$psi.ArgumentList.Add([string]$a)}
+  # An HTTPS directory must not downgrade to HTTP through a redirect.
+  $redir=if($base.StartsWith('https://',[StringComparison]::OrdinalIgnoreCase)){'=https'}else{'=http,https'}
+  foreach($a in @('-4','-L','--fail','--noproxy','*','--proto-redir',$redir,'--connect-timeout','2','--max-time','8','-sS','-o',$out,($base+'/api/iphone/'))){[void]$psi.ArgumentList.Add([string]$a)}
   $p=[Diagnostics.Process]::new();$p.StartInfo=$psi
   try{
    if($p.Start()){$jobs.Add([pscustomobject]@{Base=$base;Path=$out;Process=$p})}
@@ -62,7 +65,8 @@ try{
    $usable+=,[pscustomobject]@{Base=$j.Base;Path=$j.Path;Rows=$rows;Size=$size;Complete=$complete}
   }
  }
- $chosen=@($usable|Sort-Object @{Expression='Complete';Descending=$true},@{Expression='Rows';Descending=$true}|Select-Object -First ([Math]::Max(1,$MaxSources)))
+ # Prefer authenticated HTTPS transport over faster plaintext mirrors.
+ $chosen=@($usable|Sort-Object @{Expression={if($_.Base -match '^https://'){0}else{1}};Ascending=$true},@{Expression='Complete';Descending=$true},@{Expression='Rows';Descending=$true}|Select-Object -First ([Math]::Max(1,$MaxSources)))
  $seen=[Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
  foreach($j in $chosen){
   $attemptedSources+=,[string]$j.Base
@@ -101,9 +105,10 @@ try{
 }
 $source=if($used.Count){$used -join ' + '}else{'cached VPN Gate mirror snapshot'}
 $partialCount=@($chosen|Where-Object {-not $_.Complete}).Count
+$sourceSecurity=if(-not $used.Count){'unknown'}elseif(@($used|Where-Object {$_ -notmatch '^https://'}).Count -gt 0 -or $cachedAdded -gt 0){'http-fallback'}else{'https-only'}
 [ordered]@{
  at=(Get-Date).ToString('o');refresh=$promoted;usedMirror=$(if($used.Count){$used[0]}else{$null});
  usedMirrors=@($used);attemptedSources=@($attemptedSources);sourceCount=$used.Count;partialSourceCount=$partialCount;
- liveMergedRows=$liveMergedRows;cachedMergedRows=$cachedAdded;mergedRows=$merged.Count;discoveredMirrors=$bases.Count;source=$source
+ liveMergedRows=$liveMergedRows;cachedMergedRows=$cachedAdded;mergedRows=$merged.Count;discoveredMirrors=$bases.Count;source=$source;sourceSecurity=$sourceSecurity
 }|ConvertTo-Json -Depth 5|Set-Content -Encoding UTF8 (Join-Path $Root 'evidence\mirror-refresh-last.json')
 & (Join-Path $PSScriptRoot 'Build-VpnGateUdpCache.ps1')
