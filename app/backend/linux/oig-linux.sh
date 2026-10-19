@@ -718,6 +718,10 @@ console_enable() {
     echo "Console Gateway requires disconnected Ethernet outside all default Internet routes." >&2
     return 32
   fi
+  [[ "$(desired_state)" == "on" ]] || {
+    echo "Gateway disconnect was requested; refusing Console sharing." >&2
+    return 31
+  }
   healthy || { echo "Validated VPN tunnel must be active first." >&2; return 31; }
   existing="$(console_owned_uuids)" || {
     echo "The Console Gateway name is owned by another NetworkManager connection; refusing to modify it." >&2
@@ -745,6 +749,14 @@ console_enable() {
     nmcli connection delete uuid "$uuid" >/dev/null 2>&1 || true
     echo "Console Ethernet changed state before activation; no interface was enabled." >&2
     return 32
+  fi
+  # Do not race a user-requested disconnect while setting up shared
+  # Ethernet. Keep disconnect immediate rather than queueing it behind a
+  # potentially long-running console/connection lock.
+  if ! healthy || [[ "$(desired_state)" != "on" ]]; then
+    nmcli connection delete uuid "$uuid" >/dev/null 2>&1 || true
+    echo "VPN is no longer desired or healthy; Console sharing not enabled." >&2
+    return 31
   fi
   if ! nmcli connection up uuid "$uuid" >/dev/null; then
     nmcli connection delete uuid "$uuid" >/dev/null 2>&1 || true

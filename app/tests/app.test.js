@@ -519,6 +519,48 @@ test('LastKnownGood deduplicates the final normalized server-role profile hash',
   }finally{fs.rmSync(temp,{recursive:true,force:true});}
 });
 
+test('Linux Console Gateway cancels activation if user disconnects during setup',()=>{
+  const src=fs.readFileSync(path.join(root,'backend/linux/oig-linux.sh'),'utf8');
+  const enable=src.slice(src.indexOf('console_enable() {'),src.indexOf('\nconsole_disable() {'));
+  assert.match(enable,/desired_state/);
+  assert.ok(enable.indexOf('desired_state')<enable.indexOf('console_owned_uuids'));
+  assert.ok(enable.lastIndexOf('desired_state')>enable.indexOf('nmcli connection add type ethernet'));
+  assert.ok(enable.lastIndexOf('desired_state')<enable.indexOf('nmcli connection up uuid "$uuid"'));
+  if(process.platform!=='linux')return;
+  const cp=require('node:child_process');
+  const program=[
+    'set -euo pipefail',
+    'CONSOLE_CONN=OIG-Console-Gateway',
+    'OIG_MARKER=openinternetgateway-managed-v1',
+    'calls="$(mktemp)"',
+    'changed="$(mktemp)";rm "$changed"',
+    'trap \'rm -f "$calls" "$changed"\' EXIT',
+    'console_iface(){ echo eth2; }',
+    'console_iface_is_safe(){ return 0; }',
+    'desired_state(){ [[ -f "$changed" ]] && echo off || echo on; }',
+    'healthy(){ return 0; }',
+    'console_owned_uuids(){ return 0; }',
+    'uuidgen(){ echo "cccccccc-cccc-cccc-cccc-cccccccccccc"; }',
+    'is_oig_owned_console_uuid(){ return 0; }',
+    'nmcli(){',
+    ' case "$*" in',
+    ' "connection add "* ) echo add >> "$calls";touch "$changed";;',
+    ' "connection delete uuid cccccccc-cccc-cccc-cccc-cccccccccccc") echo delete >> "$calls";;',
+    ' "connection up uuid cccccccc-cccc-cccc-cccc-cccccccccccc") echo up >> "$calls";;',
+    ' *) return 12;;',
+    ' esac',
+    '}',
+    enable,
+    'if console_enable >/dev/null 2>&1;then exit 22;fi',
+    '[[ "$(grep -c "^add$" "$calls")" -eq 1 ]] || exit 24',
+    '[[ "$(grep -c "^delete$" "$calls")" -eq 1 ]] || exit 25',
+    'if grep -q "^up$" "$calls";then exit 26;fi',
+    'echo "PASS disconnect request during setup never activates Console NIC"'
+  ].join('\n');
+  const r=cp.spawnSync('bash',['-c',program],{encoding:'utf8',timeout:5000});
+  assert.equal(r.status,0,r.stderr||r.stdout);
+});
+
 test('Linux Console Gateway rechecks NIC before activation and serializes operations',()=>{
   const src=fs.readFileSync(path.join(root,'backend/linux/oig-linux.sh'),'utf8');
   const enable=src.slice(src.indexOf('console_enable() {'),src.indexOf('\nconsole_disable() {'));
@@ -539,6 +581,7 @@ test('Linux Console Gateway rechecks NIC before activation and serializes operat
     'calls="$(mktemp)"; trap \'rm -f "$calls"\' EXIT',
     'console_iface(){ echo eth2; }',
     'console_iface_is_safe(){ counter=$((counter+1)); [[ "$counter" -eq 1 ]]; }',
+    'desired_state(){ echo on; }',
     'healthy(){ return 0; }',
     'console_owned_uuids(){ return 0; }',
     'uuidgen(){ echo "cccccccc-cccc-cccc-cccc-cccccccccccc"; }',
