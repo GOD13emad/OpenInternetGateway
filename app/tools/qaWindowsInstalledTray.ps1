@@ -57,7 +57,15 @@ function Wait-Window([bool]$wantVisible,[int]$timeoutMs) {
     $h = if ($script:observedWindow -ne [IntPtr]::Zero) {
       $script:observedWindow
     } else {
-      [OigHostedWindow]::FindWindow($null,'Open Internet Gateway')
+      # Hosted Electron process reported a nonzero MainWindowHandle even
+      # while exact-title FindWindow returned zero (CI 39340175319).
+      # Prefer the handle *owned by the launched process*, not a title.
+      $main.Refresh()
+      if ($main.MainWindowHandle -ne [IntPtr]::Zero) {
+        $main.MainWindowHandle
+      } else {
+        [OigHostedWindow]::FindWindow($null,'Open Internet Gateway')
+      }
     }
     if ($h -ne [IntPtr]::Zero -and [OigHostedWindow]::IsWindowVisible($h) -eq $wantVisible) {
       if ($wantVisible) { $script:observedWindow = $h }
