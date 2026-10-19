@@ -519,6 +519,50 @@ test('LastKnownGood deduplicates the final normalized server-role profile hash',
   }finally{fs.rmSync(temp,{recursive:true,force:true});}
 });
 
+test('Linux Console Gateway rechecks NIC before activation and serializes operations',()=>{
+  const src=fs.readFileSync(path.join(root,'backend/linux/oig-linux.sh'),'utf8');
+  const enable=src.slice(src.indexOf('console_enable() {'),src.indexOf('\nconsole_disable() {'));
+  const dispatch=src.slice(src.lastIndexOf('\naction='));
+  assert.match(dispatch,/console-enable/);
+  assert.match(dispatch,/console-disable/);
+  assert.equal((enable.match(/console_iface_is_safe "\$iface"/g)||[]).length,2);
+  assert.ok(enable.lastIndexOf('console_iface_is_safe "$iface"')>enable.indexOf('nmcli connection add type ethernet'));
+  assert.ok(enable.lastIndexOf('console_iface_is_safe "$iface"')<enable.indexOf('nmcli connection up uuid "$uuid"'));
+  if(process.platform!=='linux')return;
+  const cp=require('node:child_process');
+  const snippet=src.slice(src.indexOf('console_enable() {'),src.indexOf('\nconsole_disable() {'));
+  const program=[
+    'set -euo pipefail',
+    'CONSOLE_CONN=OIG-Console-Gateway',
+    'OIG_MARKER=openinternetgateway-managed-v1',
+    'counter=0',
+    'calls="$(mktemp)"; trap \'rm -f "$calls"\' EXIT',
+    'console_iface(){ echo eth2; }',
+    'console_iface_is_safe(){ counter=$((counter+1)); [[ "$counter" -eq 1 ]]; }',
+    'healthy(){ return 0; }',
+    'console_owned_uuids(){ return 0; }',
+    'uuidgen(){ echo "cccccccc-cccc-cccc-cccc-cccccccccccc"; }',
+    'is_oig_owned_console_uuid(){ return 0; }',
+    'nmcli(){',
+    ' case "$*" in',
+    ' "connection add "* ) echo add >> "$calls";;',
+    ' "connection delete uuid cccccccc-cccc-cccc-cccc-cccccccccccc") echo delete >> "$calls";;',
+    ' "connection up uuid cccccccc-cccc-cccc-cccc-cccccccccccc") echo up >> "$calls";;',
+    ' *) return 12;;',
+    ' esac',
+    '}',
+    snippet,
+    'if console_enable >/dev/null 2>&1;then exit 22;fi',
+    '[[ "$counter" -eq 2 ]] || exit 23',
+    '[[ "$(grep -c "^add$" "$calls")" -eq 1 ]] || exit 24',
+    '[[ "$(grep -c "^delete$" "$calls")" -eq 1 ]] || exit 25',
+    'if grep -q "^up$" "$calls";then exit 26;fi',
+    'echo "PASS NIC changed state, deleted only new profile, no interface up"'
+  ].join('\n');
+  const r=cp.spawnSync('bash',['-c',program],{encoding:'utf8',timeout:5000});
+  assert.equal(r.status,0,r.stderr||r.stdout);
+});
+
 test('Linux Console Gateway refuses both active physical uplinks and unsafe overrides',()=>{
   const src=fs.readFileSync(path.join(root,'backend/linux/oig-linux.sh'),'utf8');
   const chosen=src.slice(src.indexOf('console_iface_is_safe() {'),src.indexOf('\nconsole_status() {'));

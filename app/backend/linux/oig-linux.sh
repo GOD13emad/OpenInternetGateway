@@ -738,6 +738,14 @@ console_enable() {
     nmcli connection delete uuid "$uuid" >/dev/null 2>&1 || true
     return 34
   fi
+  # Guard against an external link/NM state change while creating the
+  # profile. Never activate sharing on a NIC that became connected or got
+  # any IPv4 default route after our first safety check.
+  if ! console_iface_is_safe "$iface"; then
+    nmcli connection delete uuid "$uuid" >/dev/null 2>&1 || true
+    echo "Console Ethernet changed state before activation; no interface was enabled." >&2
+    return 32
+  fi
   if ! nmcli connection up uuid "$uuid" >/dev/null; then
     nmcli connection delete uuid "$uuid" >/dev/null 2>&1 || true
     return 35
@@ -760,7 +768,7 @@ console_disable() {
 }
 
 action="${1:-status}"
-if [[ "$action" == "connect" || "$action" == "connect-profile" || "$action" == "refresh" || "$action" == "ensure" || "$action" == "factory-refresh" ]]; then
+if [[ "$action" == "connect" || "$action" == "connect-profile" || "$action" == "refresh" || "$action" == "ensure" || "$action" == "factory-refresh" || "$action" == "console-enable" || "$action" == "console-disable" ]]; then
   exec 9>"$LOCK"
   if [[ "$action" == "ensure" ]]; then
     if ! flock -n 9; then
