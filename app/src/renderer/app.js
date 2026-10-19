@@ -67,22 +67,34 @@ function syncConnectionInventoryToStatus(s) {
   }
 }
 
+// No connected-volunteer relay may be called protected until its own
+// certificate identity is independently authenticated, not merely CA-valid.
+function protectionStatusLabel(connected, identityVerified, score) {
+  if (!connected) return '0%';
+  if (!identityVerified) return 'Unverified';
+  return Math.round(score / 4 * 100) + '%';
+}
+
 function renderStatus(s) {
   state.status = s || {};
   const connected = !!s.connected;
+  const identityVerified = s.serverIdentityVerified === true;
   syncConnectionInventoryToStatus(s);
   $('powerButton').classList.toggle('connected', connected);
   $('sidebarDot').classList.toggle('online', connected);
-  setText('sidebarStatus', connected ? 'Protected' : 'Direct connection');
+  setText('sidebarStatus', connected ? (identityVerified ? 'Protected' : 'Tunnel · unverified') : 'Direct connection');
   setText('sidebarCountry', connected ? ((s.country || 'Foreign') + ' egress') : 'Tunnel disconnected');
-  setText('connectionTitle', connected ? 'Internet protected' : 'Protection is off');
-  setText('connectionDetail', connected ? ('Traffic exits through ' + (s.country || 'validated relay') + ' · ' + (s.ip || 'IP pending')) : 'Connect to establish a validated full-device route.');
+  setText('connectionTitle', connected ? (identityVerified ? 'Internet protected' : 'Tunnel active · relay unverified') : 'Protection is off');
+  setText('connectionDetail', connected
+    ? ('Traffic exits through ' + (s.country || 'relay') + ' · ' + (s.ip || 'IP pending')
+      + (identityVerified ? '' : ' · Server certificate identity not independently verified.'))
+    : 'Connect to establish a validated full-device route.');
   setText('ipStat', s.ip || '—');
   setText('countryStat', s.country || 'Direct');
   setText('dnsStat', safeArray(s.dns).join(' · ') || '—');
   setText('routesStat', String(s.fullRoutes ?? 0) + ' / 2');
-  setText('relayName', s.relay || (connected ? 'Validated relay' : 'Not connected'));
-  setText('relayMeta', connected ? ((s.engine === 'HeadlessConnector' ? 'Headless · sticky' : (s.interface || 'Tunnel interface')) + ' · anti-flap') : 'Validated endpoint · stable mode');
+  setText('relayName', s.relay || (connected ? 'Connected relay' : 'Not connected'));
+  setText('relayMeta', connected ? ((s.engine === 'HeadlessConnector' ? 'Headless · sticky' : (s.interface || 'Tunnel interface')) + (identityVerified ? ' · identity verified' : ' · relay identity unverified')) : 'No authenticated relay session');
 
   const routeOk = connected && Number(s.fullRoutes || 0) >= 2;
   const dnsOk = connected && s.poison === false;
@@ -90,7 +102,9 @@ function renderStatus(s) {
   const recoveryOk = !!s.autoRecovery && !['inactive','failed','missing','disabled'].includes(recoveryState);
   const pool = s.configPool || {};
   const factoryOk = !!pool.healthy && Number(pool.pool || 0) >= 3;
-  markHealth('routeIcon', 'routeHealth', routeOk, routeOk ? 'All IPv4 traffic protected' : 'Full-route not active');
+  markHealth('routeIcon', 'routeHealth', routeOk, routeOk
+    ? (identityVerified ? 'All IPv4 traffic protected' : 'IPv4 uses VPN; relay identity unverified')
+    : 'Full-route not active');
   markHealth('dnsIcon', 'dnsHealth', dnsOk,
     dnsOk ? 'DNS A-response matches reference (not authenticated)'
       : (s.poison === true ? 'Unexpected dns.google A-response'
@@ -98,8 +112,9 @@ function renderStatus(s) {
   markHealth('recoveryIcon', 'recoveryHealth', recoveryOk, recoveryOk ? (s.autoRecoveryState || 'Installed') : 'Not installed');
   markHealth('factoryIcon', 'factoryHealth', factoryOk, factoryOk ? (String(pool.validated || 0) + ' validated · ' + String(pool.pool || 0) + ' total') : 'Pool needs regeneration');
   const score = [routeOk, dnsOk, recoveryOk, factoryOk].filter(Boolean).length;
-  // Protection is zero while the tunnel is disconnected; readiness is separate.
-  setText('healthScore', (connected ? Math.round(score / 4 * 100) : 0) + '%');
+  // Encryption/route reachability never certifies an arbitrary relay's identity.
+  // A disconnected tunnel is 0%; a live but unverified relay has no protection score.
+  setText('healthScore', protectionStatusLabel(connected, identityVerified, score));
   $('autoButton').textContent = recoveryOk ? 'Installed' : 'Install';
   $('powerButton').title = connected ? 'Disconnect' : 'Connect';
 

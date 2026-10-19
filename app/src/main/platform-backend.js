@@ -1437,10 +1437,14 @@ exit 0
       const configPool = await this._factoryStatus();
       const current = this._readJson(this._profileStatePath(), {}) || {};
       const activeSha = base?.connected ? String(current.sha256 || '').toLowerCase() : '';
-      return { ...base, activeSha, configPool };
+      // Volunteer VPN Gate configurations do not pin an independently
+      // authenticated relay certificate. A working tunnel is not identity proof.
+      // Never derive this claim from untrusted cached metadata or claimed country.
+      return { ...base, activeSha, configPool, serverIdentityVerified: false };
     } catch (error) {
       return {
         connected: false,
+        serverIdentityVerified: false,
         error: error.message,
         country: '',
         ip: '',

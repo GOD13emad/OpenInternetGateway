@@ -37,7 +37,7 @@ test('Disconnected Dashboard shows no claimed protection and no green DNS icon',
   const s=fs.readFileSync(path.join(base,'src/renderer/app.js'),'utf8');
   assert.match(s,/const dnsOk = connected && s\.poison === false/);
   assert.match(s,/const routeOk = connected && Number\(s\.fullRoutes/);
-  assert.match(s,/connected \? Math\.round\(score \/ 4 \* 100\) : 0/);
+  assert.match(s,/setText\('healthScore', protectionStatusLabel\(connected, identityVerified, score\)\)/);
   assert.match(s,/Requires active VPN tunnel/);
   assert.match(s,/not authenticated/);
 });
