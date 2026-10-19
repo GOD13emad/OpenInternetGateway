@@ -1309,3 +1309,67 @@ test('Windows tunnel speed is bound to a uniquely verified VPN IPv4 source, neve
   assert.match(active,/endStatus\.interface !== status\.interface/);
   assert.match(active,/vpn-source-ip-bound/);
 });
+
+test('real throughput never persists measurements when VPN source or active relay changes mid-transfer',async()=>{
+  const vm = require('node:vm');
+  const os = require('node:os');
+  const {EventEmitter} = require('node:events');
+  const source = fs.readFileSync(path.join(root,'src/main/platform-backend.js'),'utf8');
+  const fakeSpawn = (file,args)=>{
+    assert.equal(file,'curl','Only inert mocked curl transfers may execute');
+    const child=new EventEmitter();
+    child.stdin=new EventEmitter();child.stdin.end=()=>{};
+    child.stdout=new EventEmitter();child.stderr=new EventEmitter();
+    process.nextTick(()=>{
+      const upload=args.includes('-X');
+      child.stdout.emit('data',Buffer.from(upload?'200|1|62500':'200|1|1250000'));
+      child.emit('close',0);
+    });
+    return child;
+  };
+  const mod={exports:{}};
+  vm.runInNewContext(source,{module:mod,exports:mod.exports,process,Buffer,setTimeout,clearTimeout,
+    require:n=>n==='child_process'?{spawn:fakeSpawn}:require(n)},{filename:'backend-no-real-traffic-test.js'});
+  const profileSha='a'.repeat(64);
+  async function exercise(mode){
+    const temp=fs.mkdtempSync(path.join(os.tmpdir(),'oig-throughput-route-guard-'));
+    try{
+      const b=new mod.exports({version:'2.5.20',appPath:root,resourcesPath:root,userData:temp});
+      b.platform='win32';b.backendRoot=temp;
+      let statusReads=0;let profileReads=0;let tunnelIp='10.19.0.2';
+      b.status=async()=>{
+        statusReads++;
+        if(mode==='source-change' && statusReads===2)tunnelIp='10.19.0.3';
+        return {connected:mode!=='disconnect'||statusReads===1,fullRoutes:2,interface:'OIG VPN Alias'};
+      };
+      b._activeTunnelCurlArgs=async()=>['-4','--noproxy','*','--interface','host!'+tunnelIp];
+      b.profiles=async()=>{
+        profileReads++;
+        const moved=mode==='relay-change'&&profileReads>1;
+        return {activeSha:moved?'b'.repeat(64):profileSha,
+          profiles:[{active:true,sha256:moved?'b'.repeat(64):profileSha,ip:'198.51.100.1',
+            host:'synthetic.test',country:'US',benchmark:null}]};
+      };
+      b._httpsLatencyMs=async()=>55;
+      b._icmpPing=async()=>77;
+      const persisted=path.join(temp,'state','connection-benchmarks.json');
+      if(mode==='stable'){
+        const x=await b.benchmarkActive();
+        assert.equal(x.ok,true);
+        assert.equal(x.benchmark.throughputPath,'vpn-source-ip-bound');
+        assert.ok(x.benchmark.downloadMbps>0&&x.benchmark.uploadMbps>0);
+        assert.equal(x.benchmark.tunnelRouteVerifiedAfterTransfer,true);
+        assert.equal(JSON.parse(fs.readFileSync(persisted,'utf8'))[profileSha].sha256,profileSha);
+        assert.equal(statusReads,2);
+        assert.equal(profileReads,2);
+      }else{
+        const error=mode==='source-change'?/tunnel source changed/:
+          mode==='relay-change'?/Active VPN relay rotated/:/route or active connection changed/;
+        await assert.rejects(b.benchmarkActive(),error);
+        assert.equal(fs.existsSync(persisted),false,
+          'Never persist stale speed values after tunnel change '+mode);
+      }
+    }finally{fs.rmSync(temp,{recursive:true,force:true})}
+  }
+  for(const mode of ['stable','source-change','relay-change','disconnect'])await exercise(mode);
+});

@@ -1250,6 +1250,19 @@ class Backend {
       throw new Error('Tunnel route or active connection changed during the speed test; result discarded.');
     }
 
+    // The same adapter name can survive a tunnel reconnect or relay
+    // rotation. Check actual bound source again and the active profile SHA
+    // before attributing a completed upload/download to the original relay.
+    const endCurlArgs = await this._activeTunnelCurlArgs(endStatus);
+    if (JSON.stringify(endCurlArgs) !== JSON.stringify(tunnelCurlArgs)) {
+      throw new Error('VPN tunnel source changed during the speed test; result discarded.');
+    }
+    const endInventory = await this.profiles(endStatus);
+    if (!endInventory.activeSha || endInventory.activeSha !== active.sha256 ||
+        !endInventory.profiles.some(p => p.active && p.sha256 === active.sha256)) {
+      throw new Error('Active VPN relay rotated during the speed test; result discarded.');
+    }
+
     const previous = active.benchmark || {};
     const result = {
       ...previous,
