@@ -519,6 +519,19 @@ test('LastKnownGood deduplicates the final normalized server-role profile hash',
   }finally{fs.rmSync(temp,{recursive:true,force:true});}
 });
 
+test('Linux reserved-name conflict is local and never penalizes VPN relay quality',()=>{
+  const src=fs.readFileSync(path.join(root,'backend/linux/oig-linux.sh'),'utf8');
+  const connect=src.slice(src.indexOf('connect_one() {'),src.indexOf('\nrecord_success() {'));
+  const gateway=src.slice(src.indexOf('connect_gateway() {'),src.indexOf('\nteardown_gateway() {'));
+  assert.match(connect,/reserved_name_conflict "\$CONN" \|\| reserved_name_conflict "\$LEGACY_CONN"/);
+  assert.match(connect,/return 16/);
+  assert.match(gateway,/if \[\[ "\$rc" -eq 16 \]\]; then/);
+  const early=gateway.indexOf('if [[ "$rc" -eq 16 ]]; then');
+  assert.ok(early>=0 && early<gateway.indexOf('record_failure "$sha"'));
+  assert.match(gateway,/reserved_name_conflict "\$CONN"/);
+  assert.ok(gateway.indexOf('reserved_name_conflict')<gateway.indexOf('start_watchdog'));
+});
+
 test('Linux does not activate new managed VPN alongside unowned reserved-name connection',()=>{
   const src=fs.readFileSync(path.join(root,'backend/linux/oig-linux.sh'),'utf8');
   const guard=src.slice(src.indexOf('is_oig_owned_vpn_uuid() {'),src.indexOf('\ncleanup_imported_material() {'));

@@ -418,12 +418,12 @@ connect_one() {
   # connection has claimed one of our reserved names.
   if reserved_name_conflict "$CONN" || reserved_name_conflict "$LEGACY_CONN"; then
     rm -f "$previous_state"
-    return 12
+    return 16
   fi
   delete_named_connections
   if reserved_name_conflict "$CONN" || reserved_name_conflict "$LEGACY_CONN"; then
     rm -f "$previous_state"
-    return 12
+    return 16
   fi
   local uuid
   uuid="$(import_temporary_profile_uuid "$profile")" || return 12
@@ -508,6 +508,12 @@ connect_gateway() {
   fi
   [[ -f "$OIG_COMMON/runtime/udp-cache/index.json" ]] || { echo "Config pool index missing" >&2; return 20; }
 
+  # Local NM-name conflicts must not be mistaken for failed remote relays.
+  # Fail before creating a watchdog, changing a healthy tunnel, or probing.
+  if reserved_name_conflict "$CONN" || reserved_name_conflict "$LEGACY_CONN"; then
+    echo "A reserved OIG VPN name belongs to another NetworkManager connection; refusing automatic switch." >&2
+    return 22
+  fi
   start_watchdog
   local attempts="$EVIDENCE/connect-linux-attempts.jsonl"
   : > "$attempts"
@@ -528,6 +534,13 @@ connect_gateway() {
         return 0
       else
         rc=$?
+        if [[ "$rc" -eq 16 ]]; then
+          # A foreign NM profile appeared while connecting. This is a
+          # local ownership conflict, not a bad volunteer VPN server.
+          stop_watchdog
+          echo "Reserved NetworkManager name conflict; no relay penalized." >&2
+          return 22
+        fi
         reason="CODE_$rc"
         printf '{"host":"%s","ip":"%s","port":"%s","protocol":"%s","result":"FAIL","code":%s,"cycle":%s}\n' "$host" "$ipaddr" "$port" "$protocol" "$rc" "$cycle" >> "$attempts"
         record_failure "$sha" "$host" "$ipaddr" "$port" "$reason"
