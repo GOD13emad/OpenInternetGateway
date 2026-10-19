@@ -47,17 +47,26 @@ function Start-Isolated([string]$arguments) {
   if ($null -eq $result) { throw 'Failed to start installed Electron executable' }
   return $result
 }
+$script:observedWindow = [IntPtr]::Zero
 function Wait-Window([bool]$wantVisible,[int]$timeoutMs) {
   $stopwatch = [Diagnostics.Stopwatch]::StartNew()
   while ($stopwatch.ElapsedMilliseconds -lt $timeoutMs) {
     if ($main.HasExited) { throw "App exited unexpectedly ($($main.ExitCode))" }
-    $h = [OigHostedWindow]::FindWindow($null,'Open Internet Gateway')
+    # A hidden Chromium window may not have a discoverable title/handle
+    # until it has first been shown. After first show, use the observed HWND.
+    $h = if ($script:observedWindow -ne [IntPtr]::Zero) {
+      $script:observedWindow
+    } else {
+      [OigHostedWindow]::FindWindow($null,'Open Internet Gateway')
+    }
     if ($h -ne [IntPtr]::Zero -and [OigHostedWindow]::IsWindowVisible($h) -eq $wantVisible) {
+      if ($wantVisible) { $script:observedWindow = $h }
       return $h
     }
     Start-Sleep -Milliseconds 300
   }
-  throw "Installed Dashboard visibility=$wantVisible not observed within $timeoutMs ms"
+  $p = Get-Process -Id $main.Id -ErrorAction SilentlyContinue
+  throw "Hosted Windows HWND unavailable: desiredVisible=$wantVisible, observedHWND=$($script:observedWindow), mainWindowHandle=$($p.MainWindowHandle), session=$($p.SessionId)"
 }
 function Send-Secondary([string]$arguments) {
   $secondary=Start-Isolated $arguments
@@ -72,8 +81,11 @@ function Send-Secondary([string]$arguments) {
 }
 $main=Start-Isolated '--background'
 try {
-  $handle=Wait-Window $false 35000
-  Write-Host 'Hosted installed Electron started in hidden/background mode'
+  Start-Sleep -Seconds 3
+  if ($main.HasExited) { throw 'Background-installed app exited before second instance' }
+  Write-Host 'Hosted installed Electron background process remained alive'
+  # First show via a second instance; hidden windows are not guaranteed
+  # to be enumerable via FindWindow in hosted Windows service sessions.
   Send-Secondary ''
   $handle=Wait-Window $true 20000
   Write-Host 'Hosted second-instance Dashboard show PASS'
