@@ -42,6 +42,38 @@ jobs:
           cache-dependency-path: app/package-lock.json
       - run: npm ci
       - run: npm run dist:win
+      - name: Smoke-test silent NSIS install on disposable runner
+        shell: pwsh
+        timeout-minutes: 5
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $version = (Get-Content .\package.json -Raw | ConvertFrom-Json).version
+          $setup = Join-Path (Get-Location) "dist\OpenInternetGateway-Setup-$version.exe"
+          if (-not (Test-Path -LiteralPath $setup -PathType Leaf)) { throw "NSIS setup missing: $setup" }
+          $installDir = Join-Path $env:RUNNER_TEMP "oig-nsis-$env:GITHUB_RUN_ID"
+          if ($installDir -match '\s') { throw "NSIS /D path must have no spaces" }
+          $install = Start-Process -FilePath $setup -ArgumentList @('/S', "/D=$installDir") -PassThru -Wait
+          if ($install.ExitCode -ne 0) { throw "NSIS silent install exit: $($install.ExitCode)" }
+          $expected = @(
+            'Open Internet Gateway.exe',
+            'resources\app.asar',
+            'resources\backend\windows',
+            'resources\backend\common',
+            'resources\pwsh\pwsh.exe',
+            'Uninstall Open Internet Gateway.exe'
+          )
+          foreach ($relative in $expected) {
+            $path = Join-Path $installDir $relative
+            if (-not (Test-Path -LiteralPath $path)) { throw "NSIS installed payload missing: $relative" }
+          }
+          Write-Host "NSIS user-level silent install and installed payload PASS (disposable runner)"
+          $uninstaller = Join-Path $installDir 'Uninstall Open Internet Gateway.exe'
+          $uninstall = Start-Process -FilePath $uninstaller -ArgumentList '/S' -PassThru -Wait
+          if ($uninstall.ExitCode -ne 0) { throw "NSIS silent uninstall exit: $($uninstall.ExitCode)" }
+          if (Test-Path -LiteralPath (Join-Path $installDir 'Open Internet Gateway.exe')) {
+            throw 'NSIS silent uninstall left executable behind'
+          }
+          Write-Host 'NSIS silent uninstall PASS (disposable runner)'
       - uses: actions/upload-artifact@v7
         with:
           name: windows-installer
