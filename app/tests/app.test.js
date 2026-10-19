@@ -2249,8 +2249,8 @@ test('Windows native HTTPS-only source selection never includes plaintext mirror
   const script=[
     '$ErrorActionPreference="Stop"',
     '$text=[IO.File]::ReadAllText($env:OIG_HTTPS_SELECTION_SOURCE)',
-    '$start=$text.IndexOf(" $httpsOnlyLive=")',
-    '$stop=$text.IndexOf(" $seen=",$start)',
+    "$start=$text.IndexOf(' $httpsOnlyLive=')",
+    "$stop=$text.IndexOf(' $seen=',$start)",
     'if($start -lt 0 -or $stop -lt 0){throw "Selection code not found"}',
     '$code=$text.Substring($start,$stop-$start)',
     '$MaxSources=3',
