@@ -104,6 +104,11 @@ jobs:
             }
             $appProcess.Dispose()
           }
+          # Exercise true installed-window Close, second-instance reopen and Quit
+          # in a disposable hosted runner. The owner's desktop is never targeted.
+          & (Join-Path (Get-Location) 'tools\qaWindowsInstalledTray.ps1') `
+            -InstalledExe (Join-Path $installDir 'Open Internet Gateway.exe') `
+            -ScratchRoot (Join-Path $env:RUNNER_TEMP "oig-hosted-tray-$env:GITHUB_RUN_ID")
           $uninstaller = Join-Path $installDir 'Uninstall Open Internet Gateway.exe'
           $uninstall = Start-Process -FilePath $uninstaller -ArgumentList '/S' -PassThru -Wait
           if ($uninstall.ExitCode -ne 0) { throw "NSIS silent uninstall exit: $($uninstall.ExitCode)" }

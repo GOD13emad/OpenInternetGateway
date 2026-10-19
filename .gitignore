@@ -53,6 +53,7 @@ app/tools/*
 !app/tools/afterPack.js
 !app/tools/afterAllArtifactBuild.js
 !app/tools/prepareWindowsPwsh.js
+!app/tools/qaWindowsInstalledTray.ps1
 
 # Electron archives and local build helpers
 app/electron-v*.zip
