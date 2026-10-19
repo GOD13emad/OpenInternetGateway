@@ -108,7 +108,13 @@ function renderStatus(s) {
     : '—';
   setText('poolProtocols', protocols || '—');
   setText('poolAge', pool.ageHours == null ? '—' : (Number(pool.ageHours).toFixed(1) + 'h'));
-  setText('factorySource', pool.source ? ('Source: ' + pool.source) : 'Maintains multiple validated and standby tunnel profiles automatically.');
+  const sourceTrust = pool.sourceSecurity === 'https-only'
+    ? 'HTTPS directory transport; relay identity not independently verified'
+    : (pool.sourceSecurity === 'http-fallback'
+        ? 'CAUTION: HTTP directory data is unauthenticated; relay identity unverified'
+        : 'Directory authenticity unknown; relay identity unverified');
+  setText('factorySource', pool.source ? ('Source: ' + pool.source + ' · ' + sourceTrust)
+    : 'Maintains relay profiles; source and relay authenticity are not independently verified.');
 }
 
 function markHealth(iconId, textId, ok, label) {

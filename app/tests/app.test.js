@@ -963,6 +963,35 @@ test('Windows VPN Gate refresh is bounded, parallel, HTTPS-first and merges mult
   assert.match(refresh,/MaxSources=3/);
 });
 
+test('VPN Gate source provenance never mistakes HTTP transport for authenticated HTTPS',()=>{
+  const linux=fs.readFileSync(path.join(root,'backend/linux/config_factory.py'),'utf8');
+  const refresh=fs.readFileSync(path.join(root,'backend/windows/scripts/Refresh-VpnGateCache.ps1'),'utf8');
+  const status=fs.readFileSync(path.join(root,'backend/windows/scripts/Config-Factory.ps1'),'utf8');
+  const renderer=fs.readFileSync(path.join(root,'src/renderer/app.js'),'utf8');
+  for(const text of [linux,refresh]){
+    assert.match(text,/https:\/\/download\.vpngate\.jp/);
+    assert.match(text,/sourceSecurity/);
+    assert.match(text,/https-only/);
+    assert.match(text,/http-fallback/);
+    assert.match(text,/--proto-redir/);
+  }
+  assert.match(linux,/candidates\.sort\(key=lambda item:/);
+  assert.match(refresh,/Prefer authenticated HTTPS transport/);
+  assert.match(status,/sourceSecurity=\$sourceSecurity/);
+  assert.match(renderer,/HTTP directory data is unauthenticated/);
+  assert.match(renderer,/relay identity unverified/);
+});
+
+test('Windows source provenance downgrades mixed historical-cache snapshots to unknown',()=>{
+  const src=fs.readFileSync(path.join(root,'backend/windows/scripts/Refresh-VpnGateCache.ps1'),'utf8');
+  const f=src.slice(src.indexOf('function Get-DirectorySourceSecurity'),src.indexOf('$cachedSnapshotExisted'));
+  assert.match(f,/CachedRows -gt 0/);
+  assert.match(f,/return 'unknown'/);
+  assert.match(f,/return 'http-fallback'/);
+  assert.match(f,/return 'https-only'/);
+  assert.match(src,/\$sourceSecurity=Get-DirectorySourceSecurity -Sources @\(\$used\) -CachedRows \$cachedAdded/);
+});
+
 test('Windows headless OpenVPN ranking consumes benchmark history and recent failure evidence',()=>{
   const headless=fs.readFileSync(path.join(root,'backend/windows/scripts/Headless-Control.ps1'),'utf8');
   const start=headless.indexOf('function Get-QualityScore');
