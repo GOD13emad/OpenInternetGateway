@@ -22,6 +22,9 @@ function run(file, args, options = {}) {
       cwd: options.cwd,
       windowsHide: true,
       shell: false,
+      // curl telnet:// waits for stdin EOF; use /dev/null (or NUL) for the
+      // quick TCP-port probe only, without changing other command behavior.
+      stdio: options.closeStdin ? ['ignore','pipe','pipe'] : ['pipe','pipe','pipe'],
       env: { ...process.env, ...(options.env || {}) }
     });
     let stdout = '';
@@ -378,17 +381,18 @@ class Backend {
         "$ip=[string]((($cf|Where-Object{$_ -like 'ip=*'}|Select-Object -First 1)-replace '^ip=',''));$ip=$ip.Trim()",
         "$loc=[string]((($cf|Where-Object{$_ -like 'loc=*'}|Select-Object -First 1)-replace '^loc=',''));$loc=$loc.Trim()",
         "$dns=@(Resolve-DnsName dns.google -Type A -DnsOnly -ErrorAction SilentlyContinue|Where-Object IPAddress|Select-Object -ExpandProperty IPAddress)",
+        "$poison=if($dns.Count -eq 0){$null}else{@($dns|Where-Object{$_ -notin @('8.8.8.8','8.8.4.4')}).Count -gt 0}",
         "$task=Get-ScheduledTask -TaskName 'OpenInternetGateway-AutoRecovery' -ErrorAction SilentlyContinue",
         "$svc=Get-Service OVPNConnectorService -ErrorAction SilentlyContinue",
         "$guardPath='" + path.join(this.backendRoot, 'state', 'anti-flap.json').replace(/'/g,"''") + "'",
         "$guard=$null;if(Test-Path $guardPath){try{$guard=Get-Content -Raw $guardPath|ConvertFrom-Json}catch{}}",
         "$desiredPath='" + path.join(this.backendRoot, 'state', 'desired-state.json').replace(/'/g,"''") + "'",
-        "$desired='on';if(Test-Path $desiredPath){try{$desired=[string](Get-Content -Raw $desiredPath|ConvertFrom-Json).desired}catch{}}",
+        "$desired='off';if(Test-Path $desiredPath){try{$desired=[string](Get-Content -Raw $desiredPath|ConvertFrom-Json).desired}catch{}}",
         "$state='" + statePath + "'",
         "$relay='';$profileIP='';$profileCountry='';if(Test-Path $state){try{$s=Get-Content -Raw $state|ConvertFrom-Json;$relay=([string]$s.serverIP)+':'+([string]$s.port);$profileIP=[string]$s.observedIP;if(-not $profileIP){$profileIP=[string]$s.serverIP};$profileCountry=[string]$s.country;if(-not $profileCountry){$profileCountry=[string]$s.configuredCountry}}catch{}}",
         "$managedActive=($svc -and $svc.Status -eq 'Running')",
-        "$probeDegraded=$false;if(-not $loc -and $managedActive -and $routes.Count -ge 2 -and -not($dns -contains '10.10.34.35') -and $profileCountry){$loc=$profileCountry;if(-not $ip){$ip=$profileIP};$probeDegraded=$true}",
-        "[ordered]@{connected=($routes.Count -ge 2 -and $managedActive -and $loc -and $loc -ne 'IR' -and -not($dns -contains '10.10.34.35'));ip=$ip.Trim();country=$loc.Trim();dns=$dns;poison=($dns -contains '10.10.34.35');fullRoutes=$routes.Count;relay=$relay;autoRecovery=[bool]$task;autoRecoveryState=$(if(-not $task){'Missing'}elseif(-not [bool]$task.Settings.Enabled){'Disabled'}else{[string]$task.State});interface=($routes|Select-Object -First 1 -ExpandProperty InterfaceAlias -ErrorAction SilentlyContinue);engine=$(if($svc){'HeadlessConnector'}else{'Missing'});connectorService=$(if($svc){[string]$svc.Status}else{'Missing'});managedTunnelActive=[bool]$managedActive;healthProbeDegraded=[bool]$probeDegraded;desiredState=$desired;failureStreak=$(if($guard){[int]$guard.failureStreak}else{0});rotations24h=$(if($guard){@($guard.rotations).Count}else{0})}|ConvertTo-Json -Compress"
+        "$probeDegraded=$false;if(-not $loc -and $managedActive -and $routes.Count -ge 2 -and $poison -eq $false -and $profileCountry){$loc=$profileCountry;if(-not $ip){$ip=$profileIP};$probeDegraded=$true}",
+        "[ordered]@{connected=($routes.Count -ge 2 -and $managedActive -and $loc -and $loc -ne 'IR' -and $poison -eq $false);ip=$ip.Trim();country=$loc.Trim();dns=$dns;poison=$poison;fullRoutes=$routes.Count;relay=$relay;autoRecovery=[bool]$task;autoRecoveryState=$(if(-not $task){'Missing'}elseif(-not [bool]$task.Settings.Enabled){'Disabled'}else{[string]$task.State});interface=($routes|Select-Object -First 1 -ExpandProperty InterfaceAlias -ErrorAction SilentlyContinue);engine=$(if($svc){'HeadlessConnector'}else{'Missing'});connectorService=$(if($svc){[string]$svc.Status}else{'Missing'});managedTunnelActive=[bool]$managedActive;healthProbeDegraded=[bool]$probeDegraded;desiredState=$desired;failureStreak=$(if($guard){[int]$guard.failureStreak}else{0});rotations24h=$(if($guard){@($guard.rotations).Count}else{0})}|ConvertTo-Json -Compress"
       ].join(';');
       const r = await run(pwsh, ['-NoProfile','-Command',script], { timeout: 12000 });
       return JSON.parse(r.stdout || '{}');
@@ -784,7 +788,7 @@ class Backend {
         '--connect-timeout',String(timeoutSeconds),'--max-time',String(timeoutSeconds),
         '-sS','-o',sink,'-w','%{time_connect}',
         'telnet://' + ip + ':' + String(port)
-      ], { timeout: Math.ceil((timeoutSeconds + 1) * 1000), allowFailure: true });
+      ], { timeout: Math.ceil((timeoutSeconds + 1) * 1000), allowFailure: true, closeStdin: true });
       const seconds = Number(String(r.stdout || '').trim());
       return Number.isFinite(seconds) && seconds > 0 ? Math.round(seconds * 1000 * 10) / 10 : null;
     } catch {
@@ -799,14 +803,17 @@ class Backend {
       ? this._directTcpConnectMs(profile.ip, profile.port, pathInfo)
       : Promise.resolve(null);
     const [icmpPingMs, tcpConnectMs] = await Promise.all([pingPromise, tcpPromise]);
-    const candidates = [icmpPingMs, tcpConnectMs].filter(v => Number.isFinite(v));
-    const fastPingMs = candidates.length ? Math.min(...candidates) : null;
+    // A TCP host answering ICMP is not evidence that its advertised port is open.
+    // Report the TCP connect latency when proven; keep ICMP-only as a separate hint.
+    const fastPingMs = profile.protocol === 'tcp' ? (tcpConnectMs ?? icmpPingMs) : icmpPingMs;
     return {
       fastAt: new Date().toISOString(),
       fastPingMs,
       tcpConnectMs,
-      fastReachable: fastPingMs != null,
-      fastMethod: tcpConnectMs != null && (icmpPingMs == null || tcpConnectMs <= icmpPingMs) ? 'tcp-direct' : (icmpPingMs != null ? 'icmp-direct' : 'none'),
+      fastReachable: profile.protocol === 'tcp' ? tcpConnectMs != null : icmpPingMs != null,
+      fastMethod: profile.protocol === 'tcp'
+        ? (tcpConnectMs != null ? 'tcp-direct' : (icmpPingMs != null ? 'icmp-only' : 'none'))
+        : (icmpPingMs != null ? 'icmp-direct' : 'none'),
       fastElapsedMs: Date.now() - started,
       directInterface: pathInfo.interface,
       directLocalIP: pathInfo.localIP
@@ -1430,10 +1437,14 @@ exit 0
       const configPool = await this._factoryStatus();
       const current = this._readJson(this._profileStatePath(), {}) || {};
       const activeSha = base?.connected ? String(current.sha256 || '').toLowerCase() : '';
-      return { ...base, activeSha, configPool };
+      // Volunteer VPN Gate configurations do not pin an independently
+      // authenticated relay certificate. A working tunnel is not identity proof.
+      // Never derive this claim from untrusted cached metadata or claimed country.
+      return { ...base, activeSha, configPool, serverIdentityVerified: false };
     } catch (error) {
       return {
         connected: false,
+        serverIdentityVerified: false,
         error: error.message,
         country: '',
         ip: '',

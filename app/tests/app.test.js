@@ -493,6 +493,55 @@ test('fast Test all probes relays in parallel and table sorting is explicit',()=
   for(const key of ['country','relay','protocol','sourcePing','livePing','download','upload','status']) assert.match(html,new RegExp('data-sort="'+key+'"'));
 });
 
+test('TCP fast probe requires socket connectivity even if host ICMP responds', async()=>{
+  const Backend=require('../src/main/platform-backend');
+  const b=new Backend({});
+  b._icmpPing=async()=>20;
+  b._directTcpConnectMs=async()=>null;
+  const physical={ interface:'eth0', localIP:'192.0.2.10' };
+  const tcpClosed=await b._quickProbeProfile({ip:'192.0.2.9',port:443,protocol:'tcp'},physical);
+  assert.equal(tcpClosed.fastPingMs,20);
+  assert.equal(tcpClosed.fastMethod,'icmp-only');
+  assert.equal(tcpClosed.fastReachable,false);
+  b._icmpPing=async()=>12;
+  b._directTcpConnectMs=async()=>390;
+  const tcpOpen=await b._quickProbeProfile({ip:'192.0.2.9',port:1604,protocol:'tcp'},physical);
+  assert.equal(tcpOpen.fastReachable,true);
+  assert.equal(tcpOpen.fastMethod,'tcp-direct');
+  assert.equal(tcpOpen.fastPingMs,390);
+  b._directTcpConnectMs=async()=>{throw new Error('UDP must not attempt a TCP connection')};
+  const udp=await b._quickProbeProfile({ip:'192.0.2.8',port:1195,protocol:'udp'},physical);
+  assert.equal(udp.fastReachable,true);
+  assert.equal(udp.fastMethod,'icmp-direct');
+  const linux=fs.readFileSync(path.join(root,'backend/linux/oig-linux.sh'),'utf8');
+  const windows=fs.readFileSync(path.join(root,'backend/windows/scripts/Headless-Control.ps1'),'utf8');
+  assert.match(linux,/if proto=="tcp" and b\.get\("fastReachable"\) is False: score -= 180\.0\s+elif fast is not None/);
+  assert.match(windows,/if\(\$proto -eq 'tcp'.*fastReachable.*\$score-=180\}\s+elseif\(\$null -ne \$fast\)/);
+});
+
+test('Linux direct TCP probe closes curl stdin and measures an actual loopback connection', { skip: process.platform !== 'linux' }, async()=>{
+  const net=require('node:net');
+  const Backend=require('../src/main/platform-backend');
+  const sockets=new Set();
+  const server=net.createServer(socket=>{
+    sockets.add(socket);
+    socket.on('close',()=>sockets.delete(socket));
+  });
+  await new Promise((resolve,reject)=>{
+    server.once('error',reject);
+    server.listen(0,'127.0.0.1',resolve);
+  });
+  try {
+    const b=new Backend({});
+    const latency=await b._directTcpConnectMs('127.0.0.1',server.address().port,
+      { curlInterface:'if!lo' },0.4);
+    assert.ok(latency !== null && latency >= 0, 'A live loopback socket must not become a false TCP-negative from an open stdin pipe');
+  } finally {
+    for (const socket of sockets) socket.destroy();
+    await new Promise(resolve=>server.close(resolve));
+  }
+});
+
 test('direct ISP benchmark binds physical Internet and bypasses proxies',()=>{
   const backend=fs.readFileSync(path.join(root,'src/main/platform-backend.js'),'utf8');
   const renderer=fs.readFileSync(path.join(root,'src/renderer/app.js'),'utf8');
@@ -944,7 +993,13 @@ test('Windows OpenVPN quality engine mirrors evidence-backed pool and profile sa
   assert.match(build,/Count=48/);
   assert.match(build,/PerCountry=6/);
   assert.match(build,/PreserveOld=8/);
-  for(const token of ['script-security','route-up','route-pre-down','ipchange','plugin','client-connect','client-disconnect','learn-address']) assert.ok(build.includes(token));
+  // Do not rely on an untrusted directive denylist. The shared allowlist must
+  // be invoked at generation, during LKG preservation and before connector use.
+  const policy=fs.readFileSync(path.join(root,'backend/windows/scripts/Profile-Policy.ps1'),'utf8');
+  assert.match(policy,/function Test-OigVpnProfile/);
+  assert.match(build,/Test-OigVpnProfile -Text \$text -ExpectedIP \$ip/);
+  assert.match(build,/Test-OigVpnProfile -Text \$text -ExpectedIP \(\[string\]\$o.IP\)/);
+  assert.doesNotMatch(build,/\x08/);
 });
 
 test('Windows VPN Gate refresh is bounded, parallel, HTTPS-first and merges multiple snapshots',()=>{
@@ -961,6 +1016,35 @@ test('Windows VPN Gate refresh is bounded, parallel, HTTPS-first and merges mult
   assert.match(refresh,/cachedSnapshotExisted/);
   assert.match(refresh,/liveMergedRows -ge 8/);
   assert.match(refresh,/MaxSources=3/);
+});
+
+test('VPN Gate source provenance never mistakes HTTP transport for authenticated HTTPS',()=>{
+  const linux=fs.readFileSync(path.join(root,'backend/linux/config_factory.py'),'utf8');
+  const refresh=fs.readFileSync(path.join(root,'backend/windows/scripts/Refresh-VpnGateCache.ps1'),'utf8');
+  const status=fs.readFileSync(path.join(root,'backend/windows/scripts/Config-Factory.ps1'),'utf8');
+  const renderer=fs.readFileSync(path.join(root,'src/renderer/app.js'),'utf8');
+  for(const text of [linux,refresh]){
+    assert.match(text,/https:\/\/download\.vpngate\.jp/);
+    assert.match(text,/sourceSecurity/);
+    assert.match(text,/https-only/);
+    assert.match(text,/http-fallback/);
+    assert.match(text,/--proto-redir/);
+  }
+  assert.match(linux,/candidates\.sort\(key=lambda item:/);
+  assert.match(refresh,/Prefer authenticated HTTPS transport/);
+  assert.match(status,/sourceSecurity=\$sourceSecurity/);
+  assert.match(renderer,/HTTP directory data is unauthenticated/);
+  assert.match(renderer,/relay identity unverified/);
+});
+
+test('Windows source provenance downgrades mixed historical-cache snapshots to unknown',()=>{
+  const src=fs.readFileSync(path.join(root,'backend/windows/scripts/Refresh-VpnGateCache.ps1'),'utf8');
+  const f=src.slice(src.indexOf('function Get-DirectorySourceSecurity'),src.indexOf('$cachedSnapshotExisted'));
+  assert.match(f,/CachedRows -gt 0/);
+  assert.match(f,/return 'unknown'/);
+  assert.match(f,/return 'http-fallback'/);
+  assert.match(f,/return 'https-only'/);
+  assert.match(src,/\$sourceSecurity=Get-DirectorySourceSecurity -Sources @\(\$used\) -CachedRows \$cachedAdded/);
 });
 
 test('Windows headless OpenVPN ranking consumes benchmark history and recent failure evidence',()=>{

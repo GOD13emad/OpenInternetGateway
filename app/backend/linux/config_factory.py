@@ -4,6 +4,7 @@ from pathlib import Path
 
 SEEDS = [
     "https://www.vpngate.net",
+    "https://download.vpngate.jp",
     "http://210.222.246.148:12814",
     "http://150.40.105.19:35399",
     "http://150.40.105.6:11803",
@@ -34,8 +35,11 @@ def fetch(url, timeout=8, allow_partial=False):
     # mirrors cannot stall refresh while a working VPN remains active.
     curl = shutil.which("curl")
     if curl:
+        # HTTPS sources must never silently follow a redirect to plain HTTP.
+        redirect_protocols = "=https" if url.lower().startswith("https://") else "=http,https"
         proc = subprocess.run([
             curl,"-4","-L","--fail","--noproxy","*",
+            "--proto-redir",redirect_protocols,
             "--connect-timeout","2","--max-time",str(timeout),"-sS",url
         ], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
            timeout=timeout+2, check=False)
@@ -50,6 +54,8 @@ def fetch(url, timeout=8, allow_partial=False):
         return proc.stdout, False
     req = urllib.request.Request(url, headers={"User-Agent":"OpenInternetGateway/2.5"})
     with urllib.request.urlopen(req, timeout=timeout) as r:
+        if url.lower().startswith("https://") and not r.geturl().lower().startswith("https://"):
+            raise RuntimeError("HTTPS directory source redirected to unencrypted HTTP")
         return r.read(), False
 
 def refresh_snapshot(evidence, max_sources=3):
@@ -70,44 +76,45 @@ def refresh_snapshot(evidence, max_sources=3):
         # Query the official HTTPS endpoint and known mirrors in parallel.  We
         # only need a few independent snapshots; bounded fan-out avoids making
         # refresh time scale with dead mirrors.
-        with concurrent.futures.ThreadPoolExecutor(max_workers=min(6, len(SEEDS))) as pool:
+        candidates = []
+        with concurrent.futures.ThreadPoolExecutor(max_workers=min(8, len(SEEDS))) as pool:
             futures = [pool.submit(fetch_one, base) for base in SEEDS]
+            # A fast HTTP mirror must not preempt an HTTPS result in a completion race.
             for future in concurrent.futures.as_completed(futures):
                 base, data, partial = future.result()
                 if not data:
                     continue
-                text = data.decode("utf-8", errors="replace")
-                lines = text.splitlines()
-                # A timed-out transfer may end in the middle of one CSV row.
-                # Never treat that unterminated tail as a complete record.
+                lines = data.decode("utf-8", errors="replace").splitlines()
                 if partial and data and not data.endswith((b"\n", b"\r")) and lines:
                     lines = lines[:-1]
                 rows = []
                 for line in lines:
                     if not line or line.startswith("*") or line.startswith("#"):
                         continue
-                    parts = line.split(",")
-                    if len(parts) < 15:
+                    if len(line.split(",")) < 15:
                         continue
-                    # Deduplicate identical OpenVPN endpoints/configs across
-                    # mirrors while retaining different transports/profiles.
-                    key = (parts[0].strip(), parts[1].strip(), parts[-1].strip())
-                    if key in seen:
-                        continue
-                    seen.add(key)
                     rows.append(line)
-                # Eight complete rows are enough to exceed the release/runtime
-                # minimum after structural OpenVPN validation, without turning
-                # a network timeout into an unbounded retry.
+                # Keep the pre-existing minimum required for a usable source.
                 if len(rows) >= 8:
-                    merged.extend(rows)
-                    used.append(base)
-                    if partial:
-                        partial_sources += 1
-                if len(used) >= max_sources:
-                    for pending in futures:
-                        pending.cancel()
-                    break
+                    candidates.append((base, rows, partial))
+
+        # Transport-first order, then larger snapshots; HTTP remains an
+        # explicitly labeled fallback when HTTPS sources are blocked.
+        candidates.sort(key=lambda item: (not item[0].lower().startswith("https://"), -len(item[1])))
+        for base, rows, partial in candidates[:max_sources]:
+            added = 0
+            for line in rows:
+                parts = line.split(",")
+                key = (parts[0].strip(), parts[1].strip(), parts[-1].strip())
+                if key in seen:
+                    continue
+                seen.add(key)
+                merged.append(line)
+                added += 1
+            if added:
+                used.append(base)
+                if partial:
+                    partial_sources += 1
 
         if merged:
             tmp = csv_path.with_suffix(".partial")
@@ -117,10 +124,13 @@ def refresh_snapshot(evidence, max_sources=3):
     if not csv_path.exists():
         raise RuntimeError("No live VPN Gate mirror and no cached API snapshot.")
     source = " + ".join(used) if used else "cached VPN Gate mirror snapshot"
+    source_security = ("https-only" if all(s.lower().startswith("https://") for s in used)
+                       else "http-fallback") if used else "unknown"
     write_json(evidence / "mirror-refresh-last.json", {
         "at": now(), "refresh": bool(used), "usedMirror": (used[0] if used else None),
         "usedMirrors": used, "sourceCount": len(used), "partialSourceCount": partial_sources,
-        "mergedRows": len(merged), "source": source
+        "mergedRows": len(merged), "source": source,
+        "sourceSecurity": source_security
     })
     return csv_path, (used[0] if used else None)
 
@@ -265,6 +275,21 @@ def promote(common, evidence, count=48, keep_generations=4, preserve_count=8):
         })
 
     kept = preserve_old(active, stage, meta, success, preserve_count) if active.exists() else 0
+    # Attach provenance to the *promoted generation*, not merely the last
+    # attempted mirror download. Preserved older profiles are conservatively
+    # unknown even if the new snapshot was HTTPS-only.
+    mirror = read_json(evidence / "mirror-refresh-last.json", {})
+    security = (mirror.get("sourceSecurity", "unknown")
+                if mirror.get("refresh") and kept == 0 else "unknown")
+    if security not in ("https-only", "http-fallback"):
+        security = "unknown"
+    write_json(stage / "source-provenance.json", {
+        "sourceSecurity": security,
+        "source": mirror.get("source") or "cached VPN Gate mirror snapshot",
+        "sourceAt": mirror.get("at") if mirror.get("refresh") else None,
+        "preservedProfiles": kept,
+        "promotedAt": generated
+    })
     write_json(stage/"index.json", meta)
     for c in meta:
         p=stage/Path(str(c["Profile"]).replace("\\","/")).name
@@ -298,10 +323,14 @@ def status(common, evidence, min_pool=6):
     validated=sum(1 for c in idx if str(c.get("SHA256","")).lower() in success)
     last=None
     source="Bundled VPN Gate snapshot" if idx else ""
-    mirror=read_json(evidence/"mirror-refresh-last.json",{})
-    if mirror:
-        last=mirror.get("at")
-        source=mirror.get("usedMirror") or mirror.get("source") or "cached VPN Gate mirror snapshot"
+    # Legacy pools with no promotion provenance remain UNKNOWN, even if a
+    # newer unrelated mirror refresh succeeded after their promotion.
+    provenance=read_json(active/"source-provenance.json",{})
+    source_security=provenance.get("sourceSecurity", "unknown")
+    if source_security not in ("https-only", "http-fallback"):
+        source_security="unknown"
+    source=provenance.get("source") or source
+    last=provenance.get("sourceAt") or provenance.get("promotedAt")
     if not last and idx:
         last=idx[0].get("GeneratedAt")
     age=None
@@ -323,7 +352,8 @@ def status(common, evidence, min_pool=6):
         "at":now(),"schemaVersion":2,"pool":len(idx),"validated":validated,
         "standby":max(0,len(idx)-validated),"quarantined":len(quarantine),
         "generations":generations,"lastRefresh":last,"ageHours":age,
-        "source":source,"healthy":len(idx)>=min_pool,"metadataComplete":metadata_complete,
+        "source":source,"sourceSecurity":source_security,
+        "healthy":len(idx)>=min_pool,"metadataComplete":metadata_complete,
         "protocols":protocols,"countries":countries
     }
     write_json(factory/"status.json",obj)

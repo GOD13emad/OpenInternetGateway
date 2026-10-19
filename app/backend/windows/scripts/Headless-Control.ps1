@@ -1,6 +1,7 @@
 [CmdletBinding()]
 param([ValidateSet('Ensure','Connect','Disconnect','Status')][string]$Action='Ensure',[string]$ProfileSha='')
 $ErrorActionPreference='Stop'
+. (Join-Path $PSScriptRoot 'Profile-Policy.ps1')
 $Root=Split-Path -Parent $PSScriptRoot
 $connector='C:\Program Files\OpenVPN Connect\ovpnconnector.exe'
 $service='OVPNConnectorService'
@@ -72,9 +73,10 @@ function Get-Health([string]$ExpectedCountry='') {
  $ip=[string]((($cf|Where-Object{$_ -like 'ip=*'}|Select-Object -First 1)-replace '^ip=',''));$ip=$ip.Trim()
  $loc=[string]((($cf|Where-Object{$_ -like 'loc=*'}|Select-Object -First 1)-replace '^loc=',''));$loc=$loc.Trim()
  $dns=@(Resolve-DnsName dns.google -Type A -DnsOnly -ErrorAction SilentlyContinue|Where-Object IPAddress|Select-Object -ExpandProperty IPAddress)
+ $poison=if($dns.Count -eq 0){$null}else{@($dns|Where-Object{$_ -notin @('8.8.8.8','8.8.4.4')}).Count -gt 0}
  $foreign=($loc -and $loc -ne 'IR')
  $countryOk=([string]::IsNullOrWhiteSpace($ExpectedCountry) -or $loc -eq $ExpectedCountry)
- [pscustomobject]@{Healthy=($routes.Count -ge 2 -and $foreign -and $countryOk -and -not($dns -contains '10.10.34.35'));IP=$ip;Country=$loc;DNS=$dns;Poison=($dns -contains '10.10.34.35');FullRoutes=$routes.Count}
+ [pscustomobject]@{Healthy=($routes.Count -ge 2 -and $foreign -and $countryOk -and $poison -eq $false);IP=$ip;Country=$loc;DNS=$dns;Poison=$poison;FullRoutes=$routes.Count}
 }
 function Wait-Health([bool]$Want,[int]$Seconds,[string]$ExpectedCountry=''){
  $until=(Get-Date).AddSeconds($Seconds)
@@ -166,8 +168,8 @@ function Get-QualityScore($c,[string]$Key,[hashtable]$Success,[hashtable]$Failur
   try{
    if(Test-Fresh $b.fastAt 24){
     $fast=Get-Number $b.fastPingMs
-    if($null -ne $fast){$score+=[Math]::Max(-80,140-$fast*0.45)}
-    elseif($proto -eq 'tcp' -and $null -ne $b.fastReachable -and -not [bool]$b.fastReachable){$score-=180}
+    if($proto -eq 'tcp' -and $null -ne $b.fastReachable -and -not [bool]$b.fastReachable){$score-=180}
+    elseif($null -ne $fast){$score+=[Math]::Max(-80,140-$fast*0.45)}
    }
    if(Test-Fresh $b.at 72){
     $down=Get-Number $b.downloadMbps;$up=Get-Number $b.uploadMbps;$lat=Get-Number $b.httpsLatencyMs
@@ -333,6 +335,8 @@ function Try-Candidate($c){
  if(-not(Test-Path $profile)){Record-Failure $c 'PROFILE_MISSING';return $null}
  $sha=(Get-FileHash -Algorithm SHA256 $profile).Hash.ToLowerInvariant()
  if($c.SHA256 -and $sha -ne ([string]$c.SHA256).ToLowerInvariant()){Record-Failure $c 'HASH_MISMATCH';return $null}
+ try{$policyOK=Test-OigVpnProfile -Text ([IO.File]::ReadAllText($profile)) -ExpectedIP ([string]$c.IP) -ExpectedPort ([int]$c.Port) -ExpectedProtocol ([string]$c.Protocol)}catch{$policyOK=$false}
+ if(-not $policyOK){Record-Failure $c 'PROFILE_POLICY_DENIED';return $null}
  Stop-Connector
  Copy-Item -LiteralPath $profile -Destination $serviceProfile -Force
  if((Get-FileHash -Algorithm SHA256 $serviceProfile).Hash.ToLowerInvariant() -ne $sha){throw 'ProgramData profile copy hash mismatch.'}

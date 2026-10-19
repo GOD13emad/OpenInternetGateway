@@ -1,5 +1,25 @@
 # Changelog
 
+## 2.5.20 RC (unreleased; acceptance incomplete)
+
+This is a release candidate, not a verified functional VPN release. CI builds
+and synthetic checks do not establish a trusted external OpenVPN connection.
+Do not automatically replace an installed working copy or promote to Latest.
+
+- Combined transport-aware fast relay probes, source provenance and first-run
+  consent hardening on Windows and Linux. Quick probing cannot prove handshake.
+- Windows fail-closed validation of downloaded OpenVPN profiles on cache creation,
+  LastKnownGood preservation and immediately before elevated connector use.
+  All 56 cached real Windows profiles passed this policy without VPN activation.
+- Dashboard trust: independently unauthenticated connected relays are Unverified;
+  route/DNS show warnings, not green; disconnected protection remains 0%.
+- Linux standard X11 graceful close-to-background, second-instance reopen and
+  Quit passed isolated packaged AppImage tests without changing internet routes.
+- Still blocked: an independently authenticated reachable external OpenVPN
+  server, real TLS/full-device route/DNS/ping/upload/download, installed Windows
+  GUI, current engine security patch review, physical desktop tray validation.
+- Installed 2.5.19, working network, main and published releases remain unchanged.
+
 ## 2.5.16
 
 - Fixed Windows in-app updater launch reliability for Microsoft Store PowerShell 7: OIG now detaches a native `cmd.exe` parent and runs `pwsh.exe` as its foreground child, preventing the PowerShell helper from dying when the Electron/Node parent exits.
