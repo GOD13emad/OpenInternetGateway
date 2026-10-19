@@ -982,6 +982,16 @@ test('VPN Gate source provenance never mistakes HTTP transport for authenticated
   assert.match(renderer,/relay identity unverified/);
 });
 
+test('Windows source provenance downgrades mixed historical-cache snapshots to unknown',()=>{
+  const src=fs.readFileSync(path.join(root,'backend/windows/scripts/Refresh-VpnGateCache.ps1'),'utf8');
+  const f=src.slice(src.indexOf('function Get-DirectorySourceSecurity'),src.indexOf('$cachedSnapshotExisted'));
+  assert.match(f,/CachedRows -gt 0/);
+  assert.match(f,/return 'unknown'/);
+  assert.match(f,/return 'http-fallback'/);
+  assert.match(f,/return 'https-only'/);
+  assert.match(src,/\$sourceSecurity=Get-DirectorySourceSecurity -Sources @\(\$used\) -CachedRows \$cachedAdded/);
+});
+
 test('Windows headless OpenVPN ranking consumes benchmark history and recent failure evidence',()=>{
   const headless=fs.readFileSync(path.join(root,'backend/windows/scripts/Headless-Control.ps1'),'utf8');
   const start=headless.indexOf('function Get-QualityScore');

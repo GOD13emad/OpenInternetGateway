@@ -22,6 +22,14 @@ $used=@()
 $attemptedSources=@()
 $merged=New-Object System.Collections.Generic.List[string]
 $cachedAdded=0
+# The origin of appended cache rows is not verified by a new HTTPS fetch.
+# Conservatively report mixed cache generations as unknown rather than
+# mislabeling them as an HTTP-only or HTTPS-authenticated fresh snapshot.
+function Get-DirectorySourceSecurity([string[]]$Sources,[int]$CachedRows){
+ if($CachedRows -gt 0 -or -not $Sources -or $Sources.Count -eq 0){return 'unknown'}
+ if(@($Sources|Where-Object {$_ -notmatch '^https://'}).Count -gt 0){return 'http-fallback'}
+ return 'https-only'
+}
 $cachedSnapshotExisted=Test-Path -LiteralPath $csv
 try{
  $i=0
@@ -105,7 +113,7 @@ try{
 }
 $source=if($used.Count){$used -join ' + '}else{'cached VPN Gate mirror snapshot'}
 $partialCount=@($chosen|Where-Object {-not $_.Complete}).Count
-$sourceSecurity=if(-not $used.Count){'unknown'}elseif(@($used|Where-Object {$_ -notmatch '^https://'}).Count -gt 0 -or $cachedAdded -gt 0){'http-fallback'}else{'https-only'}
+$sourceSecurity=Get-DirectorySourceSecurity -Sources @($used) -CachedRows $cachedAdded
 [ordered]@{
  at=(Get-Date).ToString('o');refresh=$promoted;usedMirror=$(if($used.Count){$used[0]}else{$null});
  usedMirrors=@($used);attemptedSources=@($attemptedSources);sourceCount=$used.Count;partialSourceCount=$partialCount;
