@@ -519,6 +519,62 @@ test('LastKnownGood deduplicates the final normalized server-role profile hash',
   }finally{fs.rmSync(temp,{recursive:true,force:true});}
 });
 
+test('Linux NetworkManager inline PEM cleanup only removes exact unreferenced OIG copies',()=>{
+  const cp=require('node:child_process');
+  const linux=fs.readFileSync(path.join(root,'backend/linux/oig-linux.sh'),'utf8');
+  const factory=fs.readFileSync(path.join(root,'backend/linux/config_factory.py'),'utf8');
+  assert.match(linux,/cleanup_imported_material\(\)/);
+  assert.match(linux,/python3 "\$FACTORY_PY" cleanup-nm --common/);
+  assert.match(factory,/def cleanup_nm_inline_material\(common, profile_file\):/);
+  if(process.platform!=='linux') return;
+  const fixture=[
+    'import importlib.util,sys,pathlib,tempfile,types',
+    'spec=importlib.util.spec_from_file_location("f",sys.argv[1])',
+    'm=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)',
+    'with tempfile.TemporaryDirectory(prefix="oig-nm-key-safe-") as tmp:',
+    '  root=pathlib.Path(tmp);common=root/"common";active=common/"runtime"/"udp-cache";active.mkdir(parents=True)',
+    '  home=root/"home";nm=home/".local"/"share"/"networkmanagement"/"certificates"/"nm-openvpn";nm.mkdir(parents=True)',
+    '  m.Path.home=staticmethod(lambda:home)',
+    '  path=active/"01-udp-fixture.ovpn"',
+    '  text="client\\ndev tun\\nproto udp\\nremote 203.0.113.80 1194\\n<ca>\\na\\n</ca>\\n<cert>\\nb\\n</cert>\\n<key>\\nc\\n</key>\\n"',
+    '  path.write_text(text)',
+    '  def files():return {tag:nm/(path.stem+"-"+tag+".pem") for tag in ("ca","cert","key")}',
+    '  for tag,file in files().items():file.write_text({"ca":"a","cert":"b","key":"c"}[tag]);file.chmod(0o600)',
+    '  other=nm/"user-owned-do-not-touch-key.pem";other.write_text("untouched");other.chmod(0o600)',
+    '  state={"referenced":True}',
+    '  def fake_nmcli(args,**kw):',
+    '    data=("ca = "+str(files()["ca"])) if state["referenced"] else "remote = 203.0.113.80"',
+    '    output="12345678-1234-1234-1234-123456789abc:vpn\\n" if "UUID,TYPE" in args else data',
+    '    return types.SimpleNamespace(stdout=output,stderr="",returncode=0)',
+    '  m.subprocess.run=fake_nmcli',
+    '  clean=m.cleanup_nm_inline_material',
+    '  assert clean(common,path)["removed"]==0 and all(f.exists() for f in files().values())',
+    '  state["referenced"]=False',
+    '  fail=m.subprocess.run',
+    '  def failed_nmcli(*args,**kwargs):raise m.subprocess.CalledProcessError(1,args[0])',
+    '  m.subprocess.run=failed_nmcli',
+    '  assert clean(common,path)["removed"]==0 and all(f.exists() for f in files().values())',
+    '  m.subprocess.run=fail',
+    '  files()["key"].write_text("different")',
+    '  assert clean(common,path)["removed"]==0 and all(f.exists() for f in files().values())',
+    '  files()["key"].write_text("c")',
+    '  files()["cert"].chmod(0o644)',
+    '  assert clean(common,path)["removed"]==0 and all(f.exists() for f in files().values())',
+    '  files()["cert"].chmod(0o600)',
+    '  files()["ca"].unlink();files()["ca"].symlink_to(other)',
+    '  assert clean(common,path)["removed"]==0 and all(f.exists() for f in files().values())',
+    '  files()["ca"].unlink();files()["ca"].write_text("a");files()["ca"].chmod(0o600)',
+    '  assert clean(common,root/"external.ovpn")["removed"]==0',
+    '  assert clean(common,path)["removed"]==3',
+    '  assert not any(f.exists() for f in files().values()) and other.read_text()=="untouched"',
+    '  print("PASS exact unreferenced NM PEM cleanup, ref guard, tamper guard, symlink guard")'
+  ].join('\n');
+  const result=cp.spawnSync('python3',['-c',fixture,path.join(root,'backend/linux/config_factory.py')],{
+    encoding:'utf8',timeout:9000
+  });
+  assert.equal(result.status,0,result.stderr||result.stdout);
+});
+
 test('OpenVPN staged profiles enforce server certificate role including retained cache',()=>{
   const cp=require('node:child_process'),os=require('node:os'),crypto=require('node:crypto');
   const base=fs.mkdtempSync(path.join(os.tmpdir(),'oig-server-role-'));

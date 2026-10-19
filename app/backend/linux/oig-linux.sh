@@ -54,10 +54,21 @@ delete_connection_name() {
     done
 }
 
+cleanup_imported_material() {
+  # Only remove orphaned content-matching inline PEM copies after NM deletes
+  # the OIG connection; never remove files referenced by another NM profile.
+  python3 "$FACTORY_PY" cleanup-nm --common "$OIG_COMMON" --profile-file "$1" >/dev/null 2>&1 || true
+}
+
 delete_named_connections() {
   delete_connection_name "$PREFLIGHT_CONN"
   delete_connection_name "$CONN"
   delete_connection_name "$LEGACY_CONN"
+  local old_profile=""
+  if [[ -f "$STATE/current-linux-profile.json" ]]; then
+    old_profile="$(python3 -c 'import json,sys;d=json.load(open(sys.argv[1]));p=d.get("profile","");print(p if isinstance(p,str) else "")' "$STATE/current-linux-profile.json" 2>/dev/null || true)"
+  fi
+  [[ -z "$old_profile" ]] || cleanup_imported_material "$old_profile"
 }
 
 json_status() {
@@ -290,12 +301,14 @@ preflight_one() {
 
   if ! nmcli -w 10 connection up uuid "$uuid" >/dev/null 2>&1; then
     nmcli connection delete uuid "$uuid" >/dev/null 2>&1 || true
+    cleanup_imported_material "$profile"
     return 13
   fi
   if ! nmcli -t -f UUID,NAME,TYPE connection show --active 2>/dev/null |
       awk -F: -v u="$uuid" '$1==u && $2=="OIG-VPN-PREFLIGHT" && $3=="vpn" {ok=1} END{exit(ok?0:1)}'; then
     nmcli connection down uuid "$uuid" >/dev/null 2>&1 || true
     nmcli connection delete uuid "$uuid" >/dev/null 2>&1 || true
+    cleanup_imported_material "$profile"
     return 14
   fi
 
@@ -303,6 +316,7 @@ preflight_one() {
   after_dns="$(dns_server_fingerprint)"
   nmcli connection down uuid "$uuid" >/dev/null 2>&1 || true
   nmcli connection delete uuid "$uuid" >/dev/null 2>&1 || true
+  cleanup_imported_material "$profile"
   python3 - "$EVIDENCE/preflight-last.json" "$host" "$ipaddr" "$port" "$protocol" "$country" "$expected" "$before_route" "$after_route" "$before_dns" "$after_dns" <<'PY'
 import datetime,json,sys
 path,host,ip,port,protocol,country,sha,before_route,after_route,before_dns,after_dns=sys.argv[1:]
@@ -365,6 +379,7 @@ connect_one() {
   nmcli connection modify uuid "$uuid" connection.id "$CONN" connection.autoconnect no ipv6.method disabled ipv4.never-default no
   if ! nmcli -w 30 connection up uuid "$uuid" >/dev/null 2>&1; then
     nmcli connection delete uuid "$uuid" >/dev/null 2>&1 || true
+    cleanup_imported_material "$profile"
     return 13
   fi
 
@@ -394,6 +409,7 @@ connect_one() {
 
   nmcli connection down uuid "$uuid" >/dev/null 2>&1 || true
   nmcli connection delete uuid "$uuid" >/dev/null 2>&1 || true
+  cleanup_imported_material "$profile"
   delete_named_connections
   if [[ -f "$previous_state" ]]; then mv -f "$previous_state" "$state_file"; else rm -f "$state_file"; fi
   return 14

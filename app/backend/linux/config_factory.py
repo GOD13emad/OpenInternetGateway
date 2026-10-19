@@ -608,9 +608,90 @@ def record(common, mode, sha, host="", ip="", port=0, reason="", observed_ip="",
     write_json(factory/"quarantine.json",quarantine)
     return status(common, common/"evidence")
 
+def cleanup_nm_inline_material(common, profile_file):
+    """Remove only orphaned NetworkManager PEM copies of this OIG cached profile.
+
+    Never follow symlinks, trust a downloaded filepath, delete a referenced PEM,
+    or remove a file that differs from the inline material. Best effort only:
+    ambiguity deliberately leaves the original user-owned data untouched.
+    """
+    result = {"removed": 0, "skipped": "unsafe_or_referenced"}
+    active = (common / "runtime" / "udp-cache").resolve()
+    profile = Path(profile_file)
+    if (not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*\.ovpn", profile.name)
+            or profile.is_symlink() or not profile.is_file()
+            or profile.parent.resolve() != active):
+        return result
+    try:
+        raw = profile.read_text(encoding="utf-8")
+        if not profile_is_data_only(raw):
+            return result
+        pem = {}
+        for tag in ("ca", "cert", "key"):
+            match = re.search(r"(?s)<" + tag + r">\s*(.*?)\s*</" + tag + r">", raw)
+            if not match:
+                return result
+            pem[tag] = match.group(1).strip()
+        directory = Path.home() / ".local/share/networkmanagement/certificates/nm-openvpn"
+        if not directory.is_dir() or directory.is_symlink():
+            return result
+        candidates = []
+        for tag in ("ca", "cert", "key"):
+            file = directory / f"{profile.stem}-{tag}.pem"
+            if file.is_symlink():
+                return result
+            if not file.is_file():
+                continue
+            stat = file.stat()
+            if (stat.st_uid != os.getuid() or stat.st_mode & 0o077
+                    or stat.st_size > 131072
+                    or file.read_text(encoding="utf-8").strip() != pem[tag]):
+                return result
+            candidates.append(file)
+        if not candidates:
+            return result
+
+        # Only delete when a complete NM inventory proves no connection still
+        # references the files. Never treat an nmcli failure as an empty list.
+        all_connections = subprocess.run(
+            ["nmcli", "-t", "-f", "UUID,TYPE", "connection", "show"],
+            capture_output=True, text=True, timeout=5, check=True)
+        vpns = []
+        for line in all_connections.stdout.splitlines():
+            fields = line.split(":")
+            if len(fields) >= 2 and fields[-1] == "vpn":
+                vpns.append(fields[0])
+        if len(vpns) > 100:
+            return result
+        for uuid in vpns:
+            if not re.fullmatch(r"[0-9a-fA-F-]{36}", uuid):
+                return result
+            settings = subprocess.run(
+                ["nmcli", "-g", "vpn.data", "connection", "show", "uuid", uuid],
+                capture_output=True, text=True, timeout=5, check=True)
+            if any(str(file) in settings.stdout for file in candidates):
+                return result
+        # No other NM profile references any of these exact verified copies.
+        removed = 0
+        for file in candidates:
+            if file.is_symlink() or not file.is_file():
+                continue
+            current = file.stat()
+            if current.st_uid != os.getuid() or current.st_mode & 0o077:
+                continue
+            tag = file.stem.rsplit("-", 1)[-1]
+            if file.read_text(encoding="utf-8").strip() != pem.get(tag):
+                continue
+            file.unlink()
+            removed += 1
+        return {"removed": removed, "skipped": None}
+    except (OSError, UnicodeError, ValueError, subprocess.SubprocessError):
+        return result
+
+
 def main():
     ap=argparse.ArgumentParser()
-    ap.add_argument("action",choices=["status","ensure","refresh","success","failure"])
+    ap.add_argument("action",choices=["status","ensure","refresh","success","failure","cleanup-nm"])
     ap.add_argument("--common",required=True)
     ap.add_argument("--sha",default="")
     ap.add_argument("--host",default="")
@@ -619,8 +700,12 @@ def main():
     ap.add_argument("--reason",default="")
     ap.add_argument("--observed-ip",default="")
     ap.add_argument("--country",default="")
+    ap.add_argument("--profile-file",default="")
     args=ap.parse_args()
     common=Path(args.common).resolve()
+    if args.action=="cleanup-nm":
+        print(json.dumps(cleanup_nm_inline_material(common,args.profile_file),separators=(",",":")))
+        return
     evidence=common/"evidence"
     evidence.mkdir(parents=True,exist_ok=True)
     lock=common/"runtime"/"config-factory"/"factory.lock"
