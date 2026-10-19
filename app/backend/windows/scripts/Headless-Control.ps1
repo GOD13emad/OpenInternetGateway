@@ -1,6 +1,7 @@
 [CmdletBinding()]
 param([ValidateSet('Ensure','Connect','Disconnect','Status')][string]$Action='Ensure',[string]$ProfileSha='')
 $ErrorActionPreference='Stop'
+. (Join-Path $PSScriptRoot 'Profile-Policy.ps1')
 $Root=Split-Path -Parent $PSScriptRoot
 $connector='C:\Program Files\OpenVPN Connect\ovpnconnector.exe'
 $service='OVPNConnectorService'
@@ -334,6 +335,8 @@ function Try-Candidate($c){
  if(-not(Test-Path $profile)){Record-Failure $c 'PROFILE_MISSING';return $null}
  $sha=(Get-FileHash -Algorithm SHA256 $profile).Hash.ToLowerInvariant()
  if($c.SHA256 -and $sha -ne ([string]$c.SHA256).ToLowerInvariant()){Record-Failure $c 'HASH_MISMATCH';return $null}
+ try{$policyOK=Test-OigVpnProfile -Text ([IO.File]::ReadAllText($profile)) -ExpectedIP ([string]$c.IP) -ExpectedPort ([int]$c.Port) -ExpectedProtocol ([string]$c.Protocol)}catch{$policyOK=$false}
+ if(-not $policyOK){Record-Failure $c 'PROFILE_POLICY_DENIED';return $null}
  Stop-Connector
  Copy-Item -LiteralPath $profile -Destination $serviceProfile -Force
  if((Get-FileHash -Algorithm SHA256 $serviceProfile).Hash.ToLowerInvariant() -ne $sha){throw 'ProgramData profile copy hash mismatch.'}
