@@ -519,6 +519,84 @@ test('LastKnownGood deduplicates the final normalized server-role profile hash',
   }finally{fs.rmSync(temp,{recursive:true,force:true});}
 });
 
+test('Linux Console Gateway disable refuses foreign Ethernet and deletes only marked UUID',()=>{
+  const src=fs.readFileSync(path.join(root,'backend/linux/oig-linux.sh'),'utf8');
+  const helpers=src.slice(src.indexOf('is_oig_owned_console_uuid() {'),src.indexOf('\nconsole_iface() {'));
+  const disable=src.slice(src.indexOf('console_disable() {'),src.indexOf('\naction="'));
+  if(process.platform!=='linux')return;
+  const cp=require('node:child_process');
+  const script=[
+    'set -euo pipefail',
+    'OIG_MARKER=openinternetgateway-managed-v1',
+    'CONSOLE_CONN=OIG-Console-Gateway',
+    'state=mixed',
+    'calls="$(mktemp)"',
+    'trap \'rm -f "$calls"\' EXIT',
+    'nmcli(){',
+    ' case "$*" in',
+    ' "-t -f UUID,NAME connection show")',
+    '    if [[ "$state" == mixed ]];then echo "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:OIG-Console-Gateway";fi',
+    '    echo "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb:OIG-Console-Gateway";;',
+    ' "-g connection.type connection show uuid "* ) echo 802-3-ethernet;;',
+    ' "-g connection.stable-id connection show uuid aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa") echo other-app;;',
+    ' "-g connection.stable-id connection show uuid bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb") echo "$OIG_MARKER";;',
+    ' "connection down uuid bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb") echo down >> "$calls";;',
+    ' "connection delete uuid bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb") echo delete >> "$calls";;',
+    ' *) echo "Unexpected $*" >&2;return 20;;',
+    ' esac',
+    '}',
+    helpers,
+    disable,
+    'if console_disable >/dev/null 2>&1;then exit 31;fi',
+    '[[ ! -s "$calls" ]] || exit 32',
+    'state=owned',
+    'console_disable >/dev/null',
+    '[[ "$(wc -l < "$calls")" -eq 2 ]] || exit 33',
+    'grep -q "^delete$" "$calls"',
+    'grep -q "^down$" "$calls"',
+    'echo "PASS foreign Ethernet preserved and exact tagged UUID cleanup"'
+  ].join('\n');
+  const r=cp.spawnSync('bash',['-c',script],{encoding:'utf8',timeout:4000});
+  assert.equal(r.status,0,r.stderr||r.stdout);
+});
+
+test('Linux console gateway never deletes an unowned same-name Ethernet connection',()=>{
+  const src=fs.readFileSync(path.join(root,'backend/linux/oig-linux.sh'),'utf8');
+  const helper=src.slice(src.indexOf('is_oig_owned_console_uuid() {'),src.indexOf('\nconsole_iface() {'));
+  const action=src.slice(src.indexOf('console_enable() {'),src.indexOf('\ncase "$action" in'));
+  assert.match(helper,/connection\.stable-id/);
+  assert.match(helper,/802-3-ethernet/);
+  assert.match(action,/console_owned_uuids/);
+  assert.match(action,/connection\.uuid "\$uuid"/);
+  assert.match(action,/connection\.stable-id "\$OIG_MARKER"/);
+  assert.doesNotMatch(action,/nmcli connection delete "\$CONSOLE_CONN"/);
+  assert.doesNotMatch(action,/nmcli connection down "\$CONSOLE_CONN"/);
+  assert.match(action,/nmcli connection (?:down|delete) uuid "\$old_uuid"/);
+  if(process.platform!=='linux')return;
+  const cp=require('node:child_process');
+  const script=[
+    'set -euo pipefail',
+    'OIG_MARKER=openinternetgateway-managed-v1',
+    'CONSOLE_CONN=OIG-Console-Gateway',
+    'nmcli(){',
+    ' case "$*" in',
+    ' "-t -f UUID,NAME connection show")',
+    '    echo "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:OIG-Console-Gateway"',
+    '    echo "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb:OIG-Console-Gateway";;',
+    ' "-g connection.type connection show uuid "* ) echo 802-3-ethernet;;',
+    ' "-g connection.stable-id connection show uuid aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa") echo someone-else;;',
+    ' "-g connection.stable-id connection show uuid bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb") echo "$OIG_MARKER";;',
+    ' *) echo "Unexpected nmcli invocation $*" >&2;return 10;;',
+    ' esac',
+    '}',
+    helper,
+    'if console_owned_uuids >/dev/null;then exit 20;fi',
+    'echo "PASS foreign console connection blocks all cleanup"'
+  ].join('\n');
+  const r=cp.spawnSync('bash',['-c',script],{encoding:'utf8',timeout:4000});
+  assert.equal(r.status,0,r.stderr||r.stdout);
+});
+
 test('Linux reserved-name conflict is local and never penalizes VPN relay quality',()=>{
   const src=fs.readFileSync(path.join(root,'backend/linux/oig-linux.sh'),'utf8');
   const connect=src.slice(src.indexOf('connect_one() {'),src.indexOf('\nrecord_success() {'));

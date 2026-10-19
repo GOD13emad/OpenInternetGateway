@@ -657,6 +657,25 @@ remove_auto() {
   echo "AUTO-RECOVERY REMOVED"
 }
 
+is_oig_owned_console_uuid() {
+  local uuid="$1"
+  [[ "$uuid" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]] || return 1
+  [[ "$(nmcli -g connection.type connection show uuid "$uuid" 2>/dev/null)" == "802-3-ethernet" ]] || return 1
+  [[ "$(nmcli -g connection.stable-id connection show uuid "$uuid" 2>/dev/null)" == "$OIG_MARKER" ]] || return 1
+}
+
+console_owned_uuids() {
+  # Treat a failed NM inventory, unmarked collision or ambiguous type as a
+  # foreign connection. Never delete user-created Ethernet by display name.
+  local inventory uuid target="$CONSOLE_CONN"
+  inventory="$(nmcli -t -f UUID,NAME connection show 2>/dev/null)" || return 1
+  while read -r uuid; do
+    [[ -n "$uuid" ]] || continue
+    is_oig_owned_console_uuid "$uuid" || return 1
+    printf '%s\n' "$uuid"
+  done < <(printf '%s\n' "$inventory" | awk -F: -v n="$target" '$2==n {print $1}')
+}
+
 console_iface() {
   if [[ -n "${OIG_CONSOLE_IF:-}" ]]; then
     echo "$OIG_CONSOLE_IF"
@@ -680,19 +699,47 @@ PY
 }
 
 console_enable() {
-  local iface
+  local iface uuid old_uuid existing
   iface="$(console_iface)"
   [[ -n "$iface" ]] || { echo "No dedicated Ethernet adapter found." >&2; return 30; }
   healthy || { echo "Validated VPN tunnel must be active first." >&2; return 31; }
-  nmcli connection delete "$CONSOLE_CONN" >/dev/null 2>&1 || true
-  nmcli connection add type ethernet ifname "$iface" con-name "$CONSOLE_CONN" ipv4.method shared ipv4.addresses 10.42.42.1/24 ipv6.method disabled >/dev/null
-  nmcli connection up "$CONSOLE_CONN" >/dev/null
+  existing="$(console_owned_uuids)" || {
+    echo "The Console Gateway name is owned by another NetworkManager connection; refusing to modify it." >&2
+    return 33
+  }
+  while read -r old_uuid; do
+    [[ -n "$old_uuid" ]] || continue
+    # Inventory was marker-verified and scoped to this OIG Ethernet profile.
+    nmcli connection down uuid "$old_uuid" >/dev/null 2>&1 || true
+    nmcli connection delete uuid "$old_uuid" >/dev/null || return 34
+  done <<< "$existing"
+  uuid="$(uuidgen)" || return 34
+  [[ "$uuid" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]] || return 34
+  nmcli connection add type ethernet ifname "$iface" con-name "$CONSOLE_CONN" \
+    connection.uuid "$uuid" connection.stable-id "$OIG_MARKER" connection.autoconnect no \
+    ipv4.method shared ipv4.addresses 10.42.42.1/24 ipv6.method disabled >/dev/null || return 34
+  if ! is_oig_owned_console_uuid "$uuid"; then
+    nmcli connection delete uuid "$uuid" >/dev/null 2>&1 || true
+    return 34
+  fi
+  if ! nmcli connection up uuid "$uuid" >/dev/null; then
+    nmcli connection delete uuid "$uuid" >/dev/null 2>&1 || true
+    return 35
+  fi
   echo "CONSOLE GATEWAY ENABLED on $iface"
 }
 
 console_disable() {
-  nmcli connection down "$CONSOLE_CONN" >/dev/null 2>&1 || true
-  nmcli connection delete "$CONSOLE_CONN" >/dev/null 2>&1 || true
+  local old_uuid existing
+  existing="$(console_owned_uuids)" || {
+    echo "Refusing to delete an unowned Console Gateway connection." >&2
+    return 33
+  }
+  while read -r old_uuid; do
+    [[ -n "$old_uuid" ]] || continue
+    nmcli connection down uuid "$old_uuid" >/dev/null 2>&1 || true
+    nmcli connection delete uuid "$old_uuid" >/dev/null || return 34
+  done <<< "$existing"
   echo "CONSOLE GATEWAY DISABLED"
 }
 
