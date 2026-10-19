@@ -519,6 +519,46 @@ test('LastKnownGood deduplicates the final normalized server-role profile hash',
   }finally{fs.rmSync(temp,{recursive:true,force:true});}
 });
 
+test('Linux does not activate new managed VPN alongside unowned reserved-name connection',()=>{
+  const src=fs.readFileSync(path.join(root,'backend/linux/oig-linux.sh'),'utf8');
+  const guard=src.slice(src.indexOf('is_oig_owned_vpn_uuid() {'),src.indexOf('\ncleanup_imported_material() {'));
+  const pre=src.slice(src.indexOf('preflight_one() {'),src.indexOf('\nwrite_profile_state() {'));
+  const connect=src.slice(src.indexOf('connect_one() {'),src.indexOf('\nrecord_success() {'));
+  assert.match(pre,/reserved_name_conflict "\$PREFLIGHT_CONN"/);
+  assert.match(connect,/reserved_name_conflict "\$CONN"/);
+  assert.match(connect,/reserved_name_conflict "\$LEGACY_CONN"/);
+  assert.ok(pre.indexOf('reserved_name_conflict')<pre.indexOf('import_temporary_profile_uuid'));
+  assert.ok(connect.indexOf('reserved_name_conflict')<connect.indexOf('import_temporary_profile_uuid'));
+  assert.ok(pre.indexOf('reserved_name_conflict')<pre.indexOf('delete_connection_name "$PREFLIGHT_CONN"'));
+  assert.ok(connect.indexOf('reserved_name_conflict')<connect.indexOf('delete_named_connections'));
+  if(process.platform!=='linux')return;
+  const cp=require('node:child_process');
+  const script=[
+    'set -euo pipefail',
+    'OIG_MARKER=openinternetgateway-managed-v1',
+    'state=unowned',
+    'nmcli(){',
+    '  case "$*" in',
+    '    "-t -f UUID,NAME connection show")',
+    '      if [[ "$state" != empty ]]; then echo "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:OIG-VPN-LIVE";fi;;',
+    '    "-g connection.type connection show uuid aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa") echo vpn;;',
+    '    "-g connection.stable-id connection show uuid aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")',
+    '      [[ "$state" == owned ]] && echo "$OIG_MARKER" || echo other-app;;',
+    '    *) return 9;;',
+    '  esac',
+    '}',
+    guard,
+    'reserved_name_conflict OIG-VPN-LIVE || exit 21',
+    'state=owned',
+    'if reserved_name_conflict OIG-VPN-LIVE;then exit 22;fi',
+    'state=empty',
+    'if reserved_name_conflict OIG-VPN-LIVE;then exit 23;fi',
+    'echo "PASS reserved name conflict fail-closed"'
+  ].join('\n');
+  const r=cp.spawnSync('bash',['-c',script],{encoding:'utf8',timeout:4000});
+  assert.equal(r.status,0,r.stderr||r.stdout);
+});
+
 test('Linux managed VPN connection teardown requires its explicit stable-id marker',()=>{
   const src=fs.readFileSync(path.join(root,'backend/linux/oig-linux.sh'),'utf8');
   const cleanup=src.slice(src.indexOf('is_oig_owned_vpn_uuid() {'),src.indexOf('\ncleanup_imported_material() {'));

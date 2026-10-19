@@ -62,6 +62,19 @@ delete_connection_name() {
     done
 }
 
+reserved_name_conflict() {
+  # An unmarked / legacy / foreign connection with an OIG-reserved name may
+  # be the user's own VPN. Never activate a parallel replacement over it.
+  # A failed NM inventory is an unsafe ambiguity, not an empty list.
+  local target="$1" inventory uuid
+  inventory="$(nmcli -t -f UUID,NAME connection show 2>/dev/null)" || return 0
+  while read -r uuid; do
+    [[ -n "$uuid" ]] || continue
+    is_oig_owned_vpn_uuid "$uuid" || return 0
+  done < <(printf '%s\n' "$inventory" | awk -F: -v n="$target" '$2==n {print $1}')
+  return 1
+}
+
 cleanup_imported_material() {
   # Only remove orphaned content-matching inline PEM copies after NM deletes
   # the OIG connection; never remove files referenced by another NM profile.
@@ -311,7 +324,10 @@ preflight_one() {
     [[ "$actual" == "$expected" ]] || return 11
   fi
 
+  # Refuse a foreign reserved name *before* touching any OIG connection.
+  if reserved_name_conflict "$PREFLIGHT_CONN"; then return 12; fi
   delete_connection_name "$PREFLIGHT_CONN"
+  if reserved_name_conflict "$PREFLIGHT_CONN"; then return 12; fi
   local uuid before_route before_dns after_route after_dns
   before_route="$(ip -4 route get 1.1.1.1 2>/dev/null | head -1 || true)"
   before_dns="$(dns_server_fingerprint)"
@@ -398,7 +414,17 @@ connect_one() {
   local previous_state="$STATE/current-linux-profile.before-connect.json"
   if [[ -f "$state_file" ]]; then cp -f "$state_file" "$previous_state"; else rm -f "$previous_state"; fi
 
+  # Do not even stop a previously healthy OIG VPN if a user-owned
+  # connection has claimed one of our reserved names.
+  if reserved_name_conflict "$CONN" || reserved_name_conflict "$LEGACY_CONN"; then
+    rm -f "$previous_state"
+    return 12
+  fi
   delete_named_connections
+  if reserved_name_conflict "$CONN" || reserved_name_conflict "$LEGACY_CONN"; then
+    rm -f "$previous_state"
+    return 12
+  fi
   local uuid
   uuid="$(import_temporary_profile_uuid "$profile")" || return 12
 
