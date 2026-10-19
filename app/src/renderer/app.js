@@ -104,11 +104,12 @@ function renderStatus(s) {
   const factoryOk = !!pool.healthy && Number(pool.pool || 0) >= 3;
   markHealth('routeIcon', 'routeHealth', routeOk, routeOk
     ? (identityVerified ? 'All IPv4 traffic protected' : 'IPv4 uses VPN; relay identity unverified')
-    : 'Full-route not active');
+    : 'Full-route not active', routeOk && !identityVerified);
   markHealth('dnsIcon', 'dnsHealth', dnsOk,
     dnsOk ? 'DNS A-response matches reference (not authenticated)'
       : (s.poison === true ? 'Unexpected dns.google A-response'
-          : (s.poison == null ? 'DNS check unavailable' : 'Requires active VPN tunnel')));
+          : (s.poison == null ? 'DNS check unavailable' : 'Requires active VPN tunnel')),
+    dnsOk && !identityVerified);
   markHealth('recoveryIcon', 'recoveryHealth', recoveryOk, recoveryOk ? (s.autoRecoveryState || 'Installed') : 'Not installed');
   markHealth('factoryIcon', 'factoryHealth', factoryOk, factoryOk ? (String(pool.validated || 0) + ' validated · ' + String(pool.pool || 0) + ' total') : 'Pool needs regeneration');
   const score = [routeOk, dnsOk, recoveryOk, factoryOk].filter(Boolean).length;
@@ -136,10 +137,11 @@ function renderStatus(s) {
     : 'Maintains relay profiles; source and relay authenticity are not independently verified.');
 }
 
-function markHealth(iconId, textId, ok, label) {
+function markHealth(iconId, textId, ok, label, caution = false) {
   const icon = $(iconId);
-  icon.textContent = ok ? '✓' : '!';
-  icon.className = 'health-icon ' + (ok ? 'ok' : 'bad');
+  icon.textContent = ok && !caution ? '✓' : '!';
+  // Operational route/DNS reachability is not proof of a trusted remote peer.
+  icon.className = 'health-icon ' + (caution ? 'warn' : (ok ? 'ok' : 'bad'));
   setText(textId, label);
 }
 

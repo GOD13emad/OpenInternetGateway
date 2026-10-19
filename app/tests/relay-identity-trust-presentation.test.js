@@ -28,3 +28,25 @@ test('backend cannot infer public relay identity from transport, geography or ca
   assert.match(backend, /serverIdentityVerified: false,\s*error: error\.message/);
   assert.doesNotMatch(backend, /serverIdentityVerified:\s*!!base\./);
 });
+
+
+test('unverified connection renders route and DNS as warnings rather than green checks',()=>{
+  const ui=fs.readFileSync(path.join(root,'src/renderer/app.js'),'utf8');
+  const css=fs.readFileSync(path.join(root,'src/renderer/styles.css'),'utf8');
+  assert.match(ui,/routeOk && !identityVerified\);/);
+  assert.match(ui,/dnsOk && !identityVerified\);/);
+  assert.match(css,/\.health-icon\.warn\{[^}]*var\(--warn\)/);
+  const m=ui.match(/function markHealth\(iconId, textId, ok, label, caution = false\) \{[\s\S]*?\n\}/);
+  assert.ok(m);
+  const icons={icon:{className:'',textContent:''}};
+  const ctx={$:()=>icons.icon,setText:()=>{}};
+  const mark=vm.runInNewContext('('+m[0]+')',ctx);
+  mark('icon','label',true,'route alive',true);
+  assert.equal(icons.icon.className,'health-icon warn');
+  assert.equal(icons.icon.textContent,'!');
+  mark('icon','label',true,'verified route',false);
+  assert.equal(icons.icon.className,'health-icon ok');
+  assert.equal(icons.icon.textContent,'✓');
+  mark('icon','label',false,'route missing',false);
+  assert.equal(icons.icon.className,'health-icon bad');
+});
