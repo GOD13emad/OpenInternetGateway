@@ -77,8 +77,51 @@ def scenario(secure_available, limit, expected_security, expected_source):
         assert st["sourceSecurity"] == expected_security, st
 
 
+def promotion_scenario():
+    """Promote/recover two real-format but synthetic generations offline."""
+    import base64
+    with tempfile.TemporaryDirectory(prefix="oig-generation-proof-") as tmp:
+        root = Path(tmp)
+        common = root / "common"
+        evidence = root / "evidence"
+        evidence.mkdir()
+
+        def write_feed(prefix, security, source):
+            csv = []
+            for i in range(8):
+                ip = f"198.51.100.{i + (11 if prefix == 'a' else 51)}"
+                profile = (f"client\ndev tun\nproto tcp\nremote {ip} 443\n"
+                           "<ca>TEST-CA</ca>\n<cert>TEST-CERT</cert>\n<key>TEST-KEY</key>\n")
+                fields = [f"{prefix}-{i}", ip, "400", "20", "30000", "Synthetic", "JP", "5",
+                          "9", "10", "11", "12", "13", "14", base64.b64encode(profile.encode()).decode()]
+                csv.append(",".join(fields))
+            (evidence / "vpngate-mirror-api.csv").write_text("\n".join(csv) + "\n")
+            (evidence / "mirror-refresh-last.json").write_text(json.dumps({
+                "sourceSecurity": security, "source": source,
+                "refresh": True, "at": module.now()
+            }))
+
+        write_feed("a", "https-only", "https://official.example")
+        module.promote(common, evidence, count=4, preserve_count=0)
+        assert module.status(common, evidence)["sourceSecurity"] == "https-only"
+        active = common / "runtime" / "udp-cache"
+        assert (active / "source-provenance.json").is_file()
+
+        write_feed("b", "http-fallback", "http://mirror.example")
+        module.promote(common, evidence, count=4, preserve_count=0)
+        assert module.status(common, evidence)["sourceSecurity"] == "http-fallback"
+        assert module.restore_latest_generation(common)
+        assert module.status(common, evidence)["sourceSecurity"] == "https-only"
+
+        # Mixed in preserved older profiles is never promoted as HTTPS-only.
+        write_feed("b", "https-only", "https://official.example")
+        module.promote(common, evidence, count=4, preserve_count=1)
+        assert module.status(common, evidence)["sourceSecurity"] == "unknown"
+
+
 if __name__ == "__main__":
     scenario(True, 1, "https-only", "https://official.example")
     scenario(True, 2, "http-fallback", "https://official.example")
     scenario(False, 1, "http-fallback", "http://mirror.example")
-    print("PASS: HTTPS-first, explicit HTTP fallback, cached unknown trust")
+    promotion_scenario()
+    print("PASS: HTTPS-first, HTTP fallback, pool promotion and rollback trust")
