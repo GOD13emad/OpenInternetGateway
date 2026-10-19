@@ -67,6 +67,43 @@ jobs:
             if (-not (Test-Path -LiteralPath $path)) { throw "NSIS installed payload missing: $relative" }
           }
           Write-Host "NSIS user-level silent install and installed payload PASS (disposable runner)"
+          # Exercise the NSIS-INSTALLED executable, not win-unpacked or source.
+          # Capture-only redirects backend state and suppresses tray/autostart;
+          # it does not activate, disconnect or install any VPN.
+          $captureRoot = Join-Path $env:RUNNER_TEMP "oig-installed-gui-$env:GITHUB_RUN_ID"
+          $frame = Join-Path $captureRoot 'dashboard.png'
+          New-Item -ItemType Directory -Path $captureRoot -Force | Out-Null
+          $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
+          $startInfo.FileName = Join-Path $installDir 'Open Internet Gateway.exe'
+          $startInfo.Arguments = '--background'
+          $startInfo.UseShellExecute = $false
+          $startInfo.Environment['OIG_CAPTURE_ONLY'] = '1'
+          $startInfo.Environment['OIG_CAPTURE_ROOT'] = $captureRoot
+          $startInfo.Environment['OIG_CAPTURE_PATH'] = $frame
+          $startInfo.Environment['APPDATA'] = Join-Path $captureRoot 'Roaming'
+          $startInfo.Environment['LOCALAPPDATA'] = Join-Path $captureRoot 'Local'
+          $appProcess = [System.Diagnostics.Process]::Start($startInfo)
+          if ($null -eq $appProcess) { throw 'Installed dashboard process did not start' }
+          try {
+            if (-not $appProcess.WaitForExit(35000)) { throw 'Installed dashboard capture timed out' }
+            if ($appProcess.ExitCode -ne 0) { throw "Installed dashboard exited $($appProcess.ExitCode)" }
+            if (-not (Test-Path -LiteralPath $frame -PathType Leaf)) { throw 'Installed dashboard image missing' }
+            if ((Get-Item -LiteralPath $frame).Length -lt 4096) { throw 'Installed dashboard image suspiciously small' }
+            Add-Type -AssemblyName System.Drawing
+            $image = [System.Drawing.Image]::FromFile($frame)
+            try {
+              if ($image.Width -lt 900 -or $image.Height -lt 600) {
+                throw "Installed dashboard dimensions invalid: $($image.Width)x$($image.Height)"
+              }
+              Write-Host "NSIS-installed Dashboard Electron render PASS: $($image.Width)x$($image.Height)"
+            } finally { $image.Dispose() }
+          } finally {
+            if (-not $appProcess.HasExited) {
+              $appProcess.Kill($true)
+              [void]$appProcess.WaitForExit(5000)
+            }
+            $appProcess.Dispose()
+          }
           $uninstaller = Join-Path $installDir 'Uninstall Open Internet Gateway.exe'
           $uninstall = Start-Process -FilePath $uninstaller -ArgumentList '/S' -PassThru -Wait
           if ($uninstall.ExitCode -ne 0) { throw "NSIS silent uninstall exit: $($uninstall.ExitCode)" }
