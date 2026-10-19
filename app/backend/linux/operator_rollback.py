@@ -5,11 +5,14 @@ The CLI deliberately has no connect or route-changing action. It only arms a
 one-shot timer, or cleans a uniquely named, explicitly scoped QA profile.
 """
 import argparse
+import hashlib
 import json
 import os
 import re
 import subprocess
 import sys
+import tempfile
+from pathlib import Path
 
 UUID = re.compile(r"[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}\Z")
 QA_NAME = re.compile(r"OIG-Operator-QA-[a-f0-9]{12}\Z")
@@ -67,20 +70,62 @@ def cleanup(uuid, name):
     return {"ok": True, "alreadyAbsent": False, "profileRemoved": True}
 
 
+
+def durable_rollback_helper():
+    """Pin a byte-identical cleanup script outside ephemeral AppImage mounts."""
+    data_root = Path(os.environ.get("XDG_DATA_HOME") or
+                     str(Path.home() / ".local" / "share"))
+    if not data_root.is_absolute():
+        raise RollbackError("Rollback storage must be an absolute user data path")
+    parent = data_root / "OpenInternetGateway"
+    folder = parent / "qa-rollback"
+    if any(item.is_symlink() for item in (data_root, parent, folder)):
+        raise RollbackError("Rollback helper storage cannot use symlinked directories")
+    folder.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if (folder.stat().st_mode & 0o077) or not folder.is_dir():
+        raise RollbackError("Rollback helper directory must be private (0700)")
+    payload = Path(__file__).read_bytes()
+    digest = hashlib.sha256(payload).hexdigest()
+    target = folder / ("cleanup-" + digest + ".py")
+    if target.is_symlink() or (target.exists() and
+                               (not target.is_file() or target.stat().st_nlink != 1)):
+        raise RollbackError("Rollback helper must be a private regular file")
+    if target.exists():
+        if target.read_bytes() != payload:
+            raise RollbackError("Existing rollback helper contents changed")
+    else:
+        fd, temp = tempfile.mkstemp(prefix=".oig-rollback-", dir=str(folder))
+        try:
+            os.fchmod(fd, 0o600)
+            with os.fdopen(fd, "wb") as stream:
+                stream.write(payload)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temp, target)
+        finally:
+            if os.path.exists(temp):
+                os.unlink(temp)
+    if target.stat().st_mode & 0o077:
+        raise RollbackError("Rollback helper must have private permissions")
+    return str(target)
+
+
 def arm(uuid, name, seconds):
     check_identity(uuid, name)
     if not 10 <= seconds <= 300:
         raise RollbackError("Safety timer must be between 10 and 300 seconds")
     if get_profile_name(uuid) != name:
         raise RollbackError("Cannot arm rollback for a missing or unrelated QA profile")
-    # Unit ID is derived only from the strictly validated randomized QA name.
+    # Timer payload MUST survive exit/crash/unmount of the AppImage process.
+    # Fail closed before registration or VPN activation if it cannot be pinned.
+    runner = durable_rollback_helper()
     unit = "oig-operator-qa-" + name[-12:]
     proc = command(["systemd-run", "--user", "--quiet", "--collect",
                     "--unit=" + unit, "--on-active=" + str(seconds) + "s",
                     "--timer-property=AccuracySec=1s",
                     "--timer-property=RandomizedDelaySec=0",
                     "--property=TimeoutStartSec=30",
-                    sys.executable, "-B", os.path.realpath(__file__), "cleanup",
+                    sys.executable, "-B", runner, "cleanup",
                     "--uuid", uuid, "--name", name], timeout=10)
     if proc.returncode:
         raise RollbackError("Failed to schedule an independent rollback timer")

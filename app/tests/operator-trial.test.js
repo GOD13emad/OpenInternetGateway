@@ -106,7 +106,7 @@ test('opt-in QA trial passes provider password only in memfd, arms timer before 
       const base = {
         ...process.env, PATH: root + path.delimiter + process.env.PATH,
         OIG_SECRET_STUB_STATE: state, OIG_SECRET_STUB_LOG: log,
-        PYTHONDONTWRITEBYTECODE:'1'
+        PYTHONDONTWRITEBYTECODE:'1', XDG_DATA_HOME: path.join(root, 'xdg-data')
       };
       function run(opts = {}, pin = fingerprint, pass = 'fake-test-only-pass') {
         fs.writeFileSync(state,JSON.stringify({exists:false,active:false,armed:false}));

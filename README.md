@@ -213,7 +213,12 @@ The experimental helper `app/backend/linux/operator_rollback.py` supports
 to delete existing profiles with a different name, does not activate VPN,
 and does not change network routes. The timer is armed **before** any future
 opt-in connection attempt; `AccuracySec=1s` bounds scheduling jitter.
-A real synthetic, inactive NetworkManager QA profile was deleted by
+Its cleanup runner is copied byte-for-byte to the private persistent user-data
+`qa-rollback` directory (0700/0600) before systemd is armed, so a crash or
+AppImage unmount cannot invalidate the timer's script path. If the helper
+cannot be pinned or verified, the trial fails before connection activation.
+A regression test deletes the simulated AppImage source and runs the stored
+cleanup independently. A real synthetic, inactive NetworkManager QA profile was deleted by
 the independent timer; this is not validation of connection rollback under
 live traffic. The helper is **not invoked by the production Connect button**
 and must not be used for automatic activation, credential storage, or Windows.

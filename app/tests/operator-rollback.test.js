@@ -12,7 +12,11 @@ test('operator QA rollback is name/UUID scoped, independent and never activates 
     const name = 'OIG-Operator-QA-aabbccddeeff';
     const statePath = path.join(root, 'state.json');
     const events = path.join(root, 'events.txt');
-    const script = path.join(__dirname, '..', 'backend', 'linux', 'operator_rollback.py');
+    const sourceScript = path.join(__dirname, '..', 'backend', 'linux', 'operator_rollback.py');
+    const fakeMount = path.join(root, 'ephemeral-appimage-mount');
+    fs.mkdirSync(fakeMount);
+    let script = path.join(fakeMount, 'operator_rollback.py');
+    fs.copyFileSync(sourceScript, script);
     const state = s => fs.writeFileSync(statePath, JSON.stringify(s), {mode: 0o600});
     const shim = [
       '#!/usr/bin/env python3',
@@ -55,7 +59,8 @@ test('operator QA rollback is name/UUID scoped, independent and never activates 
       const env = {
         ...process.env, PATH: root + path.delimiter + process.env.PATH,
         OIG_STUB_ROLLBACK_STATE: statePath,
-        OIG_STUB_ROLLBACK_EVENTS: events, PYTHONDONTWRITEBYTECODE: '1'
+        OIG_STUB_ROLLBACK_EVENTS: events, PYTHONDONTWRITEBYTECODE: '1',
+        XDG_DATA_HOME: path.join(root, 'xdg-data')
       };
       function invoke(action, extra = [], id = uuid, label = name) {
         return spawnSync('python3', [script, action, '--uuid', id,
@@ -67,6 +72,21 @@ test('operator QA rollback is name/UUID scoped, independent and never activates 
       assert.equal(JSON.parse(armed.stdout).timerArmed, true);
       assert.match(fs.readFileSync(events, 'utf8'), /is-active/);
       assert.match(fs.readFileSync(events, 'utf8'), /AccuracySec=1s/);
+      const stableDir = path.join(root, 'xdg-data', 'OpenInternetGateway', 'qa-rollback');
+      const names = fs.readdirSync(stableDir);
+      assert.equal(names.length, 1);
+      const stableRunner = path.join(stableDir, names[0]);
+      assert.ok(fs.readFileSync(stableRunner).equals(fs.readFileSync(sourceScript)),
+        'Timer runner is an exact independent copy of the packaged Python helper');
+      assert.equal(fs.statSync(stableDir).mode & 0o777, 0o700);
+      assert.equal(fs.statSync(stableRunner).mode & 0o777, 0o600);
+      assert.match(fs.readFileSync(events, 'utf8'), new RegExp(
+        stableRunner.replace(/[.*+?^\${}()|[\]\\]/g, '\\$&')));
+      assert.doesNotMatch(fs.readFileSync(events, 'utf8'), /ephemeral-appimage-mount/);
+      // Simulate the AppImage mount disappearing before rollback executes.
+      fs.unlinkSync(script);
+      script = stableRunner;
+      assert.equal(fs.existsSync(path.join(fakeMount, 'operator_rollback.py')), false);
       assert.equal(invoke('arm', ['--seconds','9']).status, 2);
       assert.equal(invoke('arm', ['--seconds','301']).status, 2);
       assert.equal(invoke('arm', ['--seconds','30'],uuid,'User-WiFi').status, 2);
