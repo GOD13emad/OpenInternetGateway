@@ -378,17 +378,18 @@ class Backend {
         "$ip=[string]((($cf|Where-Object{$_ -like 'ip=*'}|Select-Object -First 1)-replace '^ip=',''));$ip=$ip.Trim()",
         "$loc=[string]((($cf|Where-Object{$_ -like 'loc=*'}|Select-Object -First 1)-replace '^loc=',''));$loc=$loc.Trim()",
         "$dns=@(Resolve-DnsName dns.google -Type A -DnsOnly -ErrorAction SilentlyContinue|Where-Object IPAddress|Select-Object -ExpandProperty IPAddress)",
+        "$poison=if($dns.Count -eq 0){$null}else{@($dns|Where-Object{$_ -notin @('8.8.8.8','8.8.4.4')}).Count -gt 0}",
         "$task=Get-ScheduledTask -TaskName 'OpenInternetGateway-AutoRecovery' -ErrorAction SilentlyContinue",
         "$svc=Get-Service OVPNConnectorService -ErrorAction SilentlyContinue",
         "$guardPath='" + path.join(this.backendRoot, 'state', 'anti-flap.json').replace(/'/g,"''") + "'",
         "$guard=$null;if(Test-Path $guardPath){try{$guard=Get-Content -Raw $guardPath|ConvertFrom-Json}catch{}}",
         "$desiredPath='" + path.join(this.backendRoot, 'state', 'desired-state.json').replace(/'/g,"''") + "'",
-        "$desired='on';if(Test-Path $desiredPath){try{$desired=[string](Get-Content -Raw $desiredPath|ConvertFrom-Json).desired}catch{}}",
+        "$desired='off';if(Test-Path $desiredPath){try{$desired=[string](Get-Content -Raw $desiredPath|ConvertFrom-Json).desired}catch{}}",
         "$state='" + statePath + "'",
         "$relay='';$profileIP='';$profileCountry='';if(Test-Path $state){try{$s=Get-Content -Raw $state|ConvertFrom-Json;$relay=([string]$s.serverIP)+':'+([string]$s.port);$profileIP=[string]$s.observedIP;if(-not $profileIP){$profileIP=[string]$s.serverIP};$profileCountry=[string]$s.country;if(-not $profileCountry){$profileCountry=[string]$s.configuredCountry}}catch{}}",
         "$managedActive=($svc -and $svc.Status -eq 'Running')",
-        "$probeDegraded=$false;if(-not $loc -and $managedActive -and $routes.Count -ge 2 -and -not($dns -contains '10.10.34.35') -and $profileCountry){$loc=$profileCountry;if(-not $ip){$ip=$profileIP};$probeDegraded=$true}",
-        "[ordered]@{connected=($routes.Count -ge 2 -and $managedActive -and $loc -and $loc -ne 'IR' -and -not($dns -contains '10.10.34.35'));ip=$ip.Trim();country=$loc.Trim();dns=$dns;poison=($dns -contains '10.10.34.35');fullRoutes=$routes.Count;relay=$relay;autoRecovery=[bool]$task;autoRecoveryState=$(if(-not $task){'Missing'}elseif(-not [bool]$task.Settings.Enabled){'Disabled'}else{[string]$task.State});interface=($routes|Select-Object -First 1 -ExpandProperty InterfaceAlias -ErrorAction SilentlyContinue);engine=$(if($svc){'HeadlessConnector'}else{'Missing'});connectorService=$(if($svc){[string]$svc.Status}else{'Missing'});managedTunnelActive=[bool]$managedActive;healthProbeDegraded=[bool]$probeDegraded;desiredState=$desired;failureStreak=$(if($guard){[int]$guard.failureStreak}else{0});rotations24h=$(if($guard){@($guard.rotations).Count}else{0})}|ConvertTo-Json -Compress"
+        "$probeDegraded=$false;if(-not $loc -and $managedActive -and $routes.Count -ge 2 -and $poison -eq $false -and $profileCountry){$loc=$profileCountry;if(-not $ip){$ip=$profileIP};$probeDegraded=$true}",
+        "[ordered]@{connected=($routes.Count -ge 2 -and $managedActive -and $loc -and $loc -ne 'IR' -and $poison -eq $false);ip=$ip.Trim();country=$loc.Trim();dns=$dns;poison=$poison;fullRoutes=$routes.Count;relay=$relay;autoRecovery=[bool]$task;autoRecoveryState=$(if(-not $task){'Missing'}elseif(-not [bool]$task.Settings.Enabled){'Disabled'}else{[string]$task.State});interface=($routes|Select-Object -First 1 -ExpandProperty InterfaceAlias -ErrorAction SilentlyContinue);engine=$(if($svc){'HeadlessConnector'}else{'Missing'});connectorService=$(if($svc){[string]$svc.Status}else{'Missing'});managedTunnelActive=[bool]$managedActive;healthProbeDegraded=[bool]$probeDegraded;desiredState=$desired;failureStreak=$(if($guard){[int]$guard.failureStreak}else{0});rotations24h=$(if($guard){@($guard.rotations).Count}else{0})}|ConvertTo-Json -Compress"
       ].join(';');
       const r = await run(pwsh, ['-NoProfile','-Command',script], { timeout: 12000 });
       return JSON.parse(r.stdout || '{}');
