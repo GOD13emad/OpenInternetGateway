@@ -73,16 +73,16 @@ function renderStatus(s) {
   syncConnectionInventoryToStatus(s);
   $('powerButton').classList.toggle('connected', connected);
   $('sidebarDot').classList.toggle('online', connected);
-  setText('sidebarStatus', connected ? 'Protected' : 'Direct connection');
+  setText('sidebarStatus', connected ? 'VPN active' : 'Direct connection');
   setText('sidebarCountry', connected ? ((s.country || 'Foreign') + ' egress') : 'Tunnel disconnected');
-  setText('connectionTitle', connected ? 'Internet protected' : 'Protection is off');
-  setText('connectionDetail', connected ? ('Traffic exits through ' + (s.country || 'validated relay') + ' · ' + (s.ip || 'IP pending')) : 'Connect to establish a validated full-device route.');
+  setText('connectionTitle', connected ? 'VPN route active' : 'VPN is off');
+  setText('connectionDetail', connected ? ('Traffic exits through ' + (s.country || 'selected relay') + ' · ' + (s.ip || 'IP pending')) : 'Connect to establish a full-device VPN route.');
   setText('ipStat', s.ip || '—');
   setText('countryStat', s.country || 'Direct');
   setText('dnsStat', safeArray(s.dns).join(' · ') || '—');
   setText('routesStat', String(s.fullRoutes ?? 0) + ' / 2');
-  setText('relayName', s.relay || (connected ? 'Validated relay' : 'Not connected'));
-  setText('relayMeta', connected ? ((s.engine === 'HeadlessConnector' ? 'Headless · sticky' : (s.interface || 'Tunnel interface')) + ' · anti-flap') : 'Validated endpoint · stable mode');
+  setText('relayName', s.relay || (connected ? 'Active relay' : 'Not connected'));
+  setText('relayMeta', connected ? ((s.engine === 'HeadlessConnector' ? 'Headless · sticky' : (s.interface || 'Tunnel interface')) + ' · anti-flap') : 'Relay identity unverified · stable mode');
 
   const routeOk = Number(s.fullRoutes || 0) >= 2;
   const dnsOk = s.poison === false;
@@ -109,6 +109,15 @@ function renderStatus(s) {
   setText('poolProtocols', protocols || '—');
   setText('poolAge', pool.ageHours == null ? '—' : (Number(pool.ageHours).toFixed(1) + 'h'));
   setText('factorySource', pool.source ? ('Source: ' + pool.source) : 'Maintains multiple validated and standby tunnel profiles automatically.');
+  const fetchTransport = String(pool.lastFetchTransport || 'unknown').toLowerCase();
+  const fetchNotice = fetchTransport === 'http'
+    ? 'Last feed fetch: plaintext HTTP. Relay profiles and embedded CA may be altered in transit; origin not authenticated.'
+    : fetchTransport === 'https'
+      ? 'Last feed fetch: HTTPS transport. Imported relay profiles and server identity are still not independently authenticated.'
+      : fetchTransport === 'mixed'
+        ? 'Last feed fetch: mixed or unknown transports, possibly HTTP. Relay origin not authenticated.'
+        : 'Last feed fetch: cached or unknown. Relay origin and server identity are not authenticated.';
+  setText('poolFetchTransport', fetchNotice);
 }
 
 function markHealth(iconId, textId, ok, label) {
@@ -211,8 +220,11 @@ function renderBenchmarkSummary() {
   const b = active?.benchmark;
   const box = $('benchmarkSummary');
   if (!box) return;
+  // The active-tunnel summary must not relabel a TCP socket-open duration
+  // as live ICMP ping, even when the cached fast probe selected TCP.
+  const liveIcmpMs = b?.icmpPingMs ?? (b?.fastMethod === 'icmp-direct' ? b?.fastPingMs : null);
   const values = [
-    (b?.icmpPingMs ?? b?.fastPingMs) == null ? 'Blocked / —' : metric(b.icmpPingMs ?? b.fastPingMs, ' ms'),
+    liveIcmpMs == null ? 'Blocked / —' : metric(liveIcmpMs, ' ms'),
     b?.httpsLatencyMs == null ? '—' : metric(b.httpsLatencyMs, ' ms'),
     b?.downloadMbps == null ? '—' : metric(b.downloadMbps, ' Mbps'),
     b?.uploadMbps == null ? '—' : metric(b.uploadMbps, ' Mbps')
@@ -297,8 +309,9 @@ function renderConnections() {
     const livePing = document.createElement('td'); livePing.className = 'metric-real';
     const fastPing = p.benchmark?.fastPingMs;
     const wasFastTested = !!p.benchmark?.fastAt;
+    const tcpPortOnly = p.benchmark?.fastMethod === 'tcp-direct';
     livePing.textContent = fastPing != null
-      ? (fastPing + ' ms ' + String(p.benchmark?.fastMethod || 'live').toUpperCase())
+      ? (tcpPortOnly ? (fastPing + ' ms TCP port (TLS not verified)') : (fastPing + ' ms ICMP'))
       : (p.benchmark?.icmpPingMs != null
           ? (p.benchmark.icmpPingMs + ' ms ICMP')
           : (p.benchmark?.httpsLatencyMs != null
@@ -307,7 +320,9 @@ function renderConnections() {
     livePing.classList.toggle('metric-unavailable', fastPing == null && p.benchmark?.icmpPingMs == null && p.benchmark?.httpsLatencyMs == null);
     livePing.title = wasFastTested && fastPing == null
       ? 'Direct probe completed, but this relay did not answer the ICMP/TCP reachability probe. Source ping is shown separately.'
-      : (!wasFastTested ? 'Run Test all relays for a direct reachability probe, or Speed for a real tunnel measurement.' : '');
+      : (tcpPortOnly ? 'TCP port opened from the physical Internet interface. OpenVPN TLS, peer identity and tunnel throughput are NOT verified.'
+        : (!wasFastTested ? 'Run Test all relays for a direct reachability probe, or Speed for a real tunnel measurement.'
+          : 'ICMP response only; VPN TLS and server identity are not verified.'));
 
     const down = document.createElement('td'); down.className = 'metric-real';
     down.textContent = p.benchmark?.downloadMbps == null ? 'Not tested' : (p.benchmark.downloadMbps + ' Mbps');
@@ -409,7 +424,7 @@ async function benchmarkCurrent() {
     renderConnections();
     const seconds = Math.max(0.1, Number(result?.elapsedMs || 0) / 1000).toFixed(1);
     const via = result?.directPath?.interface ? (' via ' + result.directPath.interface) : '';
-    showToast('Tested ' + String(result?.tested || 0) + ' relays in ' + seconds + 's • ' + String(result?.reachable || 0) + ' replied • ' + String(result?.noReply || 0) + ' no reply' + via + ' • direct Internet / proxy bypass.');
+    showToast('Tested ' + String(result?.tested || 0) + ' relays in ' + seconds + 's • ' + String(result?.icmpReplies || 0) + ' ICMP replies • ' + String(result?.tcpPortsOpen || 0) + ' TCP ports open (TLS not verified) • ' + String(result?.noReply || 0) + ' no reply' + via + ' • direct Internet / proxy bypass.');
   } catch (e) {
     showToast(e.message || 'Fast relay test failed.', true);
   } finally {

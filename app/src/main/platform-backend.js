@@ -1,8 +1,9 @@
-const { spawn } = require('child_process');
+const { spawn, execFile } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const https = require('https');
+const net = require('net');
 const crypto = require('crypto');
 
 const WINDOWS_OPENVPN_CONNECT = Object.freeze({
@@ -78,13 +79,29 @@ class Backend {
     if (process.platform !== 'linux' || !this.backendRoot) return base;
     const runtimeRoot = path.dirname(process.execPath || '');
     const appRun = path.join(runtimeRoot, 'AppRun');
-    const helperScript = path.join(this.backendRoot, 'linux', 'harden_sandbox.py');
-    if (!runtimeRoot || !fs.existsSync(appRun) || !fs.existsSync(helperScript)) {
+    // Execute the versioned helper from packaged resources, not its
+    // user-writable runtime copy. Prefer shipped code; use the app source
+    // directory only when the packaged resources are unavailable.
+    const packagedScript = this.resourcesPath
+      ? path.join(this.resourcesPath, 'backend', 'linux', 'harden_sandbox.py') : '';
+    const developmentScript = this.appPath
+      ? path.join(this.appPath, 'backend', 'linux', 'harden_sandbox.py') : '';
+    const helperScript = [packagedScript, developmentScript].find(candidate => {
+      try { return !!candidate && path.isAbsolute(candidate) && fs.statSync(candidate).isFile(); }
+      catch { return false; }
+    }) || '';
+    if (!runtimeRoot || !fs.existsSync(appRun) || !helperScript) {
       return { ...base, runtimeRoot };
     }
     try {
-      const r = await run('python3', [helperScript, runtimeRoot], { timeout: 10000 });
-      const parsed = JSON.parse(String(r.stdout || '{}').trim() || '{}');
+      // execFile directly accepts an argument array and never invokes a shell;
+      // isolated Python ignores PYTHONPATH, PYTHONHOME and user site-packages.
+      const stdout = await new Promise((resolve, reject) => {
+        execFile('python3', ['-I', helperScript, runtimeRoot], {
+          timeout: 10000, shell: false, windowsHide: true, maxBuffer: 1024 * 1024
+        }, (error, output) => error ? reject(error) : resolve(output));
+      });
+      const parsed = JSON.parse(String(stdout || '{}').trim() || '{}');
       let currentProcessNoSandbox = false;
       try {
         const argv = fs.readFileSync('/proc/' + String(process.pid) + '/cmdline', 'utf8').split('\0').filter(Boolean);
@@ -212,7 +229,7 @@ class Backend {
     if (this.resourcesPath) candidates.push(path.join(this.resourcesPath, 'pwsh', 'pwsh.exe'));
     if (process.env.ProgramFiles) candidates.push(path.join(process.env.ProgramFiles, 'PowerShell', '7', 'pwsh.exe'));
     if (process.env['ProgramFiles(x86)']) candidates.push(path.join(process.env['ProgramFiles(x86)'], 'PowerShell', '7', 'pwsh.exe'));
-    for (const dir of String(process.env.PATH || '').split(path.delimiter).filter(Boolean)) candidates.push(path.join(dir, 'pwsh.exe'));
+    // PATH can include user-writable directories; never resolve a privileged helper from it.
     return candidates.find(candidate => { try { return fs.existsSync(candidate); } catch { return false; } }) || '';
   }
 
@@ -331,9 +348,14 @@ class Backend {
     const elevate = [
       "$ErrorActionPreference='Stop'",
       "$msi='" + escapedMsi + "'",
-      "$msiArgs='/i \"' + $msi + '\" /passive /norestart'",
+      // Silent first-time MSI: the interactive OpenVPN Connect UI and
+      // ovpnconnector.exe service daemon cannot be active simultaneously.
+      "$msiArgs='/i \"' + $msi + '\" /quiet /norestart AUTOSTART=no'",
       "try {",
-      "  $p=Start-Process -FilePath 'msiexec.exe' -Verb RunAs -Wait -PassThru -ArgumentList $msiArgs",
+      // Elevation must execute the OS-owned Windows Installer, never a PATH-resolved binary.
+      "  $systemMsi=Join-Path ([Environment]::SystemDirectory) 'msiexec.exe'",
+      "  if(-not (Test-Path -LiteralPath $systemMsi -PathType Leaf)) { throw 'Trusted Windows Installer executable unavailable.' }",
+      "  $p=Start-Process -FilePath $systemMsi -Verb RunAs -Wait -PassThru -ArgumentList $msiArgs",
       "  exit $p.ExitCode",
       "} catch { Write-Error $_.Exception.Message; exit 1223 }"
     ].join(';');
@@ -349,7 +371,23 @@ class Backend {
 
   async _ensureWindowsRuntimePrerequisites() {
     const pwsh = this._requireWindowsPwsh();
+    // The interactive OpenVPN Connect GUI and headless connector are exclusive.
+    // Check before downloading/installing the MSI (not just before connecting).
+    // Never stop another application's process or modify its independent tunnel.
+    const assertGuiClosed = async () => {
+      const interactive = await run(pwsh, [
+        '-NoProfile', '-NonInteractive', '-Command',
+        "if (Get-Process -Name 'OpenVPNConnect' -ErrorAction SilentlyContinue) { exit 17 } else { exit 0 }"
+      ], { timeout: 10000, allowFailure: true });
+      if (interactive.code === 17) {
+        throw new Error('OpenVPN Connect is already running. Disconnect and close it before connecting through Open Internet Gateway. No OpenVPN process was closed.');
+      }
+      if (interactive.code !== 0) throw new Error('Cannot confirm OpenVPN Connect is closed; refusing a competing VPN operation.');
+    };
+    await assertGuiClosed();
     const openVpn = await this._ensureWindowsConnector();
+    // Verify again after installation in case the MSI or another app opened the GUI.
+    await assertGuiClosed();
     return { powerShell7: { ready: true, path: pwsh }, openVpnConnect: openVpn };
   }
 
@@ -385,16 +423,16 @@ class Backend {
         "$desiredPath='" + path.join(this.backendRoot, 'state', 'desired-state.json').replace(/'/g,"''") + "'",
         "$desired='on';if(Test-Path $desiredPath){try{$desired=[string](Get-Content -Raw $desiredPath|ConvertFrom-Json).desired}catch{}}",
         "$state='" + statePath + "'",
-        "$relay='';$profileIP='';$profileCountry='';if(Test-Path $state){try{$s=Get-Content -Raw $state|ConvertFrom-Json;$relay=([string]$s.serverIP)+':'+([string]$s.port);$profileIP=[string]$s.observedIP;if(-not $profileIP){$profileIP=[string]$s.serverIP};$profileCountry=[string]$s.country;if(-not $profileCountry){$profileCountry=[string]$s.configuredCountry}}catch{}}",
+        "$relay='';$profileIP='';$profileCountry='';$profileSha='';if(Test-Path $state){try{$s=Get-Content -Raw $state|ConvertFrom-Json;$relay=([string]$s.serverIP)+':'+([string]$s.port);$profileIP=[string]$s.observedIP;if(-not $profileIP){$profileIP=[string]$s.serverIP};$profileSha=[string]$s.sha256;$profileCountry=[string]$s.country;if(-not $profileCountry){$profileCountry=[string]$s.configuredCountry}}catch{}}",
         "$managedActive=($svc -and $svc.Status -eq 'Running')",
         "$probeDegraded=$false;if(-not $loc -and $managedActive -and $routes.Count -ge 2 -and -not($dns -contains '10.10.34.35') -and $profileCountry){$loc=$profileCountry;if(-not $ip){$ip=$profileIP};$probeDegraded=$true}",
-        "[ordered]@{connected=($routes.Count -ge 2 -and $managedActive -and $loc -and $loc -ne 'IR' -and -not($dns -contains '10.10.34.35'));ip=$ip.Trim();country=$loc.Trim();dns=$dns;poison=($dns -contains '10.10.34.35');fullRoutes=$routes.Count;relay=$relay;autoRecovery=[bool]$task;autoRecoveryState=$(if(-not $task){'Missing'}elseif(-not [bool]$task.Settings.Enabled){'Disabled'}else{[string]$task.State});interface=($routes|Select-Object -First 1 -ExpandProperty InterfaceAlias -ErrorAction SilentlyContinue);engine=$(if($svc){'HeadlessConnector'}else{'Missing'});connectorService=$(if($svc){[string]$svc.Status}else{'Missing'});managedTunnelActive=[bool]$managedActive;healthProbeDegraded=[bool]$probeDegraded;desiredState=$desired;failureStreak=$(if($guard){[int]$guard.failureStreak}else{0});rotations24h=$(if($guard){@($guard.rotations).Count}else{0})}|ConvertTo-Json -Compress"
+        "[ordered]@{connected=($desired -eq 'on' -and $routes.Count -ge 2 -and $managedActive -and $profileSha -match '^[a-fA-F0-9]{64}$' -and $relay -and $relay -ne ':' -and $profileCountry -and $loc -eq $profileCountry -and $loc -ne 'IR' -and -not($dns -contains '10.10.34.35'));ip=$ip.Trim();country=$loc.Trim();dns=$dns;poison=($dns -contains '10.10.34.35');fullRoutes=$routes.Count;relay=$relay;autoRecovery=[bool]$task;autoRecoveryState=$(if(-not $task){'Missing'}elseif(-not [bool]$task.Settings.Enabled){'Disabled'}else{[string]$task.State});interface=($routes|Select-Object -First 1 -ExpandProperty InterfaceAlias -ErrorAction SilentlyContinue);engine=$(if($svc){'HeadlessConnector'}else{'Missing'});connectorService=$(if($svc){[string]$svc.Status}else{'Missing'});managedTunnelActive=[bool]$managedActive;healthProbeDegraded=[bool]$probeDegraded;desiredState=$desired;failureStreak=$(if($guard){[int]$guard.failureStreak}else{0});rotations24h=$(if($guard){@($guard.rotations).Count}else{0})}|ConvertTo-Json -Compress"
       ].join(';');
       const r = await run(pwsh, ['-NoProfile','-Command',script], { timeout: 12000 });
       return JSON.parse(r.stdout || '{}');
     }
 
-    const mapped = map[action];
+    const mapped = Object.prototype.hasOwnProperty.call(map, action) ? map[action] : undefined;
     if (!mapped) throw new Error('Unsupported action: ' + action);
     const elevated = ['console-enable','console-disable'].includes(action);
     if (elevated) {
@@ -661,60 +699,120 @@ class Backend {
     return { ok: true, profile, status };
   }
 
+  _isLinuxPhysicalNic(name) {
+    // Require a kernel-backed NIC rather than a tun/tap/virtual interface.
+    // Read-only sysfs inspection, separate from route selection so isolated
+    // tests can simulate physical uplinks without probing the host.
+    return typeof name === 'string'
+      && /^[A-Za-z0-9_][A-Za-z0-9_.:-]{0,14}$/.test(name)
+      && fs.existsSync(path.join('/sys/class/net', name, 'device'));
+  }
+  _selectLinuxPhysicalDefaultRoute(routes, devices) {
+    const safeName = name => typeof name === 'string'
+      && /^[A-Za-z0-9_][A-Za-z0-9_.:-]{0,14}$/.test(name)
+      && !/^(tun|tap|wg|tailscale|ppp|zt|vpn)/i.test(name);
+    const connectedPhysical = new Set((Array.isArray(devices) ? devices : [])
+      .filter(d => d && safeName(d.name)
+        && (d.type === 'ethernet' || d.type === 'wifi')
+        && d.state === 'connected' && d.hardware === true)
+      .map(d => d.name));
+    const candidates = (Array.isArray(routes) ? routes : []).filter(route =>
+      route?.dst === 'default' && connectedPhysical.has(route.dev)
+      && net.isIP(route.gateway) === 4 && route.gateway !== '0.0.0.0'
+      && (route.metric == null || (Number.isInteger(Number(route.metric)) && Number(route.metric) >= 0)));
+    if (!candidates.length) {
+      throw new Error('No usable connected physical IPv4 default route exists for direct ISP testing.');
+    }
+    candidates.sort((a, b) => Number(a.metric ?? 0) - Number(b.metric ?? 0));
+    const selected = candidates[0];
+    return {
+      interface: selected.dev,
+      index: 0,
+      gateway: selected.gateway,
+      curlInterface: 'if!' + selected.dev,
+      bindMode: 'physical-interface'
+    };
+  }
+  _selectWindowsPhysicalRoute(rows) {
+    const routes = Array.isArray(rows) ? rows : (rows && typeof rows === 'object' ? [rows] : []);
+    // On Windows, curl host! binds a source IP; unlike Linux if!, it cannot
+    // force physical-device routing. Fail closed if a VPN full-tunnel route is
+    // active rather than displaying tunnel throughput as "Direct ISP".
+    if (routes.some(route => ['0.0.0.0/1', '128.0.0.0/1'].includes(route?.prefix))) {
+      throw new Error('Direct ISP test is unavailable while VPN full-tunnel split routes are active. Disconnect VPN before testing physical Internet.');
+    }
+    const defaults = routes.filter(route => route?.prefix === '0.0.0.0/0');
+    if (!defaults.length) throw new Error('No active physical IPv4 default route is available.');
+    const metric = route => Number(route.routeMetric) + Number(route.interfaceMetric);
+    if (defaults.some(route => !Number.isFinite(metric(route)))) {
+      throw new Error('Direct ISP default-route metrics could not be verified.');
+    }
+    defaults.sort((a, b) => metric(a) - metric(b));
+    const selected = defaults[0];
+    const localIP = String(selected.ip || '');
+    const gateway = String(selected.gateway || '');
+    const alias = String(selected.alias || '');
+    if (selected.hardware !== true || selected.status !== 'Up'
+        || !Number.isInteger(Number(selected.index)) || Number(selected.index) < 1
+        || !alias || /OpenVPN|TAP|Wintun|OIG|WireGuard|Cloudflare|vEthernet|Loopback|tunnel|VPN/i.test(alias)
+        || net.isIP(localIP) !== 4 || localIP.startsWith('169.254.')
+        || localIP.startsWith('127.') || localIP === '0.0.0.0'
+        || net.isIP(gateway) !== 4 || gateway === '0.0.0.0') {
+      throw new Error('Direct ISP test cannot verify a safe physical default route. Disconnect VPN and retry.');
+    }
+    return {
+      interface: alias,
+      index: Number(selected.index),
+      localIP,
+      gateway,
+      curlInterface: 'host!' + localIP,
+      bindMode: 'physical-ip-verified-default'
+    };
+  }
+
   async _directInternetPath() {
     if (this.platform === 'win32') {
+      // Read-only snapshot. Never add/delete host routes, change adapter
+      // metrics, start VPN or request Windows administrator privileges.
       const script = [
-        "$routes=@(Get-NetRoute -AddressFamily IPv4 -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue|Where-Object{$_.InterfaceAlias -notmatch 'OpenVPN|TAP|Wintun|OIG|WireGuard|Cloudflare|vEthernet|Loopback'}|Sort-Object RouteMetric,InterfaceMetric)",
-        "$r=$routes|Where-Object{(Get-NetAdapter -InterfaceIndex $_.InterfaceIndex -ErrorAction SilentlyContinue).HardwareInterface}|Select-Object -First 1",
-        "if(-not $r){$r=$routes|Select-Object -First 1}",
-        "if(-not $r){throw 'No physical IPv4 Internet route was found.'}",
+        "$routes=@(Get-NetRoute -AddressFamily IPv4 -PolicyStore ActiveStore -ErrorAction SilentlyContinue|Where-Object{$_.DestinationPrefix -in @('0.0.0.0/0','0.0.0.0/1','128.0.0.0/1')})",
+        "$rows=@(foreach($r in $routes){",
         "$a=Get-NetAdapter -InterfaceIndex $r.InterfaceIndex -ErrorAction SilentlyContinue",
         "$ip=Get-NetIPAddress -AddressFamily IPv4 -InterfaceIndex $r.InterfaceIndex -ErrorAction SilentlyContinue|Where-Object{$_.IPAddress -notlike '169.254*'}|Select-Object -First 1",
-        "if(-not $ip){throw 'Physical Internet adapter has no IPv4 address.'}",
-        "[ordered]@{interface=[string]$a.Name;index=[int]$r.InterfaceIndex;ip=[string]$ip.IPAddress;gateway=[string]$r.NextHop}|ConvertTo-Json -Compress"
+        "[pscustomobject]@{prefix=[string]$r.DestinationPrefix;alias=[string]$a.Name;index=[int]$r.InterfaceIndex;ip=[string]$ip.IPAddress;gateway=[string]$r.NextHop;hardware=[bool]$a.HardwareInterface;status=[string]$a.Status;routeMetric=[int]$r.RouteMetric;interfaceMetric=[int]$r.InterfaceMetric}",
+        "})",
+        "ConvertTo-Json -InputObject $rows -Compress"
       ].join(';');
-      const r = await run(this._requireWindowsPwsh(), ['-NoProfile','-Command',script], { timeout: 5000 });
-      const info = JSON.parse(r.stdout || '{}');
-      return {
-        interface: String(info.interface || ''),
-        index: Number(info.index || 0),
-        localIP: String(info.ip || ''),
-        gateway: String(info.gateway || ''),
-        curlInterface: 'host!' + String(info.ip || ''),
-        bindMode: 'physical-ip'
-      };
+      const r = await run(this._requireWindowsPwsh(), ['-NoProfile','-Command',script], { timeout: 8000 });
+      return this._selectWindowsPhysicalRoute(JSON.parse(r.stdout || '[]'));
     }
 
     if (this.platform === 'linux') {
-      // A connected VPN often installs the lowest-metric default route on tun0.
-      // Direct-ISP tests must instead bind a real connected Ethernet/Wi-Fi NIC.
-      const routeScript = [
-        "iface=$(nmcli -t -f DEVICE,TYPE,STATE device status 2>/dev/null | awk -F: '$3==\"connected\" && ($2==\"ethernet\" || $2==\"wifi\"){print $1;exit}')",
-        "if [ -n \"$iface\" ]; then ip -4 route show default | grep -F \" dev $iface \" | head -n1; else ip -4 route show default | grep -Ev ' dev (tun|tap|wg|tailscale|ppp|zt|vpn)[^ ]*' | head -n1; fi"
-      ].join('; ');
-      const route = await run('/bin/bash', ['-lc', routeScript], { timeout: 5000 });
-      const line = String(route.stdout || '').trim();
-      const iface = (line.match(/\bdev\s+(\S+)/) || [])[1] || '';
-      const gateway = (line.match(/\bvia\s+(\S+)/) || [])[1] || '';
-      // Linux network interface names are kernel-bounded (IFNAMSIZ: 15 bytes).
-      // Reject option-like and shell metacharacters before using the selected NIC.
-      if (!/^[A-Za-z0-9_][A-Za-z0-9_.:-]{0,14}$/.test(iface)
-          || /^(tun|tap|wg|tailscale|ppp|zt|vpn)/i.test(iface)) {
-        throw new Error('No safe physical IPv4 Internet route was found.');
-      }
-      // Pass the NIC as a literal argv element: never interpolate an interface
-      // name into bash -lc (where quote/substitution syntax can be reinterpreted).
-      const addr = await run('ip', ['-4','-o','addr','show','dev',iface], { timeout: 5000 });
+      // Enumerate ALL connected physical Ethernet/Wi-Fi uplinks, then match
+      // them to real kernel IPv4 default routes. A connected NIC may have no
+      // usable default route while a secondary Wi-Fi NIC is fully functional.
+      // No shell interpolation, no NetworkManager mutation, no route changes.
+      const [nmcli, routes] = await Promise.all([
+        run('nmcli', ['-t','-f','DEVICE,TYPE,STATE','device','status'], { timeout: 5000 }),
+        run('ip', ['-j','-4','route','show','default'], { timeout: 5000 })
+      ]);
+      // nmcli -t -f DEVICE,TYPE,STATE device status
+      const devices = String(nmcli.stdout || '').split(/\r?\n/).map(line => {
+        const fields = line.match(/^([A-Za-z0-9_][A-Za-z0-9_.:-]{0,14}):(ethernet|wifi):connected$/);
+        if (!fields) return null;
+        const name = fields[1];
+        return {
+          name, type: fields[2], state: 'connected',
+          hardware: this._isLinuxPhysicalNic(name)
+        };
+      }).filter(Boolean);
+      const selected = this._selectLinuxPhysicalDefaultRoute(JSON.parse(routes.stdout || '[]'), devices);
+      const addr = await run('ip', ['-4','-o','addr','show','dev',selected.interface], { timeout: 5000 });
       const localIP = (String(addr.stdout || '').match(/\binet\s+((?:\d{1,3}\.){3}\d{1,3})\/\d{1,2}\b/) || [])[1] || '';
-      if (!localIP) throw new Error('Physical Internet interface has no IPv4 address.');
-      return {
-        interface: iface,
-        index: 0,
-        localIP,
-        gateway,
-        curlInterface: 'if!' + iface,
-        bindMode: 'physical-interface'
-      };
+      if (net.isIP(localIP) !== 4 || localIP === '0.0.0.0' || localIP.startsWith('169.254.')) {
+        throw new Error('Selected physical Internet interface has no usable IPv4 address.');
+      }
+      return { ...selected, localIP };
     }
 
     throw new Error('Direct Internet test is supported only on Windows and Linux.');
@@ -920,6 +1018,10 @@ class Backend {
       ok: true,
       tested: results.length,
       reachable: results.filter(x => x?.fastReachable).length,
+      // Reachability is transport-only. TCP SYN/accept can succeed while
+      // OpenVPN TLS negotiation still fails; neither count is a VPN success.
+      icmpReplies: results.filter(x => Number.isFinite(x?.icmpPingMs)).length,
+      tcpPortsOpen: results.filter(x => Number.isFinite(x?.tcpConnectMs)).length,
       noReply: results.filter(x => x && x.fastAt && !x.fastReachable).length,
       elapsedMs: Date.now() - started,
       directPath: { interface: directPath.interface, localIP: directPath.localIP, gateway: directPath.gateway, proxyBypassed: true },
@@ -1071,15 +1173,14 @@ class Backend {
   _selectUpdateAsset(assets, version) {
     const list = Array.isArray(assets) ? assets : [];
     if (this.platform === 'win32') {
-      return list.find(a => a.name === 'OpenInternetGateway-Setup-' + version + '.exe')
-        || list.find(a => /^OpenInternetGateway-Setup-.*\.exe$/i.test(a.name || ''));
+      // The fallback must never choose an older (or differently named)
+      // installer from the latest release assets.
+      return list.find(a => a.name === 'OpenInternetGateway-Setup-' + version + '.exe') || null;
     }
     if (this.platform === 'linux') {
-      // Automatic Linux updates must remain user-space and never invoke apt/dpkg/sudo.
-      // Prefer the AppImage release asset; the DEB remains available for manual/system installs.
-      return list.find(a => a.name === 'OpenInternetGateway-' + version + '-x86_64.AppImage')
-        || list.find(a => /^OpenInternetGateway-.*-x86_64\.AppImage$/i.test(a.name || ''))
-        || list.find(a => /\.AppImage$/i.test(a.name || ''));
+      // AppImage is the only user-space auto-update format. Do not accept a
+      // previous version, a DEB, or an unexpected architecture by fallback.
+      return list.find(a => a.name === 'OpenInternetGateway-' + version + '-x86_64.AppImage') || null;
     }
     return null;
   }
@@ -1089,12 +1190,21 @@ class Backend {
     if (!force) {
       const cached = this._readJson(stateFile, null);
       const checked = cached?.checkedAt ? Date.parse(cached.checkedAt) : 0;
-      if (checked && Date.now() - checked < 5 * 60 * 1000) return cached;
+      // Cached update availability is valid only for the exact installed
+      // app version. It must be refreshed after NSIS/AppImage upgrades.
+      const now = Date.now();
+      if (cached?.currentVersion === this.version
+          && checked > 0 && checked <= now && now - checked < 5 * 60 * 1000) return cached;
     }
 
     const release = await this._githubJson('https://api.github.com/repos/GOD13emad/OpenInternetGateway/releases/latest');
     const latestVersion = String(release.tag_name || '').replace(/^v/i, '');
     if (!latestVersion) throw new Error('GitHub latest release did not contain a version tag.');
+    // The released installer/AppImage naming and helper paths require one stable
+    // MAJOR.MINOR.PATCH value, not a partially parsed or suffixed release tag.
+    if (!/^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/.test(latestVersion)) {
+      throw new Error('Invalid release version tag; expected stable MAJOR.MINOR.PATCH.');
+    }
     const asset = this._selectUpdateAsset(release.assets, latestVersion);
     const sums = (release.assets || []).find(a => a.name === 'SHA256SUMS.txt');
     const comparison = this._compareVersions(this.version, latestVersion);
@@ -1130,7 +1240,22 @@ class Backend {
     return String(r.stdout || '');
   }
 
-  async _downloadWithSha256(url, destination) {
+  async _fileSha256(file) {
+    const hash = crypto.createHash('sha256');
+    await new Promise((resolve, reject) => {
+      const stream = fs.createReadStream(file);
+      stream.on('data', chunk => hash.update(chunk));
+      stream.once('error', reject);
+      stream.once('end', resolve);
+    });
+    return hash.digest('hex').toLowerCase();
+  }
+
+  async _downloadWithSha256(url, destination, expectedSha256) {
+    const expected = String(expectedSha256 || '').toLowerCase();
+    if (!/^[a-f0-9]{64}$/.test(expected)) {
+      throw new Error('Downloaded update requires a verified SHA-256 digest.');
+    }
     fs.mkdirSync(path.dirname(destination), { recursive: true });
     const partial = destination + '.partial';
     try { fs.unlinkSync(partial); } catch {}
@@ -1140,7 +1265,12 @@ class Backend {
         '--retry','2','--retry-delay','1','-sS','-o',partial,url
       ], { timeout: 310000 });
       const bytes = fs.statSync(partial).size;
-      const sha256 = crypto.createHash('sha256').update(fs.readFileSync(partial)).digest('hex').toLowerCase();
+      // Stream rather than allocating the entire 200+ MB installer in the
+      // Electron main process. Do not expose a final filename until verified.
+      const sha256 = await this._fileSha256(partial);
+      if (sha256 !== expected) {
+        throw new Error('Downloaded update SHA-256 does not match the published GitHub release digest.');
+      }
       fs.renameSync(partial, destination);
       return { sha256, bytes };
     } catch (error) {
@@ -1201,7 +1331,7 @@ try {
   if($p.ExitCode -ne 0){throw ('NSIS updater failed with exit code '+$p.ExitCode)}
   if(-not(Test-Path -LiteralPath $Target)){throw 'Per-user installation target was not created.'}
   $installed=[string](Get-Item -LiteralPath $Target).VersionInfo.ProductVersion
-  if($installed -notlike ($Version+'*')){throw ('Installed version mismatch: '+$installed)}
+  if($installed -notmatch ('^' + [regex]::Escape($Version) + '(?:\.\d+)?$')){throw ('Installed version mismatch: '+$installed)}
   Save-Result @{ok=$true;version=$Version;sha256=$actual;target=$Target;installScope='current-user';exitCode=$p.ExitCode}
   Start-Process -FilePath $Target
   exit 0
@@ -1232,8 +1362,28 @@ try {
         updatePwsh = path.join(helperRuntime, 'pwsh.exe');
         if (!fs.existsSync(updatePwsh)) throw new Error('Copied Windows update PowerShell runtime is incomplete.');
       }
-      const pwshArgs = [
-        '-NoProfile','-WindowStyle','Hidden','-ExecutionPolicy','Bypass','-File',helper,
+      // Windows detached:true makes pwsh exit before running its -File script.
+      // An attached, short-lived launcher uses OS Start-Process so the
+      // *actual* helper survives after the main Electron process exits.
+      const launcher = path.join(updateDir, 'start-update-helper.ps1');
+      const launchScript = String.raw`param([string]$Runtime,[string]$Helper,[string]$Installer,[string]$ExpectedSha,[string]$Version,
+[int]$WaitPid,[string]$Target,[string]$Fallback,[string]$ResultFile)
+$ErrorActionPreference='Stop'
+function QuoteArg([string]$v) {
+  if($v -match '[\r\n"]'){throw 'Invalid helper argument'}
+  return '"'+$v+'"'
+}
+$line=@('-NoProfile','-WindowStyle','Hidden','-ExecutionPolicy','Bypass','-File',
+(QuoteArg $Helper),'-Installer',(QuoteArg $Installer),'-ExpectedSha',$ExpectedSha,
+'-Version',$Version,'-WaitPid',"$WaitPid",'-Target',(QuoteArg $Target),
+'-Fallback',(QuoteArg $Fallback),'-ResultFile',(QuoteArg $ResultFile)) -join ' '
+$p=Start-Process -FilePath $Runtime -ArgumentList $line -WindowStyle Hidden -PassThru
+if(!$p -or $p.Id -le 0){throw 'STARTPROCESS_FAILED'}`;
+      fs.writeFileSync(launcher, launchScript, 'utf8');
+      const launchArgs = [
+        '-NoProfile','-WindowStyle','Hidden','-ExecutionPolicy','Bypass','-File',launcher,
+        '-Runtime',updatePwsh,
+        '-Helper',helper,
         '-Installer',downloaded.path,
         '-ExpectedSha',expectedSha,
         '-Version',version,
@@ -1242,17 +1392,19 @@ try {
         '-Fallback',String(currentExecutable || ''),
         '-ResultFile',resultFile
       ];
-      const child = spawn(updatePwsh, pwshArgs, {
-        detached: true,
+      const child = spawn(updatePwsh, launchArgs, {
+        detached: false,
         windowsHide: true,
         stdio: ['ignore', 'ignore', 'ignore']
       });
       await new Promise((resolve, reject) => {
-        child.once('spawn', resolve);
         child.once('error', reject);
+        child.once('close', code => {
+          if (code === 0) resolve();
+          else reject(new Error('Windows update launcher failed with exit code ' + code));
+        });
       });
-      child.unref();
-      const startedDeadline = Date.now() + 5000;
+      const startedDeadline = Date.now() + 15000;
       while (!fs.existsSync(startedFile) && Date.now() < startedDeadline) {
         await new Promise(resolve => setTimeout(resolve, 50));
       }
@@ -1372,28 +1524,31 @@ exit 0
 
   async downloadUpdate() {
     const info = await this.updateInfo(true);
-    if (!info.asset?.url || !info.asset?.name) throw new Error('No compatible update asset was published for this platform.');
+    // Being current requires no downloadable installer. Check update status
+    // before requiring a platform-specific asset from the published release.
     if (!info.updateAvailable) {
       return { ok: true, alreadyCurrent: true, info, path: null };
     }
+    if (!info.asset?.url || !info.asset?.name) throw new Error('No compatible update asset was published for this platform.');
     if (!info.asset.sha256) throw new Error('GitHub release asset has no SHA-256 digest; refusing an unverifiable update.');
 
-    if (info.checksumsUrl) {
-      const sums = await this._curlText(info.checksumsUrl, 20);
-      const line = sums.split(/\r?\n/).find(x => x.trim().endsWith('  ' + info.asset.name));
-      if (!line) throw new Error('Published SHA256SUMS does not include the selected update asset.');
-      const checksum = line.trim().split(/\s+/)[0].toLowerCase();
-      if (checksum !== info.asset.sha256) throw new Error('GitHub digest and SHA256SUMS disagree; update refused.');
-    }
+    // Actual upgrades must satisfy all three published integrity checks.
+    // Never skip the release checksum manifest when it is missing.
+    if (!info.checksumsUrl) throw new Error('GitHub release has no SHA256SUMS.txt asset; update refused.');
+    const sums = await this._curlText(info.checksumsUrl, 20);
+    const line = sums.split(/\r?\n/).find(x => x.trim().endsWith('  ' + info.asset.name));
+    if (!line) throw new Error('Published SHA256SUMS does not include the selected update asset.');
+    const checksum = line.trim().split(/\s+/)[0].toLowerCase();
+    if (checksum !== info.asset.sha256) throw new Error('GitHub digest and SHA256SUMS disagree; update refused.');
 
     const destination = path.join(this.backendRoot, 'updates', 'v' + info.latestVersion, info.asset.name);
     if (fs.existsSync(destination)) {
-      const existing = crypto.createHash('sha256').update(fs.readFileSync(destination)).digest('hex').toLowerCase();
+      const existing = await this._fileSha256(destination);
       if (existing === info.asset.sha256) return { ok: true, cached: true, info, path: destination, sha256: existing };
       try { fs.unlinkSync(destination); } catch {}
     }
 
-    const downloaded = await this._downloadWithSha256(info.asset.url, destination);
+    const downloaded = await this._downloadWithSha256(info.asset.url, destination, info.asset.sha256);
     if (downloaded.sha256 !== info.asset.sha256) {
       try { fs.unlinkSync(destination); } catch {}
       throw new Error('Downloaded update SHA-256 does not match the published GitHub release digest.');
@@ -1412,15 +1567,20 @@ exit 0
 
   async _factoryStatus() {
     const p = this._factoryStatusPath();
-    if (!fs.existsSync(p)) {
+    let cached = null;
+    if (fs.existsSync(p)) {
+      try { cached = JSON.parse(fs.readFileSync(p, 'utf8').replace(/^\uFEFF/, '')); } catch {}
+    }
+    // Existing installed clients may have a pre-upgrade status.json. Rebuild
+    // metadata using factory STATUS only (no relay refresh or VPN action).
+    if (!cached || !Object.prototype.hasOwnProperty.call(cached, 'lastFetchTransport')) {
       try {
         if (this.platform === 'win32') await this._windows('factory-status');
         else await this._linux('factory-status');
+        cached = JSON.parse(fs.readFileSync(p, 'utf8').replace(/^\uFEFF/, ''));
       } catch {}
     }
-    if (fs.existsSync(p)) {
-      try { return JSON.parse(fs.readFileSync(p, 'utf8').replace(/^\uFEFF/, '')); } catch {}
-    }
+    if (cached && typeof cached === 'object') return cached;
     return { pool:0, validated:0, standby:0, quarantined:0, generations:0, protocols:{}, healthy:false, source:'', ageHours:null, lastRefresh:null };
   }
 

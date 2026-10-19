@@ -1,6 +1,9 @@
 const { app, BrowserWindow, ipcMain, Menu, Tray, nativeImage, shell, nativeTheme } = require('electron');
 const { spawn } = require('child_process');
 const path = require('path');
+const { pathToFileURL } = require('node:url');
+const { protectDashboardNavigation, assertDashboardIpcSender, trustedReleaseUrl } = require('./dashboard-security');
+const { probeReadOnlyNavigation } = require('./dashboard-navigation-probe');
 const fs = require('fs');
 const Backend = require('./platform-backend');
 
@@ -18,6 +21,9 @@ const quitRequestedAtLaunch = process.argv.includes('--quit');
 const launchIntent = quitRequestedAtLaunch ? 'quit' : 'show';
 const gotSingleInstanceLock = app.requestSingleInstanceLock({ intent: launchIntent });
 if (!gotSingleInstanceLock) app.quit();
+
+const dashboardFile = path.join(__dirname, '..', 'renderer', 'index.html');
+const dashboardFileUrl = pathToFileURL(dashboardFile).href;
 
 function asset(name) {
   return path.join(__dirname, '..', '..', 'assets', name);
@@ -46,19 +52,56 @@ function createWindow({ showWhenReady = !startInBackground } = {}) {
   });
   mainWindow = win;
   win.removeMenu();
-  win.loadFile(path.join(__dirname, '..', 'renderer', 'index.html'));
+  protectDashboardNavigation(win.webContents);
+  win.loadFile(dashboardFile);
   win.once('ready-to-show', () => {
     if (showWhenReady && !app.isQuitting && isLiveWindow(win)) win.show();
     if (process.env.OIG_CAPTURE_PATH && isLiveWindow(win)) {
       setTimeout(async () => {
         try {
           if (!isLiveWindow(win) || win.webContents.isDestroyed()) return;
+          // The optional CI-only probe clicks navigation controls, never VPN
+          // controls, and uses the same isolated installed Electron window.
+          const probePath = process.platform === 'win32'
+            && process.env.OIG_CAPTURE_ONLY === '1'
+            ? process.env.OIG_DESKTOP_PROBE_RECEIPT : '';
+          const navigation = probePath
+            ? await probeReadOnlyNavigation(win.webContents)
+            : null;
           const image = await win.webContents.capturePage();
           fs.writeFileSync(process.env.OIG_CAPTURE_PATH, image.toPNG());
+          if (probePath) {
+            if (!win.isVisible()) throw new Error('DESKTOP_NOT_VISIBLE_BEFORE_CLOSE');
+            win.close();
+            if (!isLiveWindow(win) || win.isVisible()) throw new Error('CLOSE_TO_TRAY_DID_NOT_HIDE');
+            fs.writeFileSync(probePath, JSON.stringify({
+              schema: 'oig-offline-installed-ui-navigation-tray-v1',
+              pass: true,
+              navigation,
+              closeToTray: true,
+              windowStillAlive: true,
+              vpnControlInvoked: false,
+              at: new Date().toISOString()
+            }) + '\n');
+          }
+        } catch (error) {
+          console.error('OIG_DESKTOP_INTERACTION_SMOKE_FAILED', error);
+          if (process.env.OIG_CAPTURE_ONLY === '1' && process.platform === 'win32') {
+            // Force non-zero on CI-only capture failure; do not convert a
+            // renderer-probe error into a successful screenshot receipt.
+            app.exit(41);
+            return;
+          }
         } finally {
           if (process.env.OIG_CAPTURE_ONLY === '1') {
-            app.isQuitting = true;
-            app.quit();
+            // On Windows a direct app.quit() is canceled by before-quit and
+            // its recursive retry can leave Electron running after a capture.
+            // Take the same single-pass safe exit used by the updater.
+            if (process.platform === 'win32') requestProcessExitPreservingTunnel();
+            else {
+              app.isQuitting = true;
+              app.quit();
+            }
           }
         }
       }, 350);
@@ -128,15 +171,19 @@ function createTray() {
 }
 
 function registerIpc() {
-  ipcMain.handle('gateway:status', () => backend.status());
-  ipcMain.handle('gateway:profiles', () => backend.profiles());
-  ipcMain.handle('gateway:action', (_e, action, options) => backend.action(action, options));
-  ipcMain.handle('gateway:diagnostics', () => backend.diagnostics());
-  ipcMain.handle('gateway:activity', () => backend.activity());
-  ipcMain.handle('gateway:platform', () => backend.platformInfo());
-  ipcMain.handle('gateway:openLogs', async () => shell.openPath(await backend.logsPath()));
-  ipcMain.handle('gateway:updateInfo', (_e, force) => backend.updateInfo(!!force));
-  ipcMain.handle('gateway:installUpdate', async () => {
+  const handleDashboardIpc = (channel, handler) => ipcMain.handle(channel, (event, ...args) => {
+    assertDashboardIpcSender(event, mainWindow, dashboardFileUrl);
+    return handler(event, ...args);
+  });
+  handleDashboardIpc('gateway:status', () => backend.status());
+  handleDashboardIpc('gateway:profiles', () => backend.profiles());
+  handleDashboardIpc('gateway:action', (_e, action, options) => backend.action(action, options));
+  handleDashboardIpc('gateway:diagnostics', () => backend.diagnostics());
+  handleDashboardIpc('gateway:activity', () => backend.activity());
+  handleDashboardIpc('gateway:platform', () => backend.platformInfo());
+  handleDashboardIpc('gateway:openLogs', async () => shell.openPath(await backend.logsPath()));
+  handleDashboardIpc('gateway:updateInfo', (_e, force) => backend.updateInfo(!!force));
+  handleDashboardIpc('gateway:installUpdate', async () => {
     const result = await backend.downloadUpdate();
     if (result.alreadyCurrent || !result.path) return { ...result, applying: false };
     const launched = await backend.launchDownloadedUpdate(result, {
@@ -157,13 +204,14 @@ function registerIpc() {
     }
     return { ...result, ...launched };
   });
-  ipcMain.handle('gateway:openRelease', async () => {
+  handleDashboardIpc('gateway:openRelease', async () => {
     let url = 'https://github.com/GOD13emad/OpenInternetGateway/releases/latest';
     try { url = (await backend.updateInfo(false)).releaseUrl || url; } catch {}
+    url = trustedReleaseUrl(url);
     await shell.openExternal(url);
     return { ok: true, url };
   });
-  ipcMain.handle('gateway:setTheme', (_e, theme) => {
+  handleDashboardIpc('gateway:setTheme', (_e, theme) => {
     nativeTheme.themeSource = ['light', 'dark', 'system'].includes(theme) ? theme : 'system';
     return { ok: true, theme: nativeTheme.themeSource };
   });

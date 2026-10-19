@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-import argparse, base64, concurrent.futures, datetime as dt, fcntl, hashlib, json, os, re, shutil, subprocess, sys, tempfile, urllib.request
+import argparse, base64, concurrent.futures, datetime as dt, fcntl, hashlib, json, os, re, shutil, subprocess, sys, tempfile, urllib.request, urllib.parse
 from pathlib import Path
+import ipaddress
 
 SEEDS = [
     "https://www.vpngate.net",
@@ -10,6 +11,10 @@ SEEDS = [
     "http://150.40.105.5:32536",
     "http://150.40.105.24:38827",
 ]
+
+MAX_SOURCE_CSV_BYTES = 24 * 1024 * 1024
+MAX_CSV_LINE_BYTES = 256 * 1024
+MAX_CACHED_CSV_BYTES = 3 * MAX_SOURCE_CSV_BYTES
 
 COUNTRY_PRIORITY = ["JP","KR","US","SG","TH","VN","FR","DE","NL","GB","CA","AU","PT","RU"]
 
@@ -28,6 +33,14 @@ def write_json(path, value):
     tmp.write_text(json.dumps(value, indent=2, sort_keys=False), encoding="utf-8")
     tmp.replace(path)
 
+class NoHttpsDowngrade(urllib.request.HTTPRedirectHandler):
+    """Never label an HTTPS feed secure after following a plaintext redirect."""
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if (urllib.parse.urlsplit(req.full_url).scheme.lower() == "https" and
+                urllib.parse.urlsplit(newurl).scheme.lower() != "https"):
+            raise ValueError("HTTPS feed redirect downgrade refused")
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
 def fetch(url, timeout=8, allow_partial=False):
     # urllib timeouts are per blocking socket operation, not a hard wall-clock
     # deadline. Prefer curl's bounded connect + total transfer limits so dead
@@ -35,10 +48,15 @@ def fetch(url, timeout=8, allow_partial=False):
     curl = shutil.which("curl")
     if curl:
         proc = subprocess.run([
-            curl,"-4","-L","--fail","--noproxy","*",
-            "--connect-timeout","2","--max-time",str(timeout),"-sS",url
+            curl,"-4","-L","--proto","=http,https",
+            "--proto-redir",("=https" if url.lower().startswith("https://") else "=http,https"),
+            "--fail","--noproxy","*",
+            "--connect-timeout","2","--max-time",str(timeout),
+            "--max-filesize",str(MAX_SOURCE_CSV_BYTES),"-sS",url
         ], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
            timeout=timeout+2, check=False)
+        if len(proc.stdout) > MAX_SOURCE_CSV_BYTES:
+            raise RuntimeError("VPN Gate source CSV size exceeded")
         if proc.returncode:
             # curl 28 means the hard transfer deadline fired. For the VPN Gate
             # CSV only, retain bytes already received; refresh_snapshot keeps
@@ -49,8 +67,13 @@ def fetch(url, timeout=8, allow_partial=False):
             raise RuntimeError(f"curl failed ({proc.returncode})")
         return proc.stdout, False
     req = urllib.request.Request(url, headers={"User-Agent":"OpenInternetGateway/2.5"})
-    with urllib.request.urlopen(req, timeout=timeout) as r:
-        return r.read(), False
+    # The no-curl fallback must honor the same HTTPS-to-HTTPS redirect rule.
+    opener = urllib.request.build_opener(NoHttpsDowngrade())
+    with opener.open(req, timeout=timeout) as r:
+        data = r.read(MAX_SOURCE_CSV_BYTES + 1)
+        if len(data) > MAX_SOURCE_CSV_BYTES:
+            raise RuntimeError("VPN Gate source CSV size exceeded")
+        return data, False
 
 def refresh_snapshot(evidence, max_sources=3):
     csv_path = evidence / "vpngate-mirror-api.csv"
@@ -72,47 +95,72 @@ def refresh_snapshot(evidence, max_sources=3):
         # refresh time scale with dead mirrors.
         with concurrent.futures.ThreadPoolExecutor(max_workers=min(6, len(SEEDS))) as pool:
             futures = [pool.submit(fetch_one, base) for base in SEEDS]
-            for future in concurrent.futures.as_completed(futures):
-                base, data, partial = future.result()
-                if not data:
+            fetched = [future.result() for future in concurrent.futures.as_completed(futures)]
+        # Download completion order is untrusted as a source priority. Prefer
+        # HTTPS among sources that still satisfy normal CSV/profile gates;
+        # keep HTTP mirror fallback when censored HTTPS cannot be reached.
+        fetched.sort(key=lambda item: (
+            0 if item[0].lower().startswith("https://") else 1,
+            bool(item[2]), SEEDS.index(item[0])))
+        for base, data, partial in fetched:
+            # Once a structurally usable HTTPS source is accepted, never
+            # mix rows from plaintext volunteer mirrors into that snapshot.
+            # HTTP remains an explicit fallback only if no HTTPS feed qualifies.
+            if used and used[0].lower().startswith("https://") and not base.lower().startswith("https://"):
+                continue
+            if not data:
+                continue
+            text = data.decode("utf-8", errors="replace")
+            lines = text.splitlines()
+            # A timed-out transfer may end in the middle of one CSV row.
+            # Never treat that unterminated tail as a complete record.
+            if partial and data and not data.endswith((b"\n", b"\r")) and lines:
+                lines = lines[:-1]
+            rows = []
+            source_seen = set()
+            for line in lines:
+                if len(line.encode("utf-8")) > MAX_CSV_LINE_BYTES:
                     continue
-                text = data.decode("utf-8", errors="replace")
-                lines = text.splitlines()
-                # A timed-out transfer may end in the middle of one CSV row.
-                # Never treat that unterminated tail as a complete record.
-                if partial and data and not data.endswith((b"\n", b"\r")) and lines:
-                    lines = lines[:-1]
-                rows = []
-                for line in lines:
-                    if not line or line.startswith("*") or line.startswith("#"):
-                        continue
-                    parts = line.split(",")
-                    if len(parts) < 15:
-                        continue
-                    # Deduplicate identical OpenVPN endpoints/configs across
-                    # mirrors while retaining different transports/profiles.
-                    key = (parts[0].strip(), parts[1].strip(), parts[-1].strip())
-                    if key in seen:
-                        continue
-                    seen.add(key)
-                    rows.append(line)
-                # Eight complete rows are enough to exceed the release/runtime
-                # minimum after structural OpenVPN validation, without turning
-                # a network timeout into an unbounded retry.
-                if len(rows) >= 8:
-                    merged.extend(rows)
-                    used.append(base)
-                    if partial:
-                        partial_sources += 1
-                if len(used) >= max_sources:
-                    for pending in futures:
-                        pending.cancel()
-                    break
-
+                if not line or line.startswith("*") or line.startswith("#"):
+                    continue
+                parts = line.split(",")
+                if len(parts) < 15:
+                    continue
+                # Deduplicate identical OpenVPN endpoints/configs across
+                # mirrors while retaining different transports/profiles.
+                key = (parts[0].strip(), parts[1].strip(), parts[-1].strip())
+                if key in seen or key in source_seen:
+                    continue
+                source_seen.add(key)
+                rows.append(line)
+            # Eight complete rows are enough to exceed the release/runtime
+            # minimum after structural OpenVPN validation, without turning
+            # a network timeout into an unbounded retry.
+            if len(rows) >= 8:
+                merged.extend(rows)
+                seen.update(source_seen)
+                used.append(base)
+                if partial:
+                    partial_sources += 1
+            if len(used) >= max_sources:
+                break
         if merged:
+            # Parse into a temporary candidate before replacing a known-good
+            # snapshot. CSV column counts are not OpenVPN profile validity.
             tmp = csv_path.with_suffix(".partial")
-            tmp.write_text("\n".join(merged) + "\n", encoding="utf-8")
-            tmp.replace(csv_path)
+            try:
+                encoded = ("\n".join(merged) + "\n").encode("utf-8")
+                if len(encoded) > MAX_CACHED_CSV_BYTES:
+                    raise ValueError("Merged VPN Gate CSV exceeds size limit")
+                tmp.write_bytes(encoded)
+                if len(parse_candidates(tmp, count=48, per_country=6)) < 3:
+                    raise ValueError("No usable OpenVPN profiles in downloaded CSV")
+                tmp.replace(csv_path)
+            except (ValueError, RuntimeError, OSError):
+                # Leave the previous complete CSV untouched, if any.
+                tmp.unlink(missing_ok=True)
+                used.clear()
+                partial_sources = 0
 
     if not csv_path.exists():
         raise RuntimeError("No live VPN Gate mirror and no cached API snapshot.")
@@ -124,9 +172,106 @@ def refresh_snapshot(evidence, max_sources=3):
     })
     return csv_path, (used[0] if used else None)
 
+# Public volunteer relays must not target local services, private subnets,
+# carrier-grade NAT, multicast or reserved IPv4 destinations.
+_UNSAFE_RELAY_NETS = tuple(ipaddress.ip_network(net) for net in (
+    "0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8",
+    "169.254.0.0/16", "172.16.0.0/12", "192.0.0.0/24",
+    "192.168.0.0/16", "198.18.0.0/15", "224.0.0.0/4", "240.0.0.0/4"
+))
+
+def relay_ip_allowed(value):
+    try:
+        addr = ipaddress.IPv4Address(str(value).strip())
+        return not any(addr in net for net in _UNSAFE_RELAY_NETS)
+    except ValueError:
+        return False
+
+# Imported profiles are untrusted data, never executable local policy.
+# Deny unknown directives, external paths/commands and extra destinations.
+def profile_is_data_only(text):
+    import ipaddress
+    if "\x00" in text or len(text.encode("utf-8")) > 131072:
+        return False
+    allowed = {
+        "client", "dev", "proto", "remote", "cipher", "data-ciphers",
+        "data-ciphers-fallback", "auth", "resolv-retry", "nobind",
+        "persist-key", "persist-tun", "verb", "mute", "tun-mtu",
+        "mssfix", "sndbuf", "rcvbuf", "reneg-sec", "key-direction",
+        "auth-nocache", "explicit-exit-notify", "tls-client",
+        "remote-cert-tls", "verify-x509-name", "tls-version-min",
+        "tls-version-max", "tls-cipher", "tls-ciphersuites",
+        "ping", "ping-restart", "ping-exit", "keepalive",
+        "connect-retry", "connect-retry-max", "connect-timeout",
+        "server-poll-timeout"
+    }
+    inline_allowed = {"ca", "cert", "key", "tls-auth", "tls-crypt", "tls-crypt-v2"}
+    seen, inline_seen = {}, {}
+    block = None
+    for original in text.splitlines():
+        line = original.strip()
+        if not line or line.startswith(("#", ";")):
+            continue
+        if block:
+            if line.lower() == f"</{block}>":
+                block = None
+            elif line.startswith("<") and line.endswith(">"):
+                return False
+            continue
+        opening = re.fullmatch(r"<([a-z][a-z0-9-]*)>", line.lower())
+        if opening:
+            tag = opening.group(1)
+            if tag not in inline_allowed or tag in inline_seen:
+                return False
+            inline_seen[tag] = 1
+            block = tag
+            continue
+        if line.startswith("<"):
+            return False
+        fields = line.split()
+        directive = fields[0].lower()
+        if directive not in allowed:
+            return False
+        # A downloaded profile cannot turn off data-channel encryption or
+        # integrity; explicit NONE is unsafe even when mixed into a cipher list.
+        if directive in {"cipher", "auth", "data-ciphers", "data-ciphers-fallback"}:
+            if len(fields) != 2 or "none" in fields[1].lower().split(":"):
+                return False
+        seen[directive] = seen.get(directive, 0) + 1
+        if directive == "remote-cert-tls":
+            if len(fields) != 2 or fields[1].lower() != "server" or seen[directive] > 1:
+                return False
+        if directive in {"client", "dev", "proto", "remote"} and seen[directive] > 1:
+            return False
+        if directive == "remote":
+            if len(fields) != 3:
+                return False
+            try:
+                ipaddress.IPv4Address(fields[1])
+                if not (1 <= int(fields[2]) <= 65535):
+                    return False
+            except ValueError:
+                return False
+    return block is None and all(seen.get(name) == 1 for name in ("client", "dev", "proto", "remote")) and all(inline_seen.get(name) == 1 for name in ("ca", "cert", "key"))
+
+def with_server_certificate_role(text):
+    """Require the peer's X.509 server KU/EKU; not a substitute for an independently trusted pin."""
+    if re.search(r"(?mi)^remote-cert-tls\s+server\s*$", text):
+        return text
+    return text.rstrip("\r\n") + "\nremote-cert-tls server\n"
+
+
+def bounded_csv_rows(csv_path):
+    if csv_path.stat().st_size > MAX_CACHED_CSV_BYTES:
+        raise RuntimeError("Cached VPN Gate CSV exceeds size limit")
+    with csv_path.open(encoding="utf-8", errors="replace") as stream:
+        for line in stream:
+            if len(line.encode("utf-8")) <= MAX_CSV_LINE_BYTES:
+                yield line.rstrip("\r\n")
+
 def parse_candidates(csv_path, count=48, per_country=6):
     rows, seen = [], set()
-    for line in csv_path.read_text(encoding="utf-8", errors="replace").splitlines():
+    for line in bounded_csv_rows(csv_path):
         if not line or line.startswith("*") or line.startswith("#"):
             continue
         p = line.split(",")
@@ -136,10 +281,13 @@ def parse_candidates(csv_path, count=48, per_country=6):
         country_name = p[5].strip()
         if not country:
             continue
+        if len(p[-1].strip()) > MAX_CSV_LINE_BYTES:
+            continue
         try:
             text = base64.b64decode(p[-1].strip()).decode("utf-8", errors="replace")
         except Exception:
             continue
+        if not profile_is_data_only(text): continue
         pm = re.search(r"(?m)^proto\s+(\S+)\s*$", text)
         rm = re.search(r"(?m)^remote\s+([0-9.]+)\s+(\d+)\s*$", text)
         if not pm or not rm:
@@ -152,10 +300,18 @@ def parse_candidates(csv_path, count=48, per_country=6):
         else:
             continue
         ip, port = rm.group(1), int(rm.group(2))
+        if not relay_ip_allowed(ip): continue
+        # CSV metadata and the executable OpenVPN remote must agree.
+        # Reject mismatches before reserving an endpoint for deduplication.
+        try:
+            if ipaddress.IPv4Address(p[1].strip()) != ipaddress.IPv4Address(ip):
+                continue
+        except ValueError:
+            continue
         key = f"{protocol}:{ip}:{port}"
         if key in seen:
             continue
-        seen.add(key)
+        # Do not reserve an endpoint until the entire candidate qualifies.
         if not re.search(r"(?m)^client\s*$", text): continue
         if not re.search(r"(?m)^dev\s+tun\s*$", text): continue
         if not re.search(r"(?s)<ca>.+?</ca>", text): continue
@@ -169,6 +325,8 @@ def parse_candidates(csv_path, count=48, per_country=6):
             score, speed, sessions = int(p[2]), int(p[4]), int(p[7])
         except Exception:
             continue
+        # Only structurally safe rows may claim a duplicate endpoint.
+        seen.add(key)
         rows.append({
             "Host":p[0],"IP":ip,"Port":port,"Score":score,"Ping":p[3],
             "Speed":speed,"Sessions":sessions,"Text":text,"Source":"VPNGate",
@@ -212,25 +370,37 @@ def preserve_old(active, stage, meta, success, limit=4):
         if kept>=limit: break
         sha=str(c.get("SHA256","")).lower()
         if not sha or sha in current_shas: continue
+        # Only retain an existing on-disk, bounded, hash-matching file inside
+        # the active pool.  Never follow a symlink or an indexed external path.
+        if not indexed_usable_profiles(active, [c]): continue
         raw=str(c.get("Profile","")).replace("\\","/")
         old_path=active/Path(raw).name
-        if not old_path.exists(): continue
-        if hashlib.sha256(old_path.read_bytes()).hexdigest()!=sha: continue
         text=old_path.read_text(encoding="utf-8",errors="replace")
+        if not profile_is_data_only(text): continue
+        remote = re.search(r"(?m)^remote\s+([0-9.]+)\s+(\d+)\s*$", text)
+        if not remote or not relay_ip_allowed(remote.group(1)): continue
+        if str(c.get("IP", "")).strip() != remote.group(1): continue
         protocol="udp" if re.search(r"(?m)^proto\s+udp",text) else ("tcp" if re.search(r"(?m)^proto\s+tcp",text) else "unknown")
+        # Deduplicate after normalization; the old pre-role SHA can differ.
+        staged_text = with_server_certificate_role(text)
+        normalized_sha = hashlib.sha256(staged_text.encode("utf-8")).hexdigest()
+        if normalized_sha in current_shas: continue
         kept+=1
         name=f"LKG-{kept:02d}-{old_path.name}"
-        shutil.copy2(old_path,stage/name)
+        staged = stage/name
+        staged.write_text(staged_text,encoding="utf-8",newline="")
+        staged_sha = hashlib.sha256(staged.read_bytes()).hexdigest()
         prior = success.get(sha,{}) if isinstance(success,dict) else {}
         country = c.get("Country","") or (prior.get("country","") if isinstance(prior,dict) else "") or "JP"  # legacy pools before 2.3 were JP-only
         meta.append({
             "Rank":len(meta)+1,"Host":c.get("Host",""),"IP":c.get("IP",""),"Port":c.get("Port",0),
             "Protocol":protocol,"Country":country,"CountryName":c.get("CountryName",""),
             "Score":c.get("Score",0),"Ping":c.get("Ping",""),"Speed":c.get("Speed",0),"Sessions":c.get("Sessions",0),
-            "Profile":f"runtime/udp-cache/{name}","SHA256":sha,
+            "Profile":f"runtime/udp-cache/{name}","SHA256":staged_sha,
             "Source":"LastKnownGood","GeneratedAt":now()
         })
         current_shas.add(sha)
+        current_shas.add(staged_sha)
     return kept
 
 def promote(common, evidence, count=48, keep_generations=4, preserve_count=8):
@@ -255,7 +425,7 @@ def promote(common, evidence, count=48, keep_generations=4, preserve_count=8):
         safe=re.sub(r"[^A-Za-z0-9_-]","_",r["Host"])
         name=f"{i:02d}-{r['Protocol']}-{safe}-{r['IP']}-{r['Port']}.ovpn"
         p=stage/name
-        p.write_text(r["Text"],encoding="utf-8",newline="")
+        p.write_text(with_server_certificate_role(r["Text"]),encoding="utf-8",newline="")
         sha=hashlib.sha256(p.read_bytes()).hexdigest()
         meta.append({
             "Rank":i,"Host":r["Host"],"IP":r["IP"],"Port":r["Port"],"Protocol":r["Protocol"],
@@ -271,13 +441,21 @@ def promote(common, evidence, count=48, keep_generations=4, preserve_count=8):
         if not p.exists() or hashlib.sha256(p.read_bytes()).hexdigest()!=c["SHA256"]:
             raise RuntimeError("Staged profile validation failed: "+str(p))
 
+    archive = None
     if active.exists():
         if (active/"index.json").exists():
             archive=generations/dt.datetime.now().strftime("%Y%m%d-%H%M%S%f")
             active.rename(archive)
         else:
             shutil.rmtree(active,ignore_errors=True)
-    stage.rename(active)
+    try:
+        stage.rename(active)
+    except Exception:
+        # A failed activation must never strand a verified previous pool
+        # inside generations/ with no active index.json.
+        if archive is not None and archive.exists() and not active.exists():
+            archive.rename(active)
+        raise
 
     old=sorted([p for p in generations.iterdir() if p.is_dir()],reverse=True)
     for p in old[keep_generations:]:
@@ -289,13 +467,37 @@ def promote(common, evidence, count=48, keep_generations=4, preserve_count=8):
         except Exception: pass
     return meta, kept
 
+def indexed_usable_profiles(active, idx):
+    """Check indexed profile location, file bounds and content hash."""
+    valid = []
+    for item in idx if isinstance(idx, list) else []:
+        if not isinstance(item, dict):
+            continue
+        raw = str(item.get("Profile", "")).replace("\\", "/")
+        match = re.fullmatch(r"runtime/udp-cache/([A-Za-z0-9][A-Za-z0-9_.-]*\.ovpn)", raw)
+        sha = str(item.get("SHA256", "")).lower()
+        if not match or not re.fullmatch(r"[0-9a-f]{64}", sha):
+            continue
+        file = active / match.group(1)
+        try:
+            if file.is_symlink() or not file.is_file() or file.stat().st_size > 131072:
+                continue
+            if hashlib.sha256(file.read_bytes()).hexdigest() != sha:
+                continue
+        except OSError:
+            continue
+        valid.append(item)
+    return valid
+
 def status(common, evidence, min_pool=6):
     active=common/"runtime"/"udp-cache"
     factory=common/"runtime"/"config-factory"
     idx=read_json(active/"index.json",[])
+    if not isinstance(idx, list): idx=[]
+    usable=indexed_usable_profiles(active,idx)
     success=read_json(factory/"successes.json",{})
     quarantine=read_json(factory/"quarantine.json",{})
-    validated=sum(1 for c in idx if str(c.get("SHA256","")).lower() in success)
+    validated=sum(1 for c in usable if str(c.get("SHA256","")).lower() in success)
     last=None
     source="Bundled VPN Gate snapshot" if idx else ""
     mirror=read_json(evidence/"mirror-refresh-last.json",{})
@@ -310,20 +512,37 @@ def status(common, evidence, min_pool=6):
             ts=dt.datetime.fromisoformat(str(last).replace("Z","+00:00"))
             age=round((dt.datetime.now().astimezone()-ts.astimezone()).total_seconds()/3600,2)
         except Exception: pass
+    # Last observed fetch transport only, not an active profile-origin signature.
+    raw_mirrors = mirror.get("usedMirrors")
+    mirrors = [str(u).strip() for u in raw_mirrors if u] if isinstance(raw_mirrors, list) else []
+    if not mirrors and mirror.get("usedMirror"):
+        mirrors = [str(mirror["usedMirror"]).strip()]
+    schemes = {u.split(":", 1)[0].lower() for u in mirrors}
+    if not mirrors:
+        last_fetch_transport = "cached" if mirror else "unknown"
+    elif schemes == {"https"}:
+        last_fetch_transport = "https"
+    elif schemes == {"http"}:
+        last_fetch_transport = "http"
+    else:
+        last_fetch_transport = "mixed"
     generations=len([p for p in (factory/"generations").glob("*") if p.is_dir()]) if (factory/"generations").exists() else 0
     protocols={}
     countries={}
-    for c in idx:
+    for c in usable:
         pr=str(c.get("Protocol","unknown"))
         protocols[pr]=protocols.get(pr,0)+1
         cc=str(c.get("Country","") or "??")
         countries[cc]=countries.get(cc,0)+1
-    metadata_complete=all(bool(str(c.get("Country","")).strip()) for c in idx) if idx else False
+    metadata_complete=all(bool(str(c.get("Country","")).strip()) for c in usable) if usable else False
     obj={
-        "at":now(),"schemaVersion":2,"pool":len(idx),"validated":validated,
-        "standby":max(0,len(idx)-validated),"quarantined":len(quarantine),
+        "at":now(),"schemaVersion":2,"pool":len(idx),"usable":len(usable),
+        "integrityInvalid":len(idx)-len(usable),"validated":validated,
+        "standby":max(0,len(usable)-validated),"quarantined":len(quarantine),
         "generations":generations,"lastRefresh":last,"ageHours":age,
-        "source":source,"healthy":len(idx)>=min_pool,"metadataComplete":metadata_complete,
+        "source":source,"lastFetchTransport":last_fetch_transport,
+        "lastFetchTransportTlsOnly":last_fetch_transport=="https","profileOriginAuthenticated":False,
+        "healthy":len(usable)>=min_pool,"metadataComplete":metadata_complete,
         "protocols":protocols,"countries":countries
     }
     write_json(factory/"status.json",obj)
@@ -346,7 +565,7 @@ def ensure(common,evidence,min_pool=6,max_age=8):
     s=status(common,evidence,min_pool)
     stale=s["ageHours"] is None or s["ageHours"]>max_age
     migration_needed=not bool(s.get("metadataComplete"))
-    if s["pool"]<min_pool or stale or migration_needed:
+    if not s["healthy"] or stale or migration_needed:
         try:
             refresh_snapshot(evidence)
             promote(common,evidence)
@@ -389,9 +608,90 @@ def record(common, mode, sha, host="", ip="", port=0, reason="", observed_ip="",
     write_json(factory/"quarantine.json",quarantine)
     return status(common, common/"evidence")
 
+def cleanup_nm_inline_material(common, profile_file):
+    """Remove only orphaned NetworkManager PEM copies of this OIG cached profile.
+
+    Never follow symlinks, trust a downloaded filepath, delete a referenced PEM,
+    or remove a file that differs from the inline material. Best effort only:
+    ambiguity deliberately leaves the original user-owned data untouched.
+    """
+    result = {"removed": 0, "skipped": "unsafe_or_referenced"}
+    active = (common / "runtime" / "udp-cache").resolve()
+    profile = Path(profile_file)
+    if (not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*\.ovpn", profile.name)
+            or profile.is_symlink() or not profile.is_file()
+            or profile.parent.resolve() != active):
+        return result
+    try:
+        raw = profile.read_text(encoding="utf-8")
+        if not profile_is_data_only(raw):
+            return result
+        pem = {}
+        for tag in ("ca", "cert", "key"):
+            match = re.search(r"(?s)<" + tag + r">\s*(.*?)\s*</" + tag + r">", raw)
+            if not match:
+                return result
+            pem[tag] = match.group(1).strip()
+        directory = Path.home() / ".local/share/networkmanagement/certificates/nm-openvpn"
+        if not directory.is_dir() or directory.is_symlink():
+            return result
+        candidates = []
+        for tag in ("ca", "cert", "key"):
+            file = directory / f"{profile.stem}-{tag}.pem"
+            if file.is_symlink():
+                return result
+            if not file.is_file():
+                continue
+            stat = file.stat()
+            if (stat.st_uid != os.getuid() or stat.st_mode & 0o077
+                    or stat.st_size > 131072
+                    or file.read_text(encoding="utf-8").strip() != pem[tag]):
+                return result
+            candidates.append(file)
+        if not candidates:
+            return result
+
+        # Only delete when a complete NM inventory proves no connection still
+        # references the files. Never treat an nmcli failure as an empty list.
+        all_connections = subprocess.run(
+            ["nmcli", "-t", "-f", "UUID,TYPE", "connection", "show"],
+            capture_output=True, text=True, timeout=5, check=True)
+        vpns = []
+        for line in all_connections.stdout.splitlines():
+            fields = line.split(":")
+            if len(fields) >= 2 and fields[-1] == "vpn":
+                vpns.append(fields[0])
+        if len(vpns) > 100:
+            return result
+        for uuid in vpns:
+            if not re.fullmatch(r"[0-9a-fA-F-]{36}", uuid):
+                return result
+            settings = subprocess.run(
+                ["nmcli", "-g", "vpn.data", "connection", "show", "uuid", uuid],
+                capture_output=True, text=True, timeout=5, check=True)
+            if any(str(file) in settings.stdout for file in candidates):
+                return result
+        # No other NM profile references any of these exact verified copies.
+        removed = 0
+        for file in candidates:
+            if file.is_symlink() or not file.is_file():
+                continue
+            current = file.stat()
+            if current.st_uid != os.getuid() or current.st_mode & 0o077:
+                continue
+            tag = file.stem.rsplit("-", 1)[-1]
+            if file.read_text(encoding="utf-8").strip() != pem.get(tag):
+                continue
+            file.unlink()
+            removed += 1
+        return {"removed": removed, "skipped": None}
+    except (OSError, UnicodeError, ValueError, subprocess.SubprocessError):
+        return result
+
+
 def main():
     ap=argparse.ArgumentParser()
-    ap.add_argument("action",choices=["status","ensure","refresh","success","failure"])
+    ap.add_argument("action",choices=["status","ensure","refresh","success","failure","cleanup-nm"])
     ap.add_argument("--common",required=True)
     ap.add_argument("--sha",default="")
     ap.add_argument("--host",default="")
@@ -400,8 +700,12 @@ def main():
     ap.add_argument("--reason",default="")
     ap.add_argument("--observed-ip",default="")
     ap.add_argument("--country",default="")
+    ap.add_argument("--profile-file",default="")
     args=ap.parse_args()
     common=Path(args.common).resolve()
+    if args.action=="cleanup-nm":
+        print(json.dumps(cleanup_nm_inline_material(common,args.profile_file),separators=(",",":")))
+        return
     evidence=common/"evidence"
     evidence.mkdir(parents=True,exist_ok=True)
     lock=common/"runtime"/"config-factory"/"factory.lock"

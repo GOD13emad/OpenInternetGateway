@@ -27,6 +27,21 @@ function Restore-LatestGeneration {
  Copy-Item (Join-Path $latest.FullName '*') -Destination $active -Recurse -Force
  return (Test-Path (Join-Path $active 'index.json'))
 }
+function Test-UsableIndexedProfile($Item){
+ # The imported index must not select files outside the active pool.
+ $relative=([string]$Item.Profile).Replace([char]92,'/')
+ if($relative -cnotmatch '^runtime/udp-cache/([A-Za-z0-9][A-Za-z0-9_.-]*\.ovpn)$'){return $false}
+ $leaf=$Matches[1]
+ $sha=([string]$Item.SHA256).ToLowerInvariant()
+ if($sha -cnotmatch '^[0-9a-f]{64}$'){return $false}
+ $file=Join-Path $active $leaf
+ try{
+  if(-not(Test-Path -LiteralPath $file -PathType Leaf)){return $false}
+  $entry=Get-Item -LiteralPath $file -ErrorAction Stop
+  if(($entry.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or $entry.Length -gt 131072){return $false}
+  return ((Get-FileHash -LiteralPath $file -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant() -eq $sha)
+ }catch{return $false}
+}
 function Write-Status {
  $idx=Join-Path $active 'index.json'
  $items=@()
@@ -35,15 +50,16 @@ function Write-Status {
    try{$items=@(Get-Content -Raw $idx|ConvertFrom-Json)}catch{$items=@()}
    if($items.Count){$generatedAt=[string]$items[0].GeneratedAt}
  }
+ $usable=@($items|Where-Object {Test-UsableIndexedProfile $_})
  $success=Read-Map $successFile
  $quarantine=Read-Map $quarantineFile
  $validated=0
- foreach($c in $items){if($success.ContainsKey(([string]$c.SHA256).ToLowerInvariant())){$validated++}}
- $standby=[Math]::Max(0,$items.Count-$validated)
+ foreach($c in $usable){if($success.ContainsKey(([string]$c.SHA256).ToLowerInvariant())){$validated++}}
+ $standby=[Math]::Max(0,$usable.Count-$validated)
  $gens=@(Get-ChildItem (Join-Path $factory 'generations') -Directory -ErrorAction SilentlyContinue)
  $protocols=@{}
  $countries=@{}
- foreach($item in $items){
+ foreach($item in $usable){
    $pr=if($item.Protocol){[string]$item.Protocol}else{'unknown'}
    if($protocols.ContainsKey($pr)){$protocols[$pr]=[int]$protocols[$pr]+1}else{$protocols[$pr]=1}
    $cc=if($item.Country){[string]$item.Country}else{'??'}
@@ -59,13 +75,31 @@ function Write-Status {
      if($m.at){$lastRefresh=[string]$m.at}
    }catch{}
  }
+ $lastFetchTransport='unknown'
+ # The transport of the latest feed fetch does not authenticate imported
+ # profiles or last-known-good cached relay configurations.
+ if(Test-Path $mirror){
+   try{
+     $provenance=Get-Content -Raw $mirror|ConvertFrom-Json
+     $urls=@($provenance.usedMirrors|Where-Object {$_})
+     if(-not $urls.Count -and $provenance.usedMirror){$urls=@([string]$provenance.usedMirror)}
+     if(-not $urls.Count){$lastFetchTransport='cached'}
+     else{
+       $schemes=@($urls|ForEach-Object {try{([Uri]([string]$_)).Scheme.ToLowerInvariant()}catch{'unknown'}}|Sort-Object -Unique)
+       if($schemes.Count -eq 1 -and $schemes[0] -in @('http','https')){$lastFetchTransport=$schemes[0]}
+       else{$lastFetchTransport='mixed'}
+     }
+   }catch{$lastFetchTransport='unknown'}
+ }
  $ageHours=$null
  if($lastRefresh){try{$ageHours=[Math]::Round(((Get-Date)-[DateTimeOffset]::Parse($lastRefresh).LocalDateTime).TotalHours,2)}catch{}}
- $metadataComplete=($items.Count -gt 0 -and @($items|Where-Object {[string]::IsNullOrWhiteSpace([string]$_.Country)}).Count -eq 0)
+ $metadataComplete=($usable.Count -gt 0 -and @($usable|Where-Object {[string]::IsNullOrWhiteSpace([string]$_.Country)}).Count -eq 0)
  $obj=[ordered]@{
    at=(Get-Date).ToString('o')
    schemaVersion=2
    pool=$items.Count
+   usable=$usable.Count
+   integrityInvalid=($items.Count-$usable.Count)
    validated=$validated
    standby=$standby
    quarantined=$quarantine.Count
@@ -73,7 +107,10 @@ function Write-Status {
    lastRefresh=$lastRefresh
    ageHours=$ageHours
    source=$source
-   healthy=($items.Count -ge $MinPool)
+   lastFetchTransport=$lastFetchTransport
+   lastFetchTransportTlsOnly=($lastFetchTransport -eq 'https')
+   profileOriginAuthenticated=$false
+   healthy=($usable.Count -ge $MinPool)
    metadataComplete=$metadataComplete
    protocols=$protocols
    countries=$countries
@@ -92,7 +129,7 @@ if($Action -eq 'Ensure'){
  $s=Write-Status
  $stale=$false
  if($null -eq $s.ageHours){$stale=$true}elseif([double]$s.ageHours -gt $MaxAgeHours){$stale=$true}
- if($s.pool -lt $MinPool -or $stale -or -not [bool]$s.metadataComplete){
+ if(-not [bool]$s.healthy -or $stale -or -not [bool]$s.metadataComplete){
    try{& (Join-Path $PSScriptRoot 'Refresh-VpnGateCache.ps1')}catch{
      if(-not(Test-Path (Join-Path $active 'index.json'))){
        if(-not(Restore-LatestGeneration)){throw}

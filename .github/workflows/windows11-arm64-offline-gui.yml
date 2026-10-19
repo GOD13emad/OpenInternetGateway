@@ -1,0 +1,353 @@
+name: Windows 11 ARM64 offline installed GUI compatibility
+
+on:
+  pull_request:
+    paths: [.github/workflows/windows11-arm64-offline-gui.yml]
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  windows11-arm64-emulated-x64:
+    if: ${{ github.event.pull_request.head.repo.full_name == github.repository }}
+    runs-on: windows-11-arm
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+
+      - name: Verify exact candidate source and disposable Windows 11 ARM64
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          git merge-base --is-ancestor dab919f66b555a620af8bf7c7716ccd1a33429d7 HEAD
+          if ($LASTEXITCODE -ne 0) { throw 'SOURCE_BASE_NOT_ANCESTOR' }
+          $changed=@(git diff --name-only dab919f66b555a620af8bf7c7716ccd1a33429d7 HEAD)
+          $allowed=@('.github/workflows/windows11-arm64-offline-gui.yml','.github/workflows/hosted-first-connect-acceptance.yml','app/backend/linux/config_factory.py','app/backend/linux/oig-linux.sh','app/backend/windows/scripts/Headless-Control.ps1','app/backend/windows/scripts/Build-VpnGateUdpCache.ps1','app/backend/windows/scripts/Refresh-VpnGateCache.ps1','app/backend/windows/scripts/Config-Factory.ps1','app/src/main/platform-backend.js','app/src/renderer/app.js','app/src/renderer/index.html','app/src/renderer/styles.css','app/tests/app.test.js','app/tests/native-electron-ipc-smoke.cjs','.github/workflows/build.yml','app/tests/hosted-published-updater-ui.cjs','app/tests/hosted-published-updater-ci.ps1','app/tests/physical-ip-argv.test.js','README.md')
+          if ($changed.Count -ne 19 -or @($changed | Where-Object { $_ -notin $allowed }).Count) { throw 'UNEXPECTED_SOURCE_CHANGE' }
+          $caption=(Get-CimInstance Win32_OperatingSystem).Caption
+          $arch=[System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()
+          if ($caption -notmatch 'Windows 11' -or $arch -ne 'Arm64') { throw 'UNEXPECTED_RUNNER_OS_OR_ARCH' }
+          if ((Get-CimInstance Win32_ComputerSystem).PartOfDomain) { throw 'DOMAIN_JOINED_RUNNER_DENIED' }
+          if (@(Get-NetRoute -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { $_.DestinationPrefix -in @('0.0.0.0/1','128.0.0.0/1') }).Count) { throw 'VPN_ROUTE_PRESENT' }
+          if (Get-Service OVPNConnectorService -ErrorAction SilentlyContinue) { throw 'VPN_SERVICE_PRESENT' }
+          Write-Host "WINDOWS_11_ARM64_EPHEMERAL_PREFLIGHT_PASS $caption $arch"
+
+      - name: Download existing exact-head installer and verify source receipt
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference='Stop'
+          $repo='GOD13emad/OpenInternetGateway'
+          $run=gh api "repos/$repo/actions/runs/39060502419" | ConvertFrom-Json
+          if ($run.head_sha -ne 'dab919f66b555a620af8bf7c7716ccd1a33429d7' -or $run.conclusion -ne 'success') { throw 'SOURCE_RUN_MISMATCH' }
+          $root=Join-Path $env:RUNNER_TEMP 'oig-verified-install'
+          $id=Join-Path $root 'installer'; $proofdir=Join-Path $root 'proof'
+          New-Item -ItemType Directory -Path $id,$proofdir | Out-Null
+          gh run download 39060502419 --repo $repo --name windows-installer --dir $id
+          if ($LASTEXITCODE -ne 0) { throw 'INSTALLER_DOWNLOAD_FAIL' }
+          gh run download 39060502419 --repo $repo --name windows-desktop-smoke-evidence --dir $proofdir
+          if ($LASTEXITCODE -ne 0) { throw 'PRIOR_RECEIPT_DOWNLOAD_FAIL' }
+          $proof=Get-Content (Join-Path $proofdir 'oig-desktop-smoke-receipt.json') -Raw | ConvertFrom-Json
+          $file=Join-Path $id 'OpenInternetGateway-Setup-2.5.19.exe'
+          $sha=(Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($proof.pass -ne $true -or $proof.vpnConnectionsAttempted -ne $false -or
+              $sha -ne $proof.verifiedInstallerSha256.ToLowerInvariant()) { throw 'SOURCE_RECEIPT_DIGEST_INVALID' }
+          Add-Content -Path $env:GITHUB_ENV -Value "OIG_INSTALLER=$file"
+          Add-Content -Path $env:GITHUB_ENV -Value "OIG_SHA=$sha"
+          Write-Host "EXACT_DAB919F_INSTALLER_SHA_VERIFIED $sha"
+
+      - name: Install NSIS and test offline Overview Settings Tray
+        shell: pwsh
+        timeout-minutes: 9
+        run: |
+          $ErrorActionPreference='Stop'
+          $from='disposable-GitHub-hosted-Windows-Server-2025-packaged-dashboard-navigation-tray-render-only'
+          $to='Windows-11-ARM64-x64-emulation-offline-installed-dashboard-navigation-tray-render-only'
+          $original=Get-Content 'app/tests/hosted-desktop-screenshot.ps1' -Raw
+          if ($original.Split($from).Count -ne 2) { throw 'RECEIPT_SCOPE_ANCHOR_CHANGED' }
+          $script=Join-Path $env:RUNNER_TEMP 'oig-arm64-offline-smoke.ps1'
+          [IO.File]::WriteAllText($script,$original.Replace($from,$to),[Text.UTF8Encoding]::new($false))
+          $receipt=Join-Path $env:RUNNER_TEMP 'oig-arm64-gui-receipt.json'
+          & $script -Installer $env:OIG_INSTALLER -ExpectedSha256 $env:OIG_SHA -Receipt $receipt
+          if (-not (Test-Path $receipt)) { throw 'MISSING_OFFLINE_GUI_RECEIPT' }
+          $r=Get-Content $receipt -Raw | ConvertFrom-Json
+          if ($r.pass -ne $true -or $r.scope -ne $to -or
+              $r.verifiedInstallerSha256 -ne $env:OIG_SHA -or
+              $r.disconnectedBeforeAndAfter -ne $true -or
+              $r.vpnConnectionsAttempted -ne $false -or
+              $r.navigationAndTrayProbe.pass -ne $true -or
+              $r.navigationAndTrayProbe.closeToTray -ne $true -or
+              $r.navigationAndTrayProbe.navigation.powerControlInvoked -ne $false) { throw 'WIN11_ARM64_GUI_EVIDENCE_NOT_ACCEPTED' }
+          $meta=[ordered]@{
+            installerSourceCommit='dab919f66b555a620af8bf7c7716ccd1a33429d7'
+            installerSourceRun=39060502419
+            installerSha256=$env:OIG_SHA
+            osCaption=(Get-CimInstance Win32_OperatingSystem).Caption
+            osArchitecture=[System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()
+            scope='Windows 11 ARM64 under x64 emulation, NOT native Windows 11 x64'
+            VPNActionAttempted=$false
+            signedPublisherVerified=$false
+            guiReceiptSha256=(Get-FileHash -LiteralPath $receipt -Algorithm SHA256).Hash
+          }
+          [IO.File]::WriteAllText((Join-Path $env:RUNNER_TEMP 'oig-arm64-provenance.json'),
+              ($meta|ConvertTo-Json -Depth 5)+[Environment]::NewLine,[Text.UTF8Encoding]::new($false))
+          Write-Host 'WIN11_ARM64_EMULATED_X64_OFFLINE_INSTALLED_GUI_PASS'
+
+      - name: Verify offline in-place 2.5.18 to 2.5.19 upgrade and state retention
+        shell: pwsh
+        timeout-minutes: 9
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference='Stop'
+          if ($env:RUNNER_ENVIRONMENT -ne 'github-hosted' -or $env:GITHUB_REPOSITORY -ne 'GOD13emad/OpenInternetGateway') { throw 'GITHUB_DISPOSABLE_RUNNER_ONLY' }
+          if ([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString() -ne 'Arm64' -or
+              (Get-CimInstance Win32_OperatingSystem).Caption -notmatch 'Windows 11') { throw 'WIN11_ARM64_REQUIRED' }
+          $app=Join-Path $env:LOCALAPPDATA 'Programs\open-internet-gateway\Open Internet Gateway.exe'
+          $state=Join-Path $env:LOCALAPPDATA 'OpenInternetGateway\state'
+          $intent=Join-Path $state 'desired-state.json'
+          if (!(Test-Path $app) -or !(Test-Path $intent) -or (Get-Item $app).VersionInfo.ProductVersion -notlike '2.5.19*') { throw 'PREVIOUS_GUI_SMOKE_NOT_PRESENT' }
+          if (@(Get-CimInstance Win32_Process -Filter "Name='Open Internet Gateway.exe'" -ErrorAction SilentlyContinue).Count) { throw 'APP_ALREADY_RUNNING' }
+          function Assert-Offline {
+            if (@(Get-NetRoute -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { $_.DestinationPrefix -in @('0.0.0.0/1','128.0.0.0/1') }).Count) { throw 'VPN_ROUTES_PRESENT' }
+            $svc=Get-Service OVPNConnectorService -ErrorAction SilentlyContinue
+            if ($svc -and $svc.Status -ne 'Stopped') { throw 'CONNECTOR_SERVICE_ACTIVE' }
+            if ((Get-Content $intent -Raw|ConvertFrom-Json).desired -ne 'off') { throw 'DESIRED_VPN_STATE_ACTIVE' }
+          }
+          Assert-Offline
+          $tag=gh api repos/GOD13emad/OpenInternetGateway/releases/tags/v2.5.18|ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or $tag.tag_name -ne 'v2.5.18') { throw 'RELEASE_TAG_UNVERIFIED' }
+          $asset=@($tag.assets | Where-Object { $_.name -eq 'OpenInternetGateway-Setup-2.5.18.exe' })
+          $oldHash='ed93dcadde96efec14c8de12b3e0074f12b826b968f4146330c496d816ecdb3d'
+          if ($asset.Count -ne 1 -or $asset[0].digest -ne ('sha256:'+$oldHash) -or $asset[0].size -ne 203778543) { throw 'OLDER_RELEASE_DIGEST_CHANGED' }
+          $dir=Join-Path $env:RUNNER_TEMP 'oig-verified-previous-version'
+          New-Item -ItemType Directory -Path $dir | Out-Null
+          gh release download v2.5.18 --repo GOD13emad/OpenInternetGateway --pattern 'OpenInternetGateway-Setup-2.5.18.exe' --dir $dir
+          if ($LASTEXITCODE -ne 0) { throw 'OLDER_INSTALLER_DOWNLOAD_FAILED' }
+          $old=Join-Path $dir 'OpenInternetGateway-Setup-2.5.18.exe'
+          if ((Get-FileHash $old -Algorithm SHA256).Hash.ToLowerInvariant() -ne $oldHash) { throw 'OLDER_INSTALLER_HASH_MISMATCH' }
+          $p=Start-Process -FilePath $old -ArgumentList '/S' -PassThru -Wait
+          if ($p.ExitCode -ne 0 -or (Get-Item $app).VersionInfo.ProductVersion -notlike '2.5.18*') { throw 'OLDER_VERSION_INSTALL_NOT_PROVEN' }
+          Assert-Offline
+          $marker=Join-Path $state 'ci-upgrade-preservation-marker.json'
+          if (Test-Path $marker) { throw 'PREEXISTING_MARKER_REFUSED' }
+          $mark='{"test":"disposable-arm64-in-place-nsis","preserve":true}'
+          [IO.File]::WriteAllText($marker,$mark,[Text.UTF8Encoding]::new($false))
+          $newHash=(Get-FileHash $env:OIG_INSTALLER -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($newHash -ne $env:OIG_SHA) { throw 'CANDIDATE_HASH_CHANGED' }
+          $p=Start-Process -FilePath $env:OIG_INSTALLER -ArgumentList '/S' -PassThru -Wait
+          if ($p.ExitCode -ne 0 -or (Get-Item $app).VersionInfo.ProductVersion -notlike '2.5.19*') { throw 'UPGRADE_INSTALL_FAILED' }
+          if ((Get-Content -Raw $marker) -ne $mark) { throw 'UPGRADE_LOST_USER_STATE' }
+          Assert-Offline
+          $save=$env:RUNNER_TEMP
+          $post=Join-Path $save 'oig-post-upgrade-probe'
+          New-Item -ItemType Directory -Path $post|Out-Null
+          try {
+            $env:RUNNER_TEMP=$post
+            $receipt=Join-Path $post 'oig-upgrade-gui-receipt.json'
+            & (Join-Path $save 'oig-arm64-offline-smoke.ps1') -Receipt $receipt
+            if (!(Test-Path $receipt)) { throw 'UPGRADED_GUI_RECEIPT_MISSING' }
+            $r=Get-Content -Raw $receipt|ConvertFrom-Json
+            if (!$r.pass -or !$r.navigationAndTrayProbe.pass -or !$r.navigationAndTrayProbe.closeToTray -or
+                $r.vpnConnectionsAttempted -ne $false -or !$r.disconnectedBeforeAndAfter) { throw 'POST_UPGRADE_GUI_NOT_ACCEPTED' }
+          } finally { $env:RUNNER_TEMP=$save }
+          Assert-Offline
+          if ((Get-Content -Raw $marker) -ne $mark) { throw 'MARKER_NOT_PRESERVED_AFTER_GUI' }
+          $proof=[ordered]@{
+            scope='Disposable Windows 11 ARM64 emulated x64 NSIS in-place version transition; NOT application automatic updater'
+            oldVersion='2.5.18'
+            newVersion='2.5.19'
+            oldInstallerSha256=$oldHash
+            newInstallerSha256=$newHash
+            markerPreserved=$true
+            guiAfterUpgrade=$true
+            offlineBeforeAndAfter=$true
+            applicationUpdaterTested=$false
+            ownerWin11X64Acceptance=$false
+            guiReceiptSha256=(Get-FileHash $receipt -Algorithm SHA256).Hash
+          }
+          [IO.File]::WriteAllText((Join-Path $save 'oig-arm64-upgrade-receipt.json'),($proof|ConvertTo-Json -Depth 4)+[Environment]::NewLine,[Text.UTF8Encoding]::new($false))
+          Write-Host 'WIN11_ARM64_OFFLINE_NSIS_2518_TO_2519_UPGRADE_PASS'
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+
+      - name: Exercise actual backend updater helper and GitHub checksum on disposable Windows 11 ARM64
+        shell: pwsh
+        timeout-minutes: 9
+        run: |
+          $ErrorActionPreference='Stop'
+          if ($env:RUNNER_ENVIRONMENT -ne 'github-hosted' -or $env:GITHUB_REPOSITORY -ne 'GOD13emad/OpenInternetGateway') { throw 'DISPOSABLE_RUNNER_ONLY' }
+          if ([Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString() -ne 'Arm64' -or
+              (Get-CimInstance Win32_OperatingSystem).Caption -notmatch 'Windows 11') { throw 'WINDOWS_11_ARM64_ONLY' }
+          $root=Join-Path $env:LOCALAPPDATA 'OpenInternetGateway'
+          $exe=Join-Path $env:LOCALAPPDATA 'Programs\open-internet-gateway\Open Internet Gateway.exe'
+          $pwsh=Join-Path (Split-Path -Parent $exe) 'resources\pwsh\pwsh.exe'
+          $state=Join-Path $root 'state\desired-state.json'
+          $marker=Join-Path $root 'state\ci-upgrade-preservation-marker.json'
+          if (!(Test-Path -LiteralPath $exe) -or !(Test-Path -LiteralPath $pwsh) -or
+              !(Test-Path -LiteralPath $state) -or !(Test-Path -LiteralPath $marker)) { throw 'PREEXISTING_INSTALLED_APP_REQUIRED' }
+          if ((Get-Item -LiteralPath $exe).VersionInfo.ProductVersion -notlike '2.5.19*') { throw 'CURRENT_INSTALLED_VERSION_CHANGED' }
+          $originalMarker=Get-Content -LiteralPath $marker -Raw
+          function Assert-Offline {
+            if ((Get-Content $state -Raw | ConvertFrom-Json).desired -ne 'off') { throw 'VPN_DESIRED_ON' }
+            if (@(Get-NetRoute -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { $_.DestinationPrefix -in @('0.0.0.0/1','128.0.0.0/1') }).Count) { throw 'PROTECTED_ROUTE_PRESENT' }
+            $svc=Get-Service OVPNConnectorService -ErrorAction SilentlyContinue
+            if ($svc -and $svc.Status -ne 'Stopped') { throw 'CONNECTOR_NOT_STOPPED' }
+          }
+          Assert-Offline
+          $src=Join-Path $env:RUNNER_TEMP 'oig-updater-backend-test.cjs'
+          if (Test-Path -LiteralPath $src) { throw 'STAGED_UPDATER_TEST_ALREADY_EXISTS' }
+          $js=@'
+          'use strict';
+          const fs=require('node:fs');
+          const path=require('node:path');
+          const Backend=require(path.resolve('app/src/main/platform-backend.js'));
+          const root=path.join(process.env.LOCALAPPDATA,'OpenInternetGateway');
+          const program=path.join(process.env.LOCALAPPDATA,'Programs','open-internet-gateway');
+          const exe=path.join(program,'Open Internet Gateway.exe');
+          const result=path.join(process.env.RUNNER_TEMP,'oig-updater-api-result.json');
+          (async()=>{
+            // Simulated source version; the tested updater METHOD implementations are exact candidate code.
+            const b=new Backend({version:'2.5.18',resourcesPath:path.join(program,'resources'),
+              appPath:path.resolve('app'),userData:root,emit:()=>{}});
+            b.platform='win32';b.backendRoot=root;
+            const info=await b.updateInfo(true);
+            if(info.currentVersion!=='2.5.18'||info.latestVersion!=='2.5.19'||
+              !info.updateAvailable||!info.checksumsUrl||
+              info.asset?.name!=='OpenInternetGateway-Setup-2.5.19.exe'||
+              info.asset.sha256!=='761637b5d49f37858973300ec2e9b1bb2b32c684ebabe86f1e8718b4480685db')
+              throw Error('GITHUB_UPDATE_INFO_RELEASE_CONTRACT_FAILED');
+            const downloaded=await b.downloadUpdate();
+            if(!downloaded.ok||!fs.existsSync(downloaded.path)|| downloaded.sha256!==info.asset.sha256)
+              throw Error('GITHUB_RELEASE_CHECKSUM_DOWNLOAD_FAILED');
+            const applied=await b.launchDownloadedUpdate(downloaded,{appPid:process.pid,currentExecutable:exe});
+            if(!applied.ok||!applied.applying||!applied.restart||applied.installScope!=='current-user')
+              throw Error('UPDATER_HELPER_NOT_LAUNCHED');
+            fs.writeFileSync(result,JSON.stringify({
+              sourceVersionOverride:'2.5.18',
+              sourceVersionOverridePurpose:'Exercise candidate 2.5.19 backend update methods against public release v2.5.19; not an actual user GUI click or real older client code',
+              sourceBackendCommit:require('node:child_process').execFileSync('git',['rev-parse','HEAD']).toString().trim(),
+              latestVersion:info.latestVersion,
+              sourceChecksum:info.asset.sha256,
+              publicReleaseDownloadBytes:fs.statSync(downloaded.path).size,
+              apiInfoVerified:true,checksumVerified:true,
+              launchReturnedApplying:applied.applying,helperResult:applied.resultFile
+            })+'\n',{encoding:'utf8'});
+          })().catch(e=>{console.error(e.stack||String(e));process.exitCode=1});
+          '@
+          [IO.File]::WriteAllText($src,$js,[Text.UTF8Encoding]::new($false))
+          # Read-only startup latency check, same packaged PowerShell executable and hidden window mode.
+          $watch=[Diagnostics.Stopwatch]::StartNew()
+          & $pwsh -NoProfile -WindowStyle Hidden -Command "Write-Output 'OIG_PWSH_READY'"
+          $watch.Stop()
+          if ($LASTEXITCODE -ne 0) { throw 'PACKAGED_PWSH_STANDALONE_PREFLIGHT_FAILED' }
+          Write-Host "PACKAGED_PWSH_COLD_START_MS=$($watch.ElapsedMilliseconds)"
+          node --check $src
+          if ($LASTEXITCODE -ne 0) { throw 'NODE_HARNESS_SYNTAX_FAILED' }
+          & node $src
+          if ($LASTEXITCODE -ne 0) {
+            # Diagnostic only: never silently accept a delayed receipt as success.
+            $folder=Join-Path $root 'updates\v2.5.19'
+            $started=Join-Path $folder 'apply-result.json.started'
+            $result=Join-Path $folder 'apply-result.json'
+            Start-Sleep -Seconds 18
+            $diag=[ordered]@{
+              failure='ACTUAL_BACKEND_UPDATER_FAILED'
+              startedReceiptExists=(Test-Path -LiteralPath $started -PathType Leaf)
+              resultReceiptExists=(Test-Path -LiteralPath $result -PathType Leaf)
+              helperScriptExists=(Test-Path (Join-Path $folder 'apply-update.ps1') -PathType Leaf)
+              isolatedRuntimeExists=(Test-Path (Join-Path $folder 'pwsh-helper\pwsh.exe') -PathType Leaf)
+              installerExists=(Test-Path (Join-Path $folder 'OpenInternetGateway-Setup-2.5.19.exe') -PathType Leaf)
+              installedProductVersion=(Get-Item $exe).VersionInfo.ProductVersion
+            }
+            # Read-only deep triage for an updater helper that never produced its startup receipt.
+            $isolated=Join-Path $folder 'pwsh-helper\pwsh.exe'
+            if(Test-Path $isolated -PathType Leaf) {
+              $diag['bundledVsCopiedPwshShaMatch']=((Get-FileHash $pwsh -Algorithm SHA256).Hash -eq (Get-FileHash $isolated -Algorithm SHA256).Hash)
+              $sw=[Diagnostics.Stopwatch]::StartNew()
+              $version=& $isolated -NoProfile -WindowStyle Hidden -Command '$PSVersionTable.PSVersion.ToString()' 2>&1
+              $sw.Stop()
+              $diag['copiedPwshExitCode']=$LASTEXITCODE
+              $diag['copiedPwshStartMs']=$sw.ElapsedMilliseconds
+              $diag['copiedPwshVersionOrError']=[string]($version|Select-Object -First 1)
+            }
+            $scriptFile=Join-Path $folder 'apply-update.ps1'
+            if(Test-Path $scriptFile -PathType Leaf) {
+              $tokens=$null;$errors=$null
+              [void][Management.Automation.Language.Parser]::ParseFile($scriptFile,[ref]$tokens,[ref]$errors)
+              $diag['generatedHelperParseErrorCount']=@($errors).Count
+              if(@($errors).Count){$diag['firstParseError']=$errors[0].Message}
+            }
+            $diag['activeHelperPwshProcesses']=@((Get-CimInstance Win32_Process -Filter "Name='pwsh.exe'" -ErrorAction SilentlyContinue |
+              Where-Object { $_.ExecutablePath -like '*pwsh-helper*' } |
+              Select-Object ProcessId,ExecutablePath))
+            if(Test-Path $result -PathType Leaf){
+              try{ $diag['lateResult']=(Get-Content -Raw $result|ConvertFrom-Json|Select-Object ok,error,version,installScope) }catch{}
+            }
+            $diagFile=Join-Path $env:RUNNER_TEMP 'oig-backend-updater-failure-diagnostic.json'
+            [IO.File]::WriteAllText($diagFile,($diag|ConvertTo-Json -Depth 5)+[Environment]::NewLine,[Text.UTF8Encoding]::new($false))
+            Write-Host "UPDATER_FAIL_DIAGNOSTIC=$($diag|ConvertTo-Json -Depth 5 -Compress)"
+            throw 'ACTUAL_BACKEND_UPDATER_FAILED'
+          }
+          $nodeReceipt=Join-Path $env:RUNNER_TEMP 'oig-updater-api-result.json'
+          if (!(Test-Path $nodeReceipt -PathType Leaf)) { throw 'BACKEND_UPDATER_RESULT_MISSING' }
+          $n=Get-Content $nodeReceipt -Raw|ConvertFrom-Json
+          if (!$n.apiInfoVerified -or !$n.checksumVerified -or !$n.launchReturnedApplying -or
+              $n.sourceChecksum -ne '761637b5d49f37858973300ec2e9b1bb2b32c684ebabe86f1e8718b4480685db') { throw 'BACKEND_UPDATER_METADATA_UNVERIFIED' }
+          $result=$n.helperResult
+          $deadline=(Get-Date).AddMinutes(4)
+          while (!(Test-Path -LiteralPath $result -PathType Leaf) -and (Get-Date) -lt $deadline) { Start-Sleep -Seconds 2 }
+          if (!(Test-Path -LiteralPath $result -PathType Leaf)) { throw 'UPDATER_HELPER_RESULT_TIMED_OUT' }
+          $r=Get-Content $result -Raw|ConvertFrom-Json
+          if ($r.ok -ne $true -or $r.version -ne '2.5.19' -or
+              $r.sha256 -ne $n.sourceChecksum -or $r.installScope -ne 'current-user' -or
+              $r.exitCode -ne 0 -or !(Test-Path $r.target) -or
+              (Get-Item $r.target).VersionInfo.ProductVersion -notlike '2.5.19*') { throw 'UPDATER_INSTALL_RESULT_NOT_ACCEPTED' }
+          if ((Get-Content -Raw $marker) -ne $originalMarker) { throw 'BACKEND_UPDATER_LOST_USER_STATE' }
+          Assert-Offline
+          # The real updater restarts the installed app; terminate only on this disposable runner.
+          Get-CimInstance Win32_Process -Filter "Name='Open Internet Gateway.exe'" -ErrorAction SilentlyContinue |
+            ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+          $receipt=[ordered]@{
+            scope='Disposable Windows 11 Enterprise ARM64, x64 package under emulation'
+            sourceCommit=(git rev-parse HEAD).Trim()
+            testHeadCommit=$env:GITHUB_SHA
+            backendRealMethods=@('updateInfo','downloadUpdate','launchDownloadedUpdate')
+            sourceVersionOverride='2.5.18'
+            latestRelease='2.5.19'
+            publicReleaseChecksumVerified=$true
+            publicAssetSha256=$n.sourceChecksum
+            downloadedBytes=$n.publicReleaseDownloadBytes
+            actualPwshUpdateHelper=$true
+            installerExitCode=$r.exitCode
+            resultSha256=(Get-FileHash -LiteralPath $result -Algorithm SHA256).Hash
+            markerPreserved=$true
+            offlineAfter=$true
+            UIUpdateButtonClicked=$false
+            runningOldInstalledAppUpgraded=$false
+            ownerWin11X64Acceptance=$false
+          }
+          [IO.File]::WriteAllText((Join-Path $env:RUNNER_TEMP 'oig-backend-updater-e2e-receipt.json'),
+              ($receipt|ConvertTo-Json -Depth 5)+[Environment]::NewLine,[Text.UTF8Encoding]::new($false))
+          Write-Host 'WIN11_ARM64_ACTUAL_BACKEND_GITHUB_UPDATE_INSTALL_HELPER_PASS'
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: win11-arm64-offline-compatibility-evidence
+          path: |
+            ${{ runner.temp }}/oig-arm64-gui-receipt.json
+            ${{ runner.temp }}/oig-arm64-provenance.json
+            ${{ runner.temp }}/oig-arm64-upgrade-receipt.json
+            ${{ runner.temp }}/oig-backend-updater-e2e-receipt.json
+            ${{ runner.temp }}/oig-updater-api-result.json
+            ${{ runner.temp }}/oig-backend-updater-failure-diagnostic.json
+            ${{ runner.temp }}/oig-installed-dashboard.png
+            ${{ runner.temp }}/oig-desktop-navigation-probe.json
+          retention-days: 7
+          if-no-files-found: warn

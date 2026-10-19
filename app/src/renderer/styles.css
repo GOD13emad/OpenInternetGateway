@@ -74,6 +74,8 @@ html[data-theme="light"] .panel{background:var(--panel)}
 .connections-panel{padding:22px;min-height:520px}
 .connection-tools{gap:18px;align-items:flex-end}.connection-tools h3{margin:4px 0 5px}.panel-note,.measurement-note{margin:0;color:var(--muted);font-size:10px;line-height:1.5}
 .panel-note{max-width:650px}.measurement-note{margin-top:12px}
+.relay-identity-note{border:1px solid rgba(255,199,102,.25);border-radius:11px;background:rgba(255,199,102,.06);color:var(--warn);padding:9px 11px;font-size:11px;line-height:1.5;max-width:700px;margin:12px 0 0}
+.connection-copy .relay-identity-note{margin:11px auto 0;max-width:420px;color:var(--warn);font-size:10px}
 .connection-controls{display:flex;gap:8px;align-items:center;flex-wrap:wrap;justify-content:flex-end}
 .select-control{border:1px solid var(--line);background:var(--panel-strong);color:var(--text);border-radius:11px;padding:8px 11px;font-size:11px;min-width:145px}
 .benchmark-summary{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin:18px 0}

@@ -4,6 +4,9 @@ $ErrorActionPreference='Stop'
 $Root=Split-Path -Parent $PSScriptRoot
 $csv=Join-Path $Root 'evidence\vpngate-mirror-api.csv'
 if(-not(Test-Path $csv)){throw 'VPN Gate mirror API cache missing.'}
+$MaxCachedCsvBytes=72*1024*1024
+$MaxCsvLineBytes=256*1024
+if((Get-Item -LiteralPath $csv).Length -gt $MaxCachedCsvBytes){throw 'VPN Gate mirror CSV exceeds size limit.'}
 
 $factory=Join-Path $Root 'runtime\config-factory'
 $stagingRoot=Join-Path $factory 'staging'
@@ -22,16 +25,85 @@ if(Test-Path $successFile){try{$success=Get-Content -Raw $successFile|ConvertFro
 $stage=Join-Path $stagingRoot ([guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Force -Path $stage|Out-Null
 
+function Test-AllowedRelayIp([Net.IPAddress]$Address){
+ if($null -eq $Address -or $Address.AddressFamily -ne [Net.Sockets.AddressFamily]::InterNetwork){return $false}
+ $b=$Address.GetAddressBytes()
+ $a=[int]$b[0];$c=[int]$b[1]
+ if($a -eq 0 -or $a -eq 10 -or $a -eq 127 -or $a -ge 224){return $false}
+ if($a -eq 100 -and $c -ge 64 -and $c -le 127){return $false}
+ if($a -eq 169 -and $c -eq 254){return $false}
+ if($a -eq 172 -and $c -ge 16 -and $c -le 31){return $false}
+ if($a -eq 192 -and (($c -eq 0 -and [int]$b[2] -eq 0) -or $c -eq 168)){return $false}
+ if($a -eq 198 -and $c -in @(18,19)){return $false}
+ return $true
+}
+
+function Test-SafePublicVpnProfile([string]$text){
+ $ls=$text -split '[\r\n]+'
+ # Public OpenVPN profiles are data only: explicitly allow known client directives.
+ # Unlisted directives may invoke local scripts, manage sockets or write files.
+ if([Text.Encoding]::UTF8.GetByteCount($text) -gt 131072 -or $text.Contains([char]0)){return $false}
+ $allowed=@('client','dev','proto','remote','cipher','data-ciphers','data-ciphers-fallback','auth','resolv-retry','nobind','persist-key','persist-tun','verb','mute','tun-mtu','mssfix','sndbuf','rcvbuf','reneg-sec','key-direction','auth-nocache','explicit-exit-notify','tls-client','remote-cert-tls','verify-x509-name','tls-version-min','tls-version-max','tls-cipher','tls-ciphersuites','ping','ping-restart','ping-exit','keepalive','connect-retry','connect-retry-max','connect-timeout','server-poll-timeout')
+ $allowedBlocks=@('ca','cert','key','tls-auth','tls-crypt','tls-crypt-v2')
+ $openBlock='';$seenOps=@{};$seenBlocks=@{};$unsafe=$false
+ foreach($rawLine in $ls){
+   $v=([string]$rawLine).Trim()
+   if(-not $v -or $v.StartsWith('#') -or $v.StartsWith(';')){continue}
+   if($openBlock){
+     if($v.ToLowerInvariant() -eq ('</'+$openBlock+'>')){$openBlock=''}
+     elseif($v -match '^</?[^>]+>$'){$unsafe=$true;break}
+     continue
+   }
+   if($v -match '^<([A-Za-z][A-Za-z0-9-]*)>$'){
+     $tag=$Matches[1].ToLowerInvariant()
+     if($tag -notin $allowedBlocks -or $seenBlocks.ContainsKey($tag)){$unsafe=$true;break}
+     $seenBlocks[$tag]=1;$openBlock=$tag;continue
+   }
+   if($v.StartsWith('<')){$unsafe=$true;break}
+   $fields=@($v -split '\s+')
+   $opt=$fields[0].ToLowerInvariant()
+   if($opt -notin $allowed){$unsafe=$true;break}
+   # Imported profiles cannot disable crypto, including a NONE cipher-list
+   # member that would otherwise survive in a colon-delimited list.
+   if($opt -in @('cipher','auth','data-ciphers','data-ciphers-fallback')){
+     if($fields.Count -ne 2 -or 'none' -in ($fields[1].ToLowerInvariant() -split ':')){$unsafe=$true;break}
+   }
+   $seenOps[$opt]=[int]$seenOps[$opt]+1
+   if($opt -eq 'remote-cert-tls' -and ($fields.Count -ne 2 -or $fields[1] -ine 'server' -or $seenOps[$opt] -ne 1)){$unsafe=$true;break}
+   if($opt -in @('client','dev','proto','remote') -and $seenOps[$opt] -ne 1){$unsafe=$true;break}
+   if($opt -eq 'remote'){
+     if($fields.Count -ne 3){$unsafe=$true;break}
+     $parsedIp=$null
+     if(-not [Net.IPAddress]::TryParse($fields[1],[ref]$parsedIp) -or $parsedIp.AddressFamily -ne [Net.Sockets.AddressFamily]::InterNetwork){$unsafe=$true;break}
+     $parsedPort=0
+     if(-not [int]::TryParse($fields[2],[ref]$parsedPort) -or $parsedPort -lt 1 -or $parsedPort -gt 65535){$unsafe=$true;break}
+   }
+ }
+ if($unsafe -or $openBlock){return $false}
+ if(@('client','dev','proto','remote')|Where-Object {$seenOps[$_] -ne 1}){return $false}
+ if(@('ca','cert','key')|Where-Object {$seenBlocks[$_] -ne 1}){return $false}
+ return $true
+}
+
+function Add-ServerRole([string]$text){
+ # Server KU/EKU alone does not establish independent relay identity.
+ if($text -match '(?mi)^remote-cert-tls\s+server\s*$'){return $text}
+ return ($text.TrimEnd([char]13,[char]10)+[Environment]::NewLine+'remote-cert-tls server'+[Environment]::NewLine)
+}
+
 $rows=@()
 $seen=@{}
 foreach($line in Get-Content -LiteralPath $csv){
+ if($line.Length -gt $MaxCsvLineBytes){continue}
  if(-not $line -or $line.StartsWith('*') -or $line.StartsWith('#')){continue}
  $p=$line -split ','
  if($p.Count -lt 15){continue}
  $country=([string]$p[6]).Trim().ToUpperInvariant();$countryName=([string]$p[5]).Trim()
  if([string]::IsNullOrWhiteSpace($country)){continue}
- try{$text=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($p[-1].Trim()))}catch{continue}
+ if(([string]$p[-1]).Length -gt $MaxCsvLineBytes){continue}
+  try{$text=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($p[-1].Trim()))}catch{continue}
  $ls=$text -split '[\r\n]+'
+ if(-not(Test-SafePublicVpnProfile $text)){continue}
  $proto=($ls|Where-Object {$_ -match '^proto\s+'}|Select-Object -First 1)
  $remote=($ls|Where-Object {$_ -match '^remote\s+'}|Select-Object -First 1)
  $transport=$null;$transportRank=9
@@ -40,9 +112,15 @@ foreach($line in Get-Content -LiteralPath $csv){
  else{continue}
  if($remote -notmatch '^remote\s+([0-9\.]+)\s+(\d+)'){continue}
  $ip=$Matches[1];$port=[int]$Matches[2]
+ # Reject mismatched CSV metadata and OpenVPN destination before deduplication.
+ $csvIp=$null;$remoteIp=$null
+ if(-not([Net.IPAddress]::TryParse(([string]$p[1]).Trim(),[ref]$csvIp)) -or
+    -not([Net.IPAddress]::TryParse($ip,[ref]$remoteIp)) -or
+    $csvIp.AddressFamily -ne [Net.Sockets.AddressFamily]::InterNetwork -or
+    -not $csvIp.Equals($remoteIp) -or
+    -not(Test-AllowedRelayIp $remoteIp)){continue}
  $key=($transport+':'+$ip+':'+$port)
  if($seen.ContainsKey($key)){continue}
- $seen[$key]=$true
  if($text -notmatch '(?m)^client\s*$'){continue}
  if($text -notmatch '(?m)^dev\s+tun\s*$'){continue}
  if($text -notmatch '(?s)<ca>.+?</ca>'){continue}
@@ -50,9 +128,17 @@ foreach($line in Get-Content -LiteralPath $csv){
  if($text -notmatch '(?s)<key>.+?</key>'){continue}
  # Treat public profiles as data, never executable local policy.
  if($text -match '(?mi)^\s*(?:script-security|up|down|route-up|route-pre-down|ipchange|plugin|client-connect|client-disconnect|learn-address)'){continue}
+ # A malformed provider metric must reject this row, not abort pool refresh.
+ # Parse before reserving the endpoint so a later valid duplicate survives.
+ $scoreValue=[long]0;$speedValue=[long]0;$sessionValue=[int]0
+ if(-not([long]::TryParse(([string]$p[2]).Trim(),[ref]$scoreValue)) -or
+    -not([long]::TryParse(([string]$p[4]).Trim(),[ref]$speedValue)) -or
+    -not([int]::TryParse(([string]$p[7]).Trim(),[ref]$sessionValue))){continue}
+ # Only safe, complete profiles can reserve a deduplicated endpoint.
+ $seen[$key]=$true
  $rows += [pscustomobject]@{
-   Host=$p[0];IP=$ip;Score=[int64]$p[2];Ping=$p[3];Speed=[int64]$p[4];
-   Sessions=[int]$p[7];Port=$port;Text=$text;Source='VPNGate';
+   Host=$p[0];IP=$ip;Score=$scoreValue;Ping=$p[3];Speed=$speedValue;
+   Sessions=$sessionValue;Port=$port;Text=(Add-ServerRole $text);Source='VPNGate';
    Protocol=$transport;TransportRank=$transportRank;Country=$country;CountryName=$countryName
  }
 }
@@ -103,20 +189,45 @@ foreach($wrap in $oldSorted){
  $o=$wrap.Item
  $sha=([string]$o.SHA256).ToLowerInvariant()
  if($meta|Where-Object {([string]$_.SHA256).ToLowerInvariant() -eq $sha}){continue}
- $oldPath=if([IO.Path]::IsPathRooted([string]$o.Profile)){[string]$o.Profile}else{Join-Path $Root ([string]$o.Profile)}
- if(-not(Test-Path $oldPath)){continue}
- if((Get-FileHash -Algorithm SHA256 $oldPath).Hash.ToLowerInvariant() -ne $sha){continue}
- $text=Get-Content -Raw $oldPath
+ # Match Config Factory Status: an old index cannot import a file outside
+ # the active cache, a reparse point, or an unbounded file.
+ $relative=([string]$o.Profile).Replace([char]92,'/')
+ if($relative -cnotmatch '^runtime/udp-cache/([A-Za-z0-9][A-Za-z0-9_.-]*\.ovpn)$'){continue}
+ $leaf=$Matches[1]
+ if($sha -cnotmatch '^[0-9a-f]{64}$'){continue}
+ $oldPath=Join-Path $active $leaf
+ try{
+   if(-not(Test-Path -LiteralPath $oldPath -PathType Leaf)){continue}
+   $entry=Get-Item -LiteralPath $oldPath -ErrorAction Stop
+   if(($entry.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or $entry.Length -gt 131072){continue}
+   if((Get-FileHash -LiteralPath $oldPath -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant() -ne $sha){continue}
+   $text=Get-Content -Raw -LiteralPath $oldPath -ErrorAction Stop
+ }catch{continue}
+ if(-not(Test-SafePublicVpnProfile $text)){continue}
+ $lkgRemote=[regex]::Match($text,'(?m)^remote\s+([0-9.]+)\s+(\d+)\s*$')
+ if(-not $lkgRemote.Success){continue}
+ $lkgIp=$null
+ if(-not([Net.IPAddress]::TryParse($lkgRemote.Groups[1].Value,[ref]$lkgIp)) -or
+    -not(Test-AllowedRelayIp $lkgIp) -or
+    $lkgRemote.Groups[1].Value -ne ([string]$o.IP).Trim()){continue}
  $protocol=if($text -match '(?m)^proto\s+udp'){'udp'}elseif($text -match '(?m)^proto\s+tcp'){'tcp'}else{'unknown'}
+ # The old raw SHA can differ from the final server-role-hardened
+ # profile hash. Compare final content before reserving an LKG slot.
+ $file=('LKG-{0:D2}-{1}' -f ($kept+1),(Split-Path $oldPath -Leaf))
+ $staged=Join-Path $stage $file
+ [IO.File]::WriteAllText($staged,(Add-ServerRole $text),[Text.UTF8Encoding]::new($false))
+ $stagedSha=(Get-FileHash -LiteralPath $staged -Algorithm SHA256).Hash.ToLowerInvariant()
+ if($meta|Where-Object {([string]$_.SHA256).ToLowerInvariant() -eq $stagedSha}){
+   Remove-Item -LiteralPath $staged -Force
+   continue
+ }
  $i++;$kept++
- $file=('LKG-{0:D2}-{1}' -f $kept,(Split-Path $oldPath -Leaf))
- Copy-Item -LiteralPath $oldPath -Destination (Join-Path $stage $file) -Force
  $country=[string]$o.Country
  if([string]::IsNullOrWhiteSpace($country) -and $success.ContainsKey($sha)){try{$country=[string]$success[$sha].country}catch{}}
  if([string]::IsNullOrWhiteSpace($country)){$country='JP'} # legacy pools before 2.3 were JP-only
  $meta += [pscustomobject]@{
    Rank=$i;Host=$o.Host;IP=$o.IP;Port=$o.Port;Protocol=$protocol;Country=$country;CountryName=$o.CountryName;Score=$o.Score;Ping=$o.Ping;
-   Speed=$o.Speed;Sessions=$o.Sessions;Profile=('runtime\udp-cache\'+$file);SHA256=$sha;
+   Speed=$o.Speed;Sessions=$o.Sessions;Profile=('runtime\udp-cache\'+$file);SHA256=$stagedSha;
    Source='LastKnownGood';GeneratedAt=(Get-Date).ToString('o')
  }
 }
@@ -130,14 +241,24 @@ foreach($c in $meta){
  if($sha -ne $c.SHA256){throw "Staged hash mismatch: $leaf"}
 }
 
+$archivedPrevious=$null
 if(Test-Path $active){
  $hasIndex=Test-Path (Join-Path $active 'index.json')
  if($hasIndex){
    $stamp=(Get-Date).ToString('yyyyMMdd-HHmmssfff')
-   Move-Item -LiteralPath $active -Destination (Join-Path $generations $stamp)
+   $archivedPrevious=Join-Path $generations $stamp
+   Move-Item -LiteralPath $active -Destination $archivedPrevious
  }else{Remove-Item $active -Recurse -Force -ErrorAction SilentlyContinue}
 }
-Move-Item -LiteralPath $stage -Destination $active
+try{
+ Move-Item -LiteralPath $stage -Destination $active
+}catch{
+ # A failed stage activation must preserve the previous verified pool.
+ if($archivedPrevious -and (Test-Path -LiteralPath $archivedPrevious) -and -not(Test-Path -LiteralPath $active)){
+   Move-Item -LiteralPath $archivedPrevious -Destination $active
+ }
+ throw
+}
 
 $old=@(Get-ChildItem $generations -Directory -ErrorAction SilentlyContinue|Sort-Object Name -Descending)
 if($old.Count -gt $KeepGenerations){

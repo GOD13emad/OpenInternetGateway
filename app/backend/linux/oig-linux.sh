@@ -9,6 +9,7 @@ CONN="OIG-VPN-LIVE"
 PREFLIGHT_CONN="OIG-VPN-PREFLIGHT"
 LEGACY_CONN="OIG-JP-UDP-LIVE"
 CONSOLE_CONN="OIG-Console-Gateway"
+OIG_MARKER="openinternetgateway-managed-v1"
 KEEP="$STATE/linux.keep"
 LOCK="$STATE/gateway.lock"
 FACTORY_PY="$OIG_HOME/linux/config_factory.py"
@@ -43,21 +44,66 @@ desired_state() {
   fi
 }
 
+is_oig_owned_vpn_uuid() {
+  local uuid="$1"
+  [[ "$uuid" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]] || return 1
+  [[ "$(nmcli -g connection.type connection show uuid "$uuid" 2>/dev/null)" == "vpn" ]] || return 1
+  [[ "$(nmcli -g connection.stable-id connection show uuid "$uuid" 2>/dev/null)" == "$OIG_MARKER" ]] || return 1
+}
+
 delete_connection_name() {
   local target="$1"
   nmcli -t -f UUID,NAME connection show 2>/dev/null |
     awk -F: -v n="$target" '$2==n {print $1}' |
     while read -r uuid; do
-      [[ -n "$uuid" ]] || continue
+      is_oig_owned_vpn_uuid "$uuid" || continue
       nmcli connection down uuid "$uuid" >/dev/null 2>&1 || true
       nmcli connection delete uuid "$uuid" >/dev/null 2>&1 || true
     done
+}
+
+reserved_name_conflict() {
+  # An unmarked / legacy / foreign connection with an OIG-reserved name may
+  # be the user's own VPN. Never activate a parallel replacement over it.
+  # A failed NM inventory is an unsafe ambiguity, not an empty list.
+  local target="$1" inventory uuid
+  inventory="$(nmcli -t -f UUID,NAME connection show 2>/dev/null)" || return 0
+  while read -r uuid; do
+    [[ -n "$uuid" ]] || continue
+    is_oig_owned_vpn_uuid "$uuid" || return 0
+  done < <(printf '%s\n' "$inventory" | awk -F: -v n="$target" '$2==n {print $1}')
+  return 1
+}
+
+cleanup_imported_material() {
+  # Only remove orphaned content-matching inline PEM copies after NM deletes
+  # the OIG connection; never remove files referenced by another NM profile.
+  python3 "$FACTORY_PY" cleanup-nm --common "$OIG_COMMON" --profile-file "$1" >/dev/null 2>&1 || true
+}
+
+import_temporary_profile_uuid() {
+  # UUID delta uniquely binds a newly imported profile to this operation.
+  # Never delete, rename or select another user's connection by filename.
+  local profile="$1" before after uuid
+  before="$(nmcli -t -g UUID connection show)" || return 1
+  nmcli connection import --temporary type openvpn file "$profile" >/dev/null 2>&1 || return 1
+  after="$(nmcli -t -g UUID connection show)" || return 1
+  uuid="$(comm -13 <(printf '%s\n' "$before" | sed '/^$/d' | sort -u) \
+                       <(printf '%s\n' "$after" | sed '/^$/d' | sort -u))"
+  [[ "$uuid" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]] || return 1
+  [[ "$(nmcli -g connection.type connection show uuid "$uuid")" == "vpn" ]] || return 1
+  printf '%s\n' "$uuid"
 }
 
 delete_named_connections() {
   delete_connection_name "$PREFLIGHT_CONN"
   delete_connection_name "$CONN"
   delete_connection_name "$LEGACY_CONN"
+  local old_profile=""
+  if [[ -f "$STATE/current-linux-profile.json" ]]; then
+    old_profile="$(python3 -c 'import json,sys;d=json.load(open(sys.argv[1]));p=d.get("profile","");print(p if isinstance(p,str) else "")' "$STATE/current-linux-profile.json" 2>/dev/null || true)"
+  fi
+  [[ -z "$old_profile" ]] || cleanup_imported_material "$old_profile"
 }
 
 json_status() {
@@ -73,10 +119,13 @@ json_status() {
   if [[ "$iface" == tun* || "$iface" == tap* ]]; then routes=2; else routes=0; fi
 
   managed_active=false
-  if nmcli -t -f NAME,TYPE,DEVICE connection show --active 2>/dev/null |
-      awk -F: -v n="$CONN" '$1==n && $2=="vpn" {found=1} END{exit(found?0:1)}'; then
-    managed_active=true
-  fi
+  while read -r candidate_uuid; do
+    if is_oig_owned_vpn_uuid "$candidate_uuid"; then
+      managed_active=true
+      break
+    fi
+  done < <(nmcli -t -f UUID,NAME,TYPE connection show --active 2>/dev/null |
+    awk -F: -v n="$CONN" '$2==n && $3=="vpn" {print $1}')
 
   relay=""
   profile_ip=""
@@ -218,8 +267,15 @@ def quality(c):
     if fresh_iso(f.get("last"),6): score -= 320.0
     if pref and sha==pref: score += 20.0
     fast=num(b.get("fastPingMs"))
+    icmp=num(b.get("icmpPingMs"))
+    tcp=num(b.get("tcpConnectMs"))
     if fresh_iso(b.get("fastAt"),24):
-        if fast is not None: score += max(-80.0,140.0-fast*0.45)
+        # A TCP port accept is NOT an OpenVPN TLS handshake; the direct
+        # socket probe must not outrank a relay with real VPN success.
+        tcp_only_bonus=max(0.0,25.0-(tcp if tcp is not None else fast)*0.1) if (tcp is not None or (fast is not None and b.get("fastMethod")=="tcp-direct")) else 0.0
+        if icmp is not None: score += max(-80.0,140.0-icmp*0.45)
+        elif tcp_only_bonus: score += tcp_only_bonus
+        elif fast is not None and b.get("fastMethod") not in ("tcp-direct","none"): score += max(-80.0,140.0-fast*0.45)
         elif proto=="tcp" and b.get("fastReachable") is False: score -= 180.0
     down=num(b.get("downloadMbps")); up=num(b.get("uploadMbps")); lat=num(b.get("httpsLatencyMs"))
     if fresh_iso(b.get("at"),72) and (down is not None or up is not None or lat is not None):
@@ -268,27 +324,38 @@ preflight_one() {
     [[ "$actual" == "$expected" ]] || return 11
   fi
 
+  # Refuse a foreign reserved name *before* touching any OIG connection.
+  if reserved_name_conflict "$PREFLIGHT_CONN"; then return 12; fi
   delete_connection_name "$PREFLIGHT_CONN"
-  local import_name imported uuid before_route before_dns after_route after_dns
-  import_name="$(basename "$profile" .ovpn)"
-  delete_connection_name "$import_name"
+  if reserved_name_conflict "$PREFLIGHT_CONN"; then return 12; fi
+  local uuid before_route before_dns after_route after_dns
   before_route="$(ip -4 route get 1.1.1.1 2>/dev/null | head -1 || true)"
   before_dns="$(dns_server_fingerprint)"
 
-  imported="$(nmcli connection import type openvpn file "$profile" 2>&1)" || return 12
-  uuid="$(nmcli -t -f UUID,NAME connection show | awk -F: -v n="$import_name" '$2==n {print $1; exit}')"
-  [[ -n "$uuid" ]] || return 12
-  nmcli connection modify uuid "$uuid" connection.id "$PREFLIGHT_CONN" connection.autoconnect no \
-    ipv6.method disabled ipv4.never-default yes ipv4.ignore-auto-routes yes ipv4.ignore-auto-dns yes
+  uuid="$(import_temporary_profile_uuid "$profile")" || return 12
+  if ! nmcli connection modify uuid "$uuid" connection.id "$PREFLIGHT_CONN" connection.autoconnect no \
+    ipv6.method disabled ipv4.never-default yes ipv4.ignore-auto-routes yes ipv4.ignore-auto-dns yes \
+    connection.stable-id "$OIG_MARKER"; then
+    nmcli connection delete uuid "$uuid" >/dev/null 2>&1 || true
+    cleanup_imported_material "$profile"
+    return 12
+  fi
+  if ! is_oig_owned_vpn_uuid "$uuid"; then
+    nmcli connection delete uuid "$uuid" >/dev/null 2>&1 || true
+    cleanup_imported_material "$profile"
+    return 12
+  fi
 
   if ! nmcli -w 10 connection up uuid "$uuid" >/dev/null 2>&1; then
     nmcli connection delete uuid "$uuid" >/dev/null 2>&1 || true
+    cleanup_imported_material "$profile"
     return 13
   fi
   if ! nmcli -t -f UUID,NAME,TYPE connection show --active 2>/dev/null |
       awk -F: -v u="$uuid" '$1==u && $2=="OIG-VPN-PREFLIGHT" && $3=="vpn" {ok=1} END{exit(ok?0:1)}'; then
     nmcli connection down uuid "$uuid" >/dev/null 2>&1 || true
     nmcli connection delete uuid "$uuid" >/dev/null 2>&1 || true
+    cleanup_imported_material "$profile"
     return 14
   fi
 
@@ -296,6 +363,7 @@ preflight_one() {
   after_dns="$(dns_server_fingerprint)"
   nmcli connection down uuid "$uuid" >/dev/null 2>&1 || true
   nmcli connection delete uuid "$uuid" >/dev/null 2>&1 || true
+  cleanup_imported_material "$profile"
   python3 - "$EVIDENCE/preflight-last.json" "$host" "$ipaddr" "$port" "$protocol" "$country" "$expected" "$before_route" "$after_route" "$before_dns" "$after_dns" <<'PY'
 import datetime,json,sys
 path,host,ip,port,protocol,country,sha,before_route,after_route,before_dns,after_dns=sys.argv[1:]
@@ -346,18 +414,34 @@ connect_one() {
   local previous_state="$STATE/current-linux-profile.before-connect.json"
   if [[ -f "$state_file" ]]; then cp -f "$state_file" "$previous_state"; else rm -f "$previous_state"; fi
 
+  # Do not even stop a previously healthy OIG VPN if a user-owned
+  # connection has claimed one of our reserved names.
+  if reserved_name_conflict "$CONN" || reserved_name_conflict "$LEGACY_CONN"; then
+    rm -f "$previous_state"
+    return 16
+  fi
   delete_named_connections
-  local import_name imported uuid
-  import_name="$(basename "$profile" .ovpn)"
-  delete_connection_name "$import_name"
+  if reserved_name_conflict "$CONN" || reserved_name_conflict "$LEGACY_CONN"; then
+    rm -f "$previous_state"
+    return 16
+  fi
+  local uuid
+  uuid="$(import_temporary_profile_uuid "$profile")" || return 12
 
-  imported="$(nmcli connection import type openvpn file "$profile" 2>&1)" || return 12
-  uuid="$(nmcli -t -f UUID,NAME connection show | awk -F: -v n="$import_name" '$2==n {print $1; exit}')"
-  [[ -n "$uuid" ]] || return 12
-
-  nmcli connection modify uuid "$uuid" connection.id "$CONN" connection.autoconnect no ipv6.method disabled ipv4.never-default no
+  if ! nmcli connection modify uuid "$uuid" connection.id "$CONN" connection.autoconnect no ipv6.method disabled ipv4.never-default no \
+    connection.stable-id "$OIG_MARKER"; then
+    nmcli connection delete uuid "$uuid" >/dev/null 2>&1 || true
+    cleanup_imported_material "$profile"
+    return 12
+  fi
+  if ! is_oig_owned_vpn_uuid "$uuid"; then
+    nmcli connection delete uuid "$uuid" >/dev/null 2>&1 || true
+    cleanup_imported_material "$profile"
+    return 12
+  fi
   if ! nmcli -w 30 connection up uuid "$uuid" >/dev/null 2>&1; then
     nmcli connection delete uuid "$uuid" >/dev/null 2>&1 || true
+    cleanup_imported_material "$profile"
     return 13
   fi
 
@@ -387,6 +471,7 @@ connect_one() {
 
   nmcli connection down uuid "$uuid" >/dev/null 2>&1 || true
   nmcli connection delete uuid "$uuid" >/dev/null 2>&1 || true
+  cleanup_imported_material "$profile"
   delete_named_connections
   if [[ -f "$previous_state" ]]; then mv -f "$previous_state" "$state_file"; else rm -f "$state_file"; fi
   return 14
@@ -418,9 +503,17 @@ connect_gateway() {
   command -v curl >/dev/null
   command -v python3 >/dev/null
 
-  python3 "$FACTORY_PY" ensure --common "$OIG_COMMON" >/dev/null
+  if [[ -z "$exact_sha" ]]; then
+    python3 "$FACTORY_PY" ensure --common "$OIG_COMMON" >/dev/null
+  fi
   [[ -f "$OIG_COMMON/runtime/udp-cache/index.json" ]] || { echo "Config pool index missing" >&2; return 20; }
 
+  # Local NM-name conflicts must not be mistaken for failed remote relays.
+  # Fail before creating a watchdog, changing a healthy tunnel, or probing.
+  if reserved_name_conflict "$CONN" || reserved_name_conflict "$LEGACY_CONN"; then
+    echo "A reserved OIG VPN name belongs to another NetworkManager connection; refusing automatic switch." >&2
+    return 22
+  fi
   start_watchdog
   local attempts="$EVIDENCE/connect-linux-attempts.jsonl"
   : > "$attempts"
@@ -441,6 +534,13 @@ connect_gateway() {
         return 0
       else
         rc=$?
+        if [[ "$rc" -eq 16 ]]; then
+          # A foreign NM profile appeared while connecting. This is a
+          # local ownership conflict, not a bad volunteer VPN server.
+          stop_watchdog
+          echo "Reserved NetworkManager name conflict; no relay penalized." >&2
+          return 22
+        fi
         reason="CODE_$rc"
         printf '{"host":"%s","ip":"%s","port":"%s","protocol":"%s","result":"FAIL","code":%s,"cycle":%s}\n' "$host" "$ipaddr" "$port" "$protocol" "$rc" "$cycle" >> "$attempts"
         record_failure "$sha" "$host" "$ipaddr" "$port" "$reason"
@@ -557,17 +657,48 @@ remove_auto() {
   echo "AUTO-RECOVERY REMOVED"
 }
 
+is_oig_owned_console_uuid() {
+  local uuid="$1"
+  [[ "$uuid" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]] || return 1
+  [[ "$(nmcli -g connection.type connection show uuid "$uuid" 2>/dev/null)" == "802-3-ethernet" ]] || return 1
+  [[ "$(nmcli -g connection.stable-id connection show uuid "$uuid" 2>/dev/null)" == "$OIG_MARKER" ]] || return 1
+}
+
+console_owned_uuids() {
+  # Treat a failed NM inventory, unmarked collision or ambiguous type as a
+  # foreign connection. Never delete user-created Ethernet by display name.
+  local inventory uuid target="$CONSOLE_CONN"
+  inventory="$(nmcli -t -f UUID,NAME connection show 2>/dev/null)" || return 1
+  while read -r uuid; do
+    [[ -n "$uuid" ]] || continue
+    is_oig_owned_console_uuid "$uuid" || return 1
+    printf '%s\n' "$uuid"
+  done < <(printf '%s\n' "$inventory" | awk -F: -v n="$target" '$2==n {print $1}')
+}
+
+console_iface_is_safe() {
+  local iface="$1" defaults devices
+  [[ "$iface" =~ ^[a-zA-Z0-9_.-]{1,32}$ ]] || return 1
+  # Never reconfigure a default Internet uplink, including any secondary
+  # physical default route. A manual OIG_CONSOLE_IF override cannot bypass it.
+  defaults="$(ip -4 route show default 2>/dev/null)" || return 1
+  [[ -n "$defaults" ]] || return 1
+  if printf '%s\n' "$defaults" | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}' | grep -Fxq -- "$iface"; then
+    return 1
+  fi
+  devices="$(nmcli -t -f DEVICE,TYPE,STATE device status 2>/dev/null)" || return 1
+  printf '%s\n' "$devices" |
+    awk -F: -v n="$iface" '$1==n && $2=="ethernet" && $3=="disconnected" {ok=1} END{exit(ok?0:1)}'
+}
+
 console_iface() {
-  if [[ -n "${OIG_CONSOLE_IF:-}" ]]; then
+  if [[ -v OIG_CONSOLE_IF && -n "$OIG_CONSOLE_IF" ]]; then
     echo "$OIG_CONSOLE_IF"
     return
   fi
-  local uplink
-  uplink="$(ip -4 route show default 2>/dev/null | awk '{for(i=1;i<=NF;i++)if($i=="dev"){print $(i+1);exit}}')"
-  nmcli -t -f DEVICE,TYPE,STATE device status |
-    awk -F: -v up="$uplink" '$2=="ethernet" && $1!="" && $1!=up && $3!="unmanaged" {print $1; exit}'
+  nmcli -t -f DEVICE,TYPE,STATE device status 2>/dev/null |
+    awk -F: '$2=="ethernet" && $3=="disconnected" {print $1; exit}'
 }
-
 console_status() {
   local iface state
   iface="$(console_iface)"
@@ -580,24 +711,76 @@ PY
 }
 
 console_enable() {
-  local iface
+  local iface uuid old_uuid existing
   iface="$(console_iface)"
   [[ -n "$iface" ]] || { echo "No dedicated Ethernet adapter found." >&2; return 30; }
+  if ! console_iface_is_safe "$iface"; then
+    echo "Console Gateway requires disconnected Ethernet outside all default Internet routes." >&2
+    return 32
+  fi
+  [[ "$(desired_state)" == "on" ]] || {
+    echo "Gateway disconnect was requested; refusing Console sharing." >&2
+    return 31
+  }
   healthy || { echo "Validated VPN tunnel must be active first." >&2; return 31; }
-  nmcli connection delete "$CONSOLE_CONN" >/dev/null 2>&1 || true
-  nmcli connection add type ethernet ifname "$iface" con-name "$CONSOLE_CONN" ipv4.method shared ipv4.addresses 10.42.42.1/24 ipv6.method disabled >/dev/null
-  nmcli connection up "$CONSOLE_CONN" >/dev/null
+  existing="$(console_owned_uuids)" || {
+    echo "The Console Gateway name is owned by another NetworkManager connection; refusing to modify it." >&2
+    return 33
+  }
+  while read -r old_uuid; do
+    [[ -n "$old_uuid" ]] || continue
+    # Inventory was marker-verified and scoped to this OIG Ethernet profile.
+    nmcli connection down uuid "$old_uuid" >/dev/null 2>&1 || true
+    nmcli connection delete uuid "$old_uuid" >/dev/null || return 34
+  done <<< "$existing"
+  uuid="$(uuidgen)" || return 34
+  [[ "$uuid" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]] || return 34
+  nmcli connection add type ethernet ifname "$iface" con-name "$CONSOLE_CONN" \
+    connection.uuid "$uuid" connection.stable-id "$OIG_MARKER" connection.autoconnect no \
+    ipv4.method shared ipv4.addresses 10.42.42.1/24 ipv6.method disabled >/dev/null || return 34
+  if ! is_oig_owned_console_uuid "$uuid"; then
+    nmcli connection delete uuid "$uuid" >/dev/null 2>&1 || true
+    return 34
+  fi
+  # Guard against an external link/NM state change while creating the
+  # profile. Never activate sharing on a NIC that became connected or got
+  # any IPv4 default route after our first safety check.
+  if ! console_iface_is_safe "$iface"; then
+    nmcli connection delete uuid "$uuid" >/dev/null 2>&1 || true
+    echo "Console Ethernet changed state before activation; no interface was enabled." >&2
+    return 32
+  fi
+  # Do not race a user-requested disconnect while setting up shared
+  # Ethernet. Keep disconnect immediate rather than queueing it behind a
+  # potentially long-running console/connection lock.
+  if ! healthy || [[ "$(desired_state)" != "on" ]]; then
+    nmcli connection delete uuid "$uuid" >/dev/null 2>&1 || true
+    echo "VPN is no longer desired or healthy; Console sharing not enabled." >&2
+    return 31
+  fi
+  if ! nmcli connection up uuid "$uuid" >/dev/null; then
+    nmcli connection delete uuid "$uuid" >/dev/null 2>&1 || true
+    return 35
+  fi
   echo "CONSOLE GATEWAY ENABLED on $iface"
 }
 
 console_disable() {
-  nmcli connection down "$CONSOLE_CONN" >/dev/null 2>&1 || true
-  nmcli connection delete "$CONSOLE_CONN" >/dev/null 2>&1 || true
+  local old_uuid existing
+  existing="$(console_owned_uuids)" || {
+    echo "Refusing to delete an unowned Console Gateway connection." >&2
+    return 33
+  }
+  while read -r old_uuid; do
+    [[ -n "$old_uuid" ]] || continue
+    nmcli connection down uuid "$old_uuid" >/dev/null 2>&1 || true
+    nmcli connection delete uuid "$old_uuid" >/dev/null || return 34
+  done <<< "$existing"
   echo "CONSOLE GATEWAY DISABLED"
 }
 
 action="${1:-status}"
-if [[ "$action" == "connect" || "$action" == "connect-profile" || "$action" == "refresh" || "$action" == "ensure" || "$action" == "factory-refresh" ]]; then
+if [[ "$action" == "connect" || "$action" == "connect-profile" || "$action" == "refresh" || "$action" == "ensure" || "$action" == "factory-refresh" || "$action" == "console-enable" || "$action" == "console-disable" ]]; then
   exec 9>"$LOCK"
   if [[ "$action" == "ensure" ]]; then
     if ! flock -n 9; then
@@ -620,10 +803,11 @@ case "$action" in
     # When a protected tunnel is already healthy, prove the candidate can
     # complete an OpenVPN handshake without taking default-route/DNS ownership
     # before touching the working connection.
+    # Validate visible selection before changing intent or live VPN route.
+    candidate="$(profile_lines "$2" | head -n1 || true)"
+    [[ -n "$candidate" ]] || { echo "Selected relay is missing or quarantined." >&2; exit 21; }
+    IFS="$(printf '	')" read -r phost pip pport pleaf psha pproto pcountry <<<"$candidate"
     if healthy; then
-      candidate="$(profile_lines "$2" | head -n1 || true)"
-      [[ -n "$candidate" ]] || { echo "Selected relay is missing or quarantined." >&2; exit 21; }
-      IFS="$(printf '	')" read -r phost pip pport pleaf psha pproto pcountry <<<"$candidate"
       if preflight_one "$phost" "$pip" "$pport" "$pleaf" "$psha" "$pproto" "$pcountry"; then
         :
       else
