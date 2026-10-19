@@ -161,7 +161,9 @@ test('valid HTTPS VPN Gate feeds outrank faster HTTP mirrors with fallback intac
     '  evidence=Path(td);m.refresh_snapshot(evidence,max_sources=3)',
     '  report=json.loads((evidence/"mirror-refresh-last.json").read_text())',
     '  assert report["usedMirrors"][0].startswith("https://"),report["usedMirrors"]',
-    '  assert 2<=len(report["usedMirrors"])<=3,report',
+    '  assert report["usedMirrors"]==["https://www.vpngate.net"],report',
+    '  assert len(evidence.joinpath("vpngate-mirror-api.csv").read_text().splitlines())==8',
+    '  assert all(line.split(",")[1].startswith("203.0.113.1") for line in evidence.joinpath("vpngate-mirror-api.csv").read_text().splitlines())',
     '  def unavailable_https(url,timeout=6,allow_partial=True):',
     '    if url.startswith("https://"): raise RuntimeError("offline HTTPS")',
     '    return http,False',
@@ -2240,6 +2242,32 @@ test('Windows OpenVPN quality engine mirrors evidence-backed pool and profile sa
   for(const token of ['script-security','route-up','route-pre-down','ipchange','plugin','client-connect','client-disconnect','learn-address']) assert.ok(build.includes(token));
 });
 
+test('Windows native HTTPS-only source selection never includes plaintext mirror rows',()=>{
+  if(process.platform!=='win32') return;
+  const cp=require('node:child_process');
+  const source=path.join(root,'backend/windows/scripts/Refresh-VpnGateCache.ps1');
+  const script=[
+    '$ErrorActionPreference="Stop"',
+    '$text=[IO.File]::ReadAllText($env:OIG_HTTPS_SELECTION_SOURCE)',
+    '$start=$text.IndexOf(" $httpsOnlyLive=")',
+    '$stop=$text.IndexOf(" $seen=",$start)',
+    'if($start -lt 0 -or $stop -lt 0){throw "Selection code not found"}',
+    '$code=$text.Substring($start,$stop-$start)',
+    '$MaxSources=3',
+    '$usable=@([pscustomobject]@{Base="https://provider";HttpsPriority=$true;Complete=$true;Rows=8},[pscustomobject]@{Base="http://mirror";HttpsPriority=$false;Complete=$true;Rows=20})',
+    'Invoke-Expression $code',
+    'if(-not $httpsOnlyLive -or @($chosen).Count -ne 1 -or $chosen[0].Base -ne "https://provider"){throw "HTTP mixed with HTTPS"}',
+    '$usable=@([pscustomobject]@{Base="http://mirror-a";HttpsPriority=$false;Complete=$true;Rows=8},[pscustomobject]@{Base="http://mirror-b";HttpsPriority=$false;Complete=$true;Rows=9})',
+    'Invoke-Expression $code',
+    'if($httpsOnlyLive -or @($chosen).Count -ne 2){throw "HTTP fallback lost"}',
+    '"PASS HTTPS-only and HTTP-only fallback under native Windows PowerShell"'
+  ].join(';');
+  const r=cp.spawnSync('pwsh',['-NoProfile','-NonInteractive','-EncodedCommand',Buffer.from(script,'utf16le').toString('base64')],{
+    encoding:'utf8',timeout:12000,env:{...process.env,OIG_HTTPS_SELECTION_SOURCE:source}
+  });
+  assert.equal(r.status,0,r.stderr||r.stdout);
+});
+
 test('Windows VPN Gate refresh is bounded, parallel, HTTPS-first and merges multiple snapshots',()=>{
   const refresh=fs.readFileSync(path.join(root,'backend/windows/scripts/Refresh-VpnGateCache.ps1'),'utf8');
   assert.match(refresh,/https:\/\/www\.vpngate\.net/);
@@ -2252,6 +2280,9 @@ test('Windows VPN Gate refresh is bounded, parallel, HTTPS-first and merges mult
   assert.match(refresh,/cachedMergedRows/);
   assert.match(refresh,/liveMergedRows/);
   assert.match(refresh,/cachedSnapshotExisted/);
+  assert.match(refresh,/\$httpsOnlyLive=\@\(\$usable\|Where-Object HttpsPriority\)/);
+  assert.match(refresh,/\$candidateSources=if\(\$httpsOnlyLive\)/);
+  assert.match(refresh,/\-not \$httpsOnlyLive \-and \$liveMergedRows \-gt 0/);
   assert.match(refresh,/liveMergedRows -ge 8/);
   assert.match(refresh,/MaxSources=3/);
 });

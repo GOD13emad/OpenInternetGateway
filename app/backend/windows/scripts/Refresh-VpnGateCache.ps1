@@ -69,7 +69,11 @@ try{
    $usable+=,[pscustomobject]@{Base=$j.Base;Path=$j.Path;Rows=$rows;Size=$size;Complete=$complete;HttpsPriority=([string]$j.Base).StartsWith('https://',[StringComparison]::OrdinalIgnoreCase)}
   }
  }
- $chosen=@($usable|Sort-Object @{Expression='HttpsPriority';Descending=$true},@{Expression='Complete';Descending=$true},@{Expression='Rows';Descending=$true}|Select-Object -First ([Math]::Max(1,$MaxSources)))
+ # HTTPS can authenticate the feed origin, not an individual volunteer
+ # relay. If it yielded a usable snapshot, do not mix HTTP or stale cache.
+ $httpsOnlyLive=@($usable|Where-Object HttpsPriority).Count -gt 0
+ $candidateSources=if($httpsOnlyLive){@($usable|Where-Object HttpsPriority)}else{@($usable)}
+ $chosen=@($candidateSources|Sort-Object @{Expression='HttpsPriority';Descending=$true},@{Expression='Complete';Descending=$true},@{Expression='Rows';Descending=$true}|Select-Object -First ([Math]::Max(1,$MaxSources)))
  $seen=[Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
   $mergedBytes=0
  foreach($j in $chosen){
@@ -86,7 +90,7 @@ try{
  # A bounded live fetch may time out after returning useful complete rows.
  # Keep those fresh rows first, then fill coverage/diversity from the last
  # complete cache rather than replacing a broad snapshot with a narrow prefix.
- if($liveMergedRows -gt 0 -and $cachedSnapshotExisted -and (Get-Item -LiteralPath $csv).Length -le $MaxCachedCsvBytes){
+ if(-not $httpsOnlyLive -and $liveMergedRows -gt 0 -and $cachedSnapshotExisted -and (Get-Item -LiteralPath $csv).Length -le $MaxCachedCsvBytes){
   foreach($line in [IO.File]::ReadLines($csv)){
    if($line.Length -gt $MaxCsvLineBytes){continue}
    if([string]::IsNullOrWhiteSpace($line) -or $line.StartsWith('*') -or $line.StartsWith('#')){continue}

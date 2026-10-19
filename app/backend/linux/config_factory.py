@@ -103,6 +103,11 @@ def refresh_snapshot(evidence, max_sources=3):
             0 if item[0].lower().startswith("https://") else 1,
             bool(item[2]), SEEDS.index(item[0])))
         for base, data, partial in fetched:
+            # Once a structurally usable HTTPS source is accepted, never
+            # mix rows from plaintext volunteer mirrors into that snapshot.
+            # HTTP remains an explicit fallback only if no HTTPS feed qualifies.
+            if used and used[0].lower().startswith("https://") and not base.lower().startswith("https://"):
+                continue
             if not data:
                 continue
             text = data.decode("utf-8", errors="replace")
