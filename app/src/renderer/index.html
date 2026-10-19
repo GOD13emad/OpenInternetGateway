@@ -177,7 +177,7 @@
               <tbody id="connectionRows"><tr><td colspan="9" class="empty">Loading connection inventory…</td></tr></tbody>
             </table>
           </div>
-          <p class="measurement-note">“Test all relays” measures relay reachability from your physical Internet adapter and bypasses HTTP/SOCKS proxy settings; it does not switch the VPN. “Test direct Internet” measures your own ISP ping/download/upload on that same direct physical path. “Speed” on a relay measures real throughput through the selected VPN tunnel, with app-level proxy variables disabled. Some relays block ICMP.</p>
+          <p class="measurement-note">“Test all relays” uses direct physical Internet: TCP requires an open port; UDP checks ICMP host response only. Neither quick probe verifies an OpenVPN handshake or switches the VPN. HTTP/SOCKS proxy settings are bypassed. “Test direct Internet” measures your own ISP ping/download/upload on that same direct physical path. “Speed” on a relay measures real throughput through the selected VPN tunnel, with app-level proxy variables disabled. Some relays block ICMP.</p>
         </article>
       </section>
 
