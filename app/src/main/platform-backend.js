@@ -4,6 +4,7 @@ const path = require('path');
 const os = require('os');
 const https = require('https');
 const crypto = require('crypto');
+const net = require('net');
 
 const WINDOWS_OPENVPN_CONNECT = Object.freeze({
   version: '3.9.0.5008',
@@ -1130,7 +1131,7 @@ class Backend {
     };
   }
 
-  _activeTunnelCurlArgs(status) {
+  async _activeTunnelCurlArgs(status) {
     // Connected by itself is not proof that a speed transfer uses the VPN.
     // Refuse to label physical-ISP traffic as tunnel throughput when the
     // actual effective routes have not been verified.
@@ -1146,7 +1147,39 @@ class Backend {
       // when NetworkManager disconnects during a speed test.
       return ['-4', '--noproxy', '*', '--interface', 'if!' + vpnInterface];
     }
-    return ['-4', '--noproxy', '*'];
+    if (this.platform === 'win32') {
+      const vpnAlias = String(status.interface || '').trim();
+      if (!vpnAlias || vpnAlias.length > 160 || /[\x00-\x1f\x7f]/.test(vpnAlias)) {
+        throw new Error('Windows managed VPN interface is missing or invalid; tunnel speed test refused.');
+      }
+      // Both active /1 routes must belong to the SAME reported VPN interface.
+      // Resolve only its assigned IPv4, not a physical network address.
+      // A child-only environment variable prevents PowerShell string injection.
+      const script = [
+        "$ErrorActionPreference='Stop'",
+        "$name=$env:OIG_SPEED_TUNNEL_IFACE",
+        "$routes=@(Get-NetRoute -AddressFamily IPv4 -ErrorAction Stop|Where-Object{$_.DestinationPrefix -in @('0.0.0.0/1','128.0.0.0/1')})",
+        "if($routes.Count -ne 2){throw 'The managed VPN full-route pair is missing or ambiguous'}",
+        "$matched=@($routes|Where-Object{$_.InterfaceAlias -eq $name})",
+        "$indexes=@($matched|Select-Object -ExpandProperty InterfaceIndex -Unique)",
+        "$prefixes=@($matched|Select-Object -ExpandProperty DestinationPrefix -Unique)",
+        "if($matched.Count -ne 2 -or $indexes.Count -ne 1 -or $prefixes.Count -ne 2){throw 'Full VPN routes do not share one verified adapter'}",
+        "$addresses=@(Get-NetIPAddress -AddressFamily IPv4 -InterfaceIndex $indexes[0] -ErrorAction Stop|Where-Object{$_.AddressState -eq 'Preferred' -and $_.IPAddress -notlike '169.254.*' -and $_.IPAddress -notlike '127.*' -and $_.IPAddress -notlike '0.*'})",
+        "if($addresses.Count -ne 1){throw 'VPN adapter IPv4 source is missing or ambiguous'}",
+        "[string]$addresses[0].IPAddress"
+      ].join(';');
+      const found = await run(this._requireWindowsPwsh(), ['-NoProfile','-NonInteractive','-Command',script], {
+        timeout: 8000, env: { OIG_SPEED_TUNNEL_IFACE: vpnAlias }
+      });
+      const sourceIP = String(found.stdout || '').trim();
+      if (net.isIP(sourceIP) !== 4 || /^(?:0|127|169\.254|22[4-9]|23\d)\./.test(sourceIP)) {
+        throw new Error('Windows VPN adapter has no trustworthy IPv4 source for tunnel speed.');
+      }
+      // Curl's host! prefix binds every HTTPS/GET/POST socket to the
+      // VPN-assigned source address instead of the ordinary physical ISP.
+      return ['-4', '--noproxy', '*', '--interface', 'host!' + sourceIP];
+    }
+    throw new Error('Tunnel speed measurement is unsupported on this platform.');
   }
 
   async _httpsLatencyMs(sink, curlPathArgs = ['-4', '--noproxy', '*']) {
@@ -1168,7 +1201,7 @@ class Backend {
   async benchmarkActive() {
     const status = await this.status();
     if (!status.connected) throw new Error('Connect a relay before running a real throughput test.');
-    const tunnelCurlArgs = this._activeTunnelCurlArgs(status);
+    const tunnelCurlArgs = await this._activeTunnelCurlArgs(status);
     const inventory = await this.profiles(status);
     const active = inventory.profiles.find(p => p.active);
     if (!active) throw new Error('The active relay could not be mapped to the config inventory.');
@@ -1212,7 +1245,7 @@ class Backend {
 
     const endStatus = await this.status();
     if (!endStatus.connected || Number(endStatus.fullRoutes || 0) < 2 ||
-        (this.platform === 'linux' && endStatus.interface !== status.interface) ||
+        ((this.platform === 'linux' || this.platform === 'win32') && endStatus.interface !== status.interface) ||
         (status.activeSha && endStatus.activeSha !== status.activeSha)) {
       throw new Error('Tunnel route or active connection changed during the speed test; result discarded.');
     }
@@ -1226,7 +1259,7 @@ class Backend {
       serverIP: active.ip,
       country: status.country || active.country,
       publicIP: status.ip || '',
-      throughputPath: this.platform === 'linux' ? 'vpn-interface-bound' : 'verified-os-full-route',
+      throughputPath: this.platform === 'linux' ? 'vpn-interface-bound' : 'vpn-source-ip-bound',
       throughputInterface: String(status.interface || ''),
       tunnelRouteVerifiedAfterTransfer: true,
       icmpPingMs,

@@ -1224,22 +1224,20 @@ test('real VPN throughput rejects physical ISP routes and binds Linux transfers 
   b.status = async () => ({ connected: true, fullRoutes: 2, interface: 'enp1s0' });
   await assert.rejects(b.benchmarkActive(), /VPN tunnel interface cannot be verified/);
   assert.deepEqual(
-    b._activeTunnelCurlArgs({ connected: true, fullRoutes: 2, interface: 'tun0' }),
+    await b._activeTunnelCurlArgs({ connected: true, fullRoutes: 2, interface: 'tun0' }),
     ['-4','--noproxy','*','--interface','if!tun0']
   );
   for (const suspicious of ['enp1s0', 'wg0', 'tun0;id', '--option', '']) {
-    assert.throws(
+    await assert.rejects(
       () => b._activeTunnelCurlArgs({ connected: true, fullRoutes: 2, interface: suspicious }),
       /VPN tunnel interface cannot be verified/
     );
   }
   b.platform = 'win32';
-  assert.throws(() => b._activeTunnelCurlArgs({ connected: true, fullRoutes: 0 }),
+  await assert.rejects(() => b._activeTunnelCurlArgs({ connected: true, fullRoutes: 0 }),
     /active full-route VPN/);
-  assert.deepEqual(
-    b._activeTunnelCurlArgs({ connected: true, fullRoutes: 2 }),
-    ['-4','--noproxy','*']
-  );
+  await assert.rejects(() => b._activeTunnelCurlArgs({ connected: true, fullRoutes: 2 }),
+    /Windows managed VPN interface is missing/);
   const source = fs.readFileSync(path.join(root, 'src/main/platform-backend.js'), 'utf8');
   const active = source.slice(source.indexOf('  async benchmarkActive()'),
     source.indexOf('  _githubHeaders()', source.indexOf('  async benchmarkActive()')));
@@ -1251,4 +1249,63 @@ test('real VPN throughput rejects physical ISP routes and binds Linux transfers 
   assert.ok(active.indexOf('const endStatus = await this.status()') <
             active.indexOf('this._writeJson('),
     'Do not persist a throughput claim after the VPN route changed');
+});
+
+test('Windows tunnel speed is bound to a uniquely verified VPN IPv4 source, never an unbound physical connection',async()=>{
+  const vm = require('node:vm');
+  const {EventEmitter} = require('node:events');
+  const source = fs.readFileSync(path.join(root,'src/main/platform-backend.js'),'utf8');
+  const calls = [];
+  let output = '10.19.0.8';
+  // Intercept only the child process API in this isolated VM. No PowerShell,
+  // Windows network, OpenVPN connector, or actual Internet request is invoked.
+  const fakeSpawn = (program,argv,options)=>{
+    const child = new EventEmitter();
+    child.stdin = new EventEmitter();
+    child.stdin.end = ()=>{};
+    child.stdout = new EventEmitter();
+    child.stderr = new EventEmitter();
+    calls.push({program,argv,options});
+    process.nextTick(()=>{
+      child.stdout.emit('data',Buffer.from(output));
+      child.emit('close',0);
+    });
+    return child;
+  };
+  const moduleObj = {exports:{}};
+  vm.runInNewContext(source,{
+    module:moduleObj,exports:moduleObj.exports,process,Buffer,setTimeout,clearTimeout,
+    require:n=>n==='child_process'?{spawn:fakeSpawn}:require(n)
+  },{filename:'platform-backend-test-vm.js'});
+  const b=new moduleObj.exports({version:'2.5.20',appPath:root,resourcesPath:root,userData:root});
+  b.platform='win32';
+  b._requireWindowsPwsh=()=> 'qa-fake-pwsh.exe';
+  const route = {connected:true,fullRoutes:2,interface:'OIG OpenVPN QA Device'};
+  const args = await b._activeTunnelCurlArgs(route);
+  assert.deepEqual(Array.from(args),['-4','--noproxy','*','--interface','host!10.19.0.8']);
+  assert.equal(calls.length,1);
+  assert.equal(calls[0].program,'qa-fake-pwsh.exe');
+  assert.equal(calls[0].options.env.OIG_SPEED_TUNNEL_IFACE,route.interface);
+  const ps=calls[0].argv.at(-1);
+  assert.match(ps,/Get-NetRoute -AddressFamily IPv4/);
+  assert.match(ps,/0\.0\.0\.0\/1/);
+  assert.match(ps,/128\.0\.0\.0\/1/);
+  assert.match(ps,/\$routes\.Count -ne 2/);
+  assert.match(ps,/\$indexes\.Count -ne 1/);
+  assert.match(ps,/Get-NetIPAddress -AddressFamily IPv4 -InterfaceIndex/);
+  assert.doesNotMatch(ps,/OIG OpenVPN QA Device/,'VPN alias must never be shell-interpolated');
+  for(const invalid of ['127.0.0.1','169.254.1.2','bad-response','10.19.0.8\n10.19.0.9']){
+    output=invalid;
+    await assert.rejects(b._activeTunnelCurlArgs(route),/no trustworthy IPv4 source/);
+  }
+  assert.equal(calls.length,5);
+  await assert.rejects(
+    b._activeTunnelCurlArgs({...route,interface:'VPN\nmalicious'}),
+    /Windows managed VPN interface is missing or invalid/
+  );
+  const active=source.slice(source.indexOf('  async benchmarkActive()'),
+    source.indexOf('  _githubHeaders()',source.indexOf('  async benchmarkActive()')));
+  assert.match(active,/await this\._activeTunnelCurlArgs\(status\)/);
+  assert.match(active,/endStatus\.interface !== status\.interface/);
+  assert.match(active,/vpn-source-ip-bound/);
 });
