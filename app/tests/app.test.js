@@ -519,6 +519,45 @@ test('LastKnownGood deduplicates the final normalized server-role profile hash',
   }finally{fs.rmSync(temp,{recursive:true,force:true});}
 });
 
+test('Linux Console Gateway refuses both active physical uplinks and unsafe overrides',()=>{
+  const src=fs.readFileSync(path.join(root,'backend/linux/oig-linux.sh'),'utf8');
+  const chosen=src.slice(src.indexOf('console_iface_is_safe() {'),src.indexOf('\nconsole_status() {'));
+  const enable=src.slice(src.indexOf('console_enable() {'),src.indexOf('\nconsole_disable() {'));
+  assert.match(enable,/console_iface_is_safe "\$iface"/);
+  assert.ok(enable.indexOf('console_iface_is_safe') < enable.indexOf('console_owned_uuids'));
+  assert.match(chosen,/ip -4 route show default/);
+  assert.match(chosen,/disconnected/);
+  if(process.platform!=='linux')return;
+  const cp=require('node:child_process');
+  const program=[
+    'set -euo pipefail',
+    'ip(){',
+    ' [[ "$*" == "-4 route show default" ]] || return 4',
+    ' echo "default via 10.0.0.1 dev eth0 metric 100"',
+    ' echo "default via 192.168.0.1 dev eth1 metric 101"',
+    '}',
+    'nmcli(){',
+    ' [[ "$*" == "-t -f DEVICE,TYPE,STATE device status" ]] || return 5',
+    ' echo "eth0:ethernet:connected"',
+    ' echo "eth1:ethernet:connected"',
+    ' echo "eth2:ethernet:disconnected"',
+    ' echo "wlan0:wifi:disconnected"',
+    '}',
+    chosen,
+    'if console_iface_is_safe eth0;then exit 20;fi',
+    'if console_iface_is_safe eth1;then exit 21;fi',
+    'if console_iface_is_safe wlan0;then exit 22;fi',
+    'console_iface_is_safe eth2 || exit 23',
+    'OIG_CONSOLE_IF=eth1',
+    'if console_iface_is_safe "$(console_iface)";then exit 24;fi',
+    'unset OIG_CONSOLE_IF',
+    '[[ "$(console_iface)" == eth2 ]] || exit 25',
+    'echo "PASS active/default NICs blocked, disconnected spare selected"'
+  ].join('\n');
+  const r=cp.spawnSync('bash',['-c',program],{encoding:'utf8',timeout:4000});
+  assert.equal(r.status,0,r.stderr||r.stdout);
+});
+
 test('Linux Console Gateway disable refuses foreign Ethernet and deletes only marked UUID',()=>{
   const src=fs.readFileSync(path.join(root,'backend/linux/oig-linux.sh'),'utf8');
   const helpers=src.slice(src.indexOf('is_oig_owned_console_uuid() {'),src.indexOf('\nconsole_iface() {'));

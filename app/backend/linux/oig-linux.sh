@@ -676,17 +676,29 @@ console_owned_uuids() {
   done < <(printf '%s\n' "$inventory" | awk -F: -v n="$target" '$2==n {print $1}')
 }
 
+console_iface_is_safe() {
+  local iface="$1" defaults devices
+  [[ "$iface" =~ ^[a-zA-Z0-9_.-]{1,32}$ ]] || return 1
+  # Never reconfigure a default Internet uplink, including any secondary
+  # physical default route. A manual OIG_CONSOLE_IF override cannot bypass it.
+  defaults="$(ip -4 route show default 2>/dev/null)" || return 1
+  [[ -n "$defaults" ]] || return 1
+  if printf '%s\n' "$defaults" | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}' | grep -Fxq -- "$iface"; then
+    return 1
+  fi
+  devices="$(nmcli -t -f DEVICE,TYPE,STATE device status 2>/dev/null)" || return 1
+  printf '%s\n' "$devices" |
+    awk -F: -v n="$iface" '$1==n && $2=="ethernet" && $3=="disconnected" {ok=1} END{exit(ok?0:1)}'
+}
+
 console_iface() {
-  if [[ -n "${OIG_CONSOLE_IF:-}" ]]; then
+  if [[ -v OIG_CONSOLE_IF && -n "$OIG_CONSOLE_IF" ]]; then
     echo "$OIG_CONSOLE_IF"
     return
   fi
-  local uplink
-  uplink="$(ip -4 route show default 2>/dev/null | awk '{for(i=1;i<=NF;i++)if($i=="dev"){print $(i+1);exit}}')"
-  nmcli -t -f DEVICE,TYPE,STATE device status |
-    awk -F: -v up="$uplink" '$2=="ethernet" && $1!="" && $1!=up && $3!="unmanaged" {print $1; exit}'
+  nmcli -t -f DEVICE,TYPE,STATE device status 2>/dev/null |
+    awk -F: '$2=="ethernet" && $3=="disconnected" {print $1; exit}'
 }
-
 console_status() {
   local iface state
   iface="$(console_iface)"
@@ -702,6 +714,10 @@ console_enable() {
   local iface uuid old_uuid existing
   iface="$(console_iface)"
   [[ -n "$iface" ]] || { echo "No dedicated Ethernet adapter found." >&2; return 30; }
+  if ! console_iface_is_safe "$iface"; then
+    echo "Console Gateway requires disconnected Ethernet outside all default Internet routes." >&2
+    return 32
+  fi
   healthy || { echo "Validated VPN tunnel must be active first." >&2; return 31; }
   existing="$(console_owned_uuids)" || {
     echo "The Console Gateway name is owned by another NetworkManager connection; refusing to modify it." >&2
