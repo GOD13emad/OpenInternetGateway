@@ -519,6 +519,48 @@ test('LastKnownGood deduplicates the final normalized server-role profile hash',
   }finally{fs.rmSync(temp,{recursive:true,force:true});}
 });
 
+test('Linux managed VPN connection teardown requires its explicit stable-id marker',()=>{
+  const src=fs.readFileSync(path.join(root,'backend/linux/oig-linux.sh'),'utf8');
+  const cleanup=src.slice(src.indexOf('is_oig_owned_vpn_uuid() {'),src.indexOf('\ncleanup_imported_material() {'));
+  const pre=src.slice(src.indexOf('preflight_one() {'),src.indexOf('\nwrite_profile_state() {'));
+  const connect=src.slice(src.indexOf('connect_one() {'),src.indexOf('\nrecord_success() {'));
+  assert.match(src,/OIG_MARKER="openinternetgateway-managed-v1"/);
+  assert.match(pre,/connection\.stable-id "\$OIG_MARKER"/);
+  assert.match(connect,/connection\.stable-id "\$OIG_MARKER"/);
+  assert.match(cleanup,/connection\.stable-id/);
+  assert.match(cleanup,/connection\.type/);
+  assert.match(cleanup,/is_oig_owned_vpn_uuid/);
+  if(process.platform!=='linux') return;
+  const cp=require('node:child_process');
+  const script=[
+    'set -euo pipefail',
+    'OIG_MARKER="openinternetgateway-managed-v1"',
+    'log="$(mktemp)"',
+    'trap \'rm -f "$log"\' EXIT',
+    'nmcli(){',
+    '  case "$*" in',
+    '    "-t -f UUID,NAME connection show")',
+    '       echo "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:OIG-VPN-LIVE"',
+    '       echo "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb:OIG-VPN-LIVE"',
+    '       echo "cccccccc-cccc-cccc-cccc-cccccccccccc:OIG-VPN-LIVE";;',
+    '    "-g connection.type connection show uuid "* ) echo vpn;;',
+    '    "-g connection.stable-id connection show uuid aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa") echo "";;',
+    '    "-g connection.stable-id connection show uuid bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb") echo other-app;;',
+    '    "-g connection.stable-id connection show uuid cccccccc-cccc-cccc-cccc-cccccccccccc") echo "$OIG_MARKER";;',
+    '    "connection down uuid cccccccc-cccc-cccc-cccc-cccccccccccc") echo down >> "$log";;',
+    '    "connection delete uuid cccccccc-cccc-cccc-cccc-cccccccccccc") echo delete >> "$log";;',
+    '    *) return 10;;',
+    '  esac',
+    '}',
+    cleanup,
+    'delete_connection_name OIG-VPN-LIVE',
+    '[[ "$(grep -c "^down$" "$log")" -eq 1 && "$(grep -c "^delete$" "$log")" -eq 1 ]] || exit 23',
+    'echo "PASS only marker-owning UUID selected"'
+  ].join('\n');
+  const r=cp.spawnSync('bash',['-c',script],{encoding:'utf8',timeout:4000});
+  assert.equal(r.status,0,r.stderr||r.stdout);
+});
+
 test('Linux temp VPN import chooses the new UUID, never deletes an existing profile with same name',()=>{
   const linux=fs.readFileSync(path.join(root,'backend/linux/oig-linux.sh'),'utf8');
   const helper=linux.slice(linux.indexOf('import_temporary_profile_uuid() {'),linux.indexOf('\ndelete_named_connections() {'));
@@ -1218,7 +1260,8 @@ test('Linux status tolerates a transient geo probe failure only for a real manag
   const statusBlock=linux.slice(linux.indexOf('json_status()'),linux.indexOf('\nhealthy()'));
   assert.match(statusBlock,/managed_active=false/);
   assert.match(statusBlock,/connection show --active/);
-  assert.match(statusBlock,/\$1==n && \$2=="vpn"/);
+  assert.match(statusBlock,/\$2==n && \$3=="vpn"/);
+  assert.match(statusBlock,/is_oig_owned_vpn_uuid/);
   assert.doesNotMatch(statusBlock,/\$3 ~ \/\^\(tun\|tap\)\//);
   assert.match(statusBlock,/probe_degraded=false/);
   assert.match(statusBlock,/\[\[ -z "\$loc" && "\$managed_active" == true && "\$routes" -ge 2/);

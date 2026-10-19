@@ -9,6 +9,7 @@ CONN="OIG-VPN-LIVE"
 PREFLIGHT_CONN="OIG-VPN-PREFLIGHT"
 LEGACY_CONN="OIG-JP-UDP-LIVE"
 CONSOLE_CONN="OIG-Console-Gateway"
+OIG_MARKER="openinternetgateway-managed-v1"
 KEEP="$STATE/linux.keep"
 LOCK="$STATE/gateway.lock"
 FACTORY_PY="$OIG_HOME/linux/config_factory.py"
@@ -43,12 +44,19 @@ desired_state() {
   fi
 }
 
+is_oig_owned_vpn_uuid() {
+  local uuid="$1"
+  [[ "$uuid" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]] || return 1
+  [[ "$(nmcli -g connection.type connection show uuid "$uuid" 2>/dev/null)" == "vpn" ]] || return 1
+  [[ "$(nmcli -g connection.stable-id connection show uuid "$uuid" 2>/dev/null)" == "$OIG_MARKER" ]] || return 1
+}
+
 delete_connection_name() {
   local target="$1"
   nmcli -t -f UUID,NAME connection show 2>/dev/null |
     awk -F: -v n="$target" '$2==n {print $1}' |
     while read -r uuid; do
-      [[ -n "$uuid" ]] || continue
+      is_oig_owned_vpn_uuid "$uuid" || continue
       nmcli connection down uuid "$uuid" >/dev/null 2>&1 || true
       nmcli connection delete uuid "$uuid" >/dev/null 2>&1 || true
     done
@@ -98,10 +106,13 @@ json_status() {
   if [[ "$iface" == tun* || "$iface" == tap* ]]; then routes=2; else routes=0; fi
 
   managed_active=false
-  if nmcli -t -f NAME,TYPE,DEVICE connection show --active 2>/dev/null |
-      awk -F: -v n="$CONN" '$1==n && $2=="vpn" {found=1} END{exit(found?0:1)}'; then
-    managed_active=true
-  fi
+  while read -r candidate_uuid; do
+    if is_oig_owned_vpn_uuid "$candidate_uuid"; then
+      managed_active=true
+      break
+    fi
+  done < <(nmcli -t -f UUID,NAME,TYPE connection show --active 2>/dev/null |
+    awk -F: -v n="$CONN" '$2==n && $3=="vpn" {print $1}')
 
   relay=""
   profile_ip=""
@@ -307,7 +318,13 @@ preflight_one() {
 
   uuid="$(import_temporary_profile_uuid "$profile")" || return 12
   if ! nmcli connection modify uuid "$uuid" connection.id "$PREFLIGHT_CONN" connection.autoconnect no \
-    ipv6.method disabled ipv4.never-default yes ipv4.ignore-auto-routes yes ipv4.ignore-auto-dns yes; then
+    ipv6.method disabled ipv4.never-default yes ipv4.ignore-auto-routes yes ipv4.ignore-auto-dns yes \
+    connection.stable-id "$OIG_MARKER"; then
+    nmcli connection delete uuid "$uuid" >/dev/null 2>&1 || true
+    cleanup_imported_material "$profile"
+    return 12
+  fi
+  if ! is_oig_owned_vpn_uuid "$uuid"; then
     nmcli connection delete uuid "$uuid" >/dev/null 2>&1 || true
     cleanup_imported_material "$profile"
     return 12
@@ -385,7 +402,13 @@ connect_one() {
   local uuid
   uuid="$(import_temporary_profile_uuid "$profile")" || return 12
 
-  if ! nmcli connection modify uuid "$uuid" connection.id "$CONN" connection.autoconnect no ipv6.method disabled ipv4.never-default no; then
+  if ! nmcli connection modify uuid "$uuid" connection.id "$CONN" connection.autoconnect no ipv6.method disabled ipv4.never-default no \
+    connection.stable-id "$OIG_MARKER"; then
+    nmcli connection delete uuid "$uuid" >/dev/null 2>&1 || true
+    cleanup_imported_material "$profile"
+    return 12
+  fi
+  if ! is_oig_owned_vpn_uuid "$uuid"; then
     nmcli connection delete uuid "$uuid" >/dev/null 2>&1 || true
     cleanup_imported_material "$profile"
     return 12
