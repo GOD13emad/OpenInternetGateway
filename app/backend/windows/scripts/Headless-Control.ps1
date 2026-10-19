@@ -166,8 +166,8 @@ function Get-QualityScore($c,[string]$Key,[hashtable]$Success,[hashtable]$Failur
   try{
    if(Test-Fresh $b.fastAt 24){
     $fast=Get-Number $b.fastPingMs
-    if($null -ne $fast){$score+=[Math]::Max(-80,140-$fast*0.45)}
-    elseif($proto -eq 'tcp' -and $null -ne $b.fastReachable -and -not [bool]$b.fastReachable){$score-=180}
+    if($proto -eq 'tcp' -and $null -ne $b.fastReachable -and -not [bool]$b.fastReachable){$score-=180}
+    elseif($null -ne $fast){$score+=[Math]::Max(-80,140-$fast*0.45)}
    }
    if(Test-Fresh $b.at 72){
     $down=Get-Number $b.downloadMbps;$up=Get-Number $b.uploadMbps;$lat=Get-Number $b.httpsLatencyMs

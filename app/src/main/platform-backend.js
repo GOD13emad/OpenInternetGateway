@@ -22,6 +22,9 @@ function run(file, args, options = {}) {
       cwd: options.cwd,
       windowsHide: true,
       shell: false,
+      // curl telnet:// waits for stdin EOF; use /dev/null (or NUL) for the
+      // quick TCP-port probe only, without changing other command behavior.
+      stdio: options.closeStdin ? ['ignore','pipe','pipe'] : ['pipe','pipe','pipe'],
       env: { ...process.env, ...(options.env || {}) }
     });
     let stdout = '';
@@ -784,7 +787,7 @@ class Backend {
         '--connect-timeout',String(timeoutSeconds),'--max-time',String(timeoutSeconds),
         '-sS','-o',sink,'-w','%{time_connect}',
         'telnet://' + ip + ':' + String(port)
-      ], { timeout: Math.ceil((timeoutSeconds + 1) * 1000), allowFailure: true });
+      ], { timeout: Math.ceil((timeoutSeconds + 1) * 1000), allowFailure: true, closeStdin: true });
       const seconds = Number(String(r.stdout || '').trim());
       return Number.isFinite(seconds) && seconds > 0 ? Math.round(seconds * 1000 * 10) / 10 : null;
     } catch {
@@ -799,14 +802,17 @@ class Backend {
       ? this._directTcpConnectMs(profile.ip, profile.port, pathInfo)
       : Promise.resolve(null);
     const [icmpPingMs, tcpConnectMs] = await Promise.all([pingPromise, tcpPromise]);
-    const candidates = [icmpPingMs, tcpConnectMs].filter(v => Number.isFinite(v));
-    const fastPingMs = candidates.length ? Math.min(...candidates) : null;
+    // A TCP host answering ICMP is not evidence that its advertised port is open.
+    // Report the TCP connect latency when proven; keep ICMP-only as a separate hint.
+    const fastPingMs = profile.protocol === 'tcp' ? (tcpConnectMs ?? icmpPingMs) : icmpPingMs;
     return {
       fastAt: new Date().toISOString(),
       fastPingMs,
       tcpConnectMs,
-      fastReachable: fastPingMs != null,
-      fastMethod: tcpConnectMs != null && (icmpPingMs == null || tcpConnectMs <= icmpPingMs) ? 'tcp-direct' : (icmpPingMs != null ? 'icmp-direct' : 'none'),
+      fastReachable: profile.protocol === 'tcp' ? tcpConnectMs != null : icmpPingMs != null,
+      fastMethod: profile.protocol === 'tcp'
+        ? (tcpConnectMs != null ? 'tcp-direct' : (icmpPingMs != null ? 'icmp-only' : 'none'))
+        : (icmpPingMs != null ? 'icmp-direct' : 'none'),
       fastElapsedMs: Date.now() - started,
       directInterface: pathInfo.interface,
       directLocalIP: pathInfo.localIP
