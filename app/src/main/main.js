@@ -57,8 +57,11 @@ function createWindow({ showWhenReady = !startInBackground } = {}) {
           fs.writeFileSync(process.env.OIG_CAPTURE_PATH, image.toPNG());
         } finally {
           if (process.env.OIG_CAPTURE_ONLY === '1') {
+            // This process has no managed VPN session: after saving the QA
+            // frame, exit unconditionally instead of relying on quit hooks
+            // that may keep hidden Chromium windows/processes alive.
             app.isQuitting = true;
-            app.quit();
+            app.exit(0);
           }
         }
       }, 350);

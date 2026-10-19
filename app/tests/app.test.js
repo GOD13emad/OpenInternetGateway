@@ -1414,6 +1414,13 @@ test('Windows packaged capture QA is fail-closed and never writes the real insta
       "QA must not register the user's Windows login autostart");
     assert.match(entry,/process\.platform !== 'win32' \|\| process\.env\.OIG_CAPTURE_ONLY !== '1'\) createTray\(\)/,
       'QA must not create a notification icon in the real Windows tray');
+    const frame=entry.slice(entry.indexOf("win.once('ready-to-show'"),
+      entry.indexOf("win.on('close'"));
+    assert.ok(frame.indexOf('fs.writeFileSync(process.env.OIG_CAPTURE_PATH') >= 0,
+      'Capture frame must be stored before quitting');
+    assert.ok(frame.indexOf('app.exit(0)') >
+      frame.indexOf('fs.writeFileSync(process.env.OIG_CAPTURE_PATH'),
+      'Capture must exit the Electron process unconditionally after writing the frame');
   } finally {
     for(const name of vars){
       if(previous[name]===undefined)delete process.env[name];else process.env[name]=previous[name];
