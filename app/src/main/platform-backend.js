@@ -27,6 +27,12 @@ function run(file, args, options = {}) {
       stdio: options.closeStdin ? ['ignore','pipe','pipe'] : ['pipe','pipe','pipe'],
       env: { ...process.env, ...(options.env || {}) }
     });
+    if (options.input !== undefined && !options.closeStdin) {
+      // Suppress EPIPE when a rejected child exits before consuming stdin.
+      // The secret never enters the process argv/environment/logging path.
+      child.stdin?.on('error', () => {});
+      child.stdin?.end(options.input);
+    }
     let stdout = '';
     let stderr = '';
     child.stdout?.on('data', d => stdout += d.toString());
@@ -65,6 +71,10 @@ class Backend {
     this.platform = process.platform;
     this.backendRoot = null;
     this.sandboxHardening = null;
+    this.operatorTrialBusy = false;
+    this.operatorProfileTaskBusy = false;
+    this.operatorUpdateBusy = false;
+    this.gatewayActionCount = 0;
   }
 
   async _hardenLinuxChromiumSandbox() {
@@ -194,6 +204,192 @@ class Backend {
       this.sandboxHardening = await this._hardenLinuxChromiumSandbox();
     }
     return { sandboxHardening: this.sandboxHardening };
+  }
+
+  // An offline user-selected import. Never register with the live relay pool,
+  // activate NetworkManager, or mark an untested connection as protected.
+  operatorProfileStatus() {
+    if (this.platform !== 'linux' || !this.backendRoot) {
+      return { supported: false, staged: false, readyForAutomaticConnection: false };
+    }
+    const file = path.join(this.backendRoot, 'common', 'operator-profiles', 'current.json');
+    try {
+      const meta = this._readJson(file, {}) || {};
+      if (meta.provider !== 'VPNBook' || meta.profilePolicyValidated !== true ||
+          !/^[a-f0-9]{64}$/.test(String(meta.profileSha256 || '')) ||
+          !/^[a-f0-9]{64}$/.test(String(meta.caDerSha256 || ''))) {
+        return { supported: true, staged: false, readyForAutomaticConnection: false };
+      }
+      const dir = path.dirname(file);
+      const name = String(meta.profile || '');
+      if (name !== meta.profileSha256 + '.ovpn') {
+        return { supported: true, staged: false, readyForAutomaticConnection: false };
+      }
+      const input = path.join(dir, name);
+      const indexStat = fs.lstatSync(file);
+      const directoryStat = fs.lstatSync(dir);
+      const profileStat = fs.lstatSync(input);
+      if (!indexStat.isFile() || indexStat.isSymbolicLink() || indexStat.nlink !== 1 ||
+          !directoryStat.isDirectory() || directoryStat.isSymbolicLink() ||
+          !profileStat.isFile() || profileStat.isSymbolicLink() || profileStat.nlink !== 1 ||
+          (indexStat.mode & 0o077) !== 0 || (profileStat.mode & 0o077) !== 0 ||
+          (directoryStat.mode & 0o077) !== 0 || profileStat.size > 256 * 1024) {
+        return { supported: true, staged: false, readyForAutomaticConnection: false };
+      }
+      const actual = crypto.createHash('sha256').update(fs.readFileSync(input)).digest('hex');
+      if (actual !== meta.profileSha256) {
+        return { supported: true, staged: false, readyForAutomaticConnection: false };
+      }
+      // Status reports structural staging only; it does not transfer trust to
+      // an active tunnel (the current VPNGate backend remains independent).
+      return {
+        supported: true, staged: true, provider: 'VPNBook',
+        remoteHost: String(meta.remoteHost || ''), remotePort: Number(meta.remotePort || 0),
+        profileSha256: meta.profileSha256,
+        profilePolicyValidated: true,
+        liveTlsVerified: false, connected: false, readyForAutomaticConnection: false
+      };
+    } catch {
+      return { supported: true, staged: false, readyForAutomaticConnection: false };
+    }
+  }
+
+  async stageOperatorProfile(profilePath, caSha256, peerCN) {
+    if (this.operatorTrialBusy) throw new Error('Cannot replace the operator profile while its trial is active.');
+    if (this.operatorProfileTaskBusy) throw new Error('Another operator-profile task is still running.');
+    if (this.operatorUpdateBusy) throw new Error('Cannot operate on profiles while an update is pending.');
+    if (this.platform !== 'linux' || !this.backendRoot) {
+      throw new Error('Operator profile import is available only on Linux.');
+    }
+    const sha = String(caSha256 || '').trim().replace(/:/g, '').toLowerCase();
+    const cn = String(peerCN || '').trim();
+    if (!/^[a-f0-9]{64}$/.test(sha) || !/^[A-Za-z0-9._-]{1,128}$/.test(cn)) {
+      throw new Error('An independently authenticated CA SHA-256 and exact server CN are required.');
+    }
+    if (typeof profilePath !== 'string' || !path.isAbsolute(profilePath) ||
+        !/\.ovpn$/i.test(profilePath) || profilePath.includes('\0')) {
+      throw new Error('Select a local .ovpn file through the native file chooser.');
+    }
+    const helper = path.join(this.backendRoot, 'linux', 'operator_profile.py');
+    if (!fs.existsSync(helper)) throw new Error('Linux operator-profile policy helper is not installed.');
+    this.operatorProfileTaskBusy = true;
+    try {
+      const result = await run('python3', [
+        '-B', helper, 'stage', '--profile', profilePath, '--ca-sha256', sha,
+        '--peer-cn', cn, '--common', path.join(this.backendRoot, 'common')
+      ], { cwd: this.backendRoot, timeout: 12000 });
+      const response = JSON.parse(result.stdout || '{}');
+      if (response.ok !== true || response.readyForAutomaticConnection !== false) {
+        throw new Error('Offline operator-profile validation did not complete safely.');
+      }
+      return { ...this.operatorProfileStatus(), imported: true };
+    } finally {
+      this.operatorProfileTaskBusy = false;
+    }
+  }
+
+  async checkOperatorNativeCompatibility() {
+    if (this.operatorTrialBusy) throw new Error('Cannot import the operator profile while its trial is active.');
+    if (this.operatorProfileTaskBusy) throw new Error('Another operator-profile task is still running.');
+    if (this.operatorUpdateBusy) throw new Error('Cannot operate on profiles while an update is pending.');
+    if (this.platform !== 'linux' || !this.backendRoot) {
+      throw new Error('Native operator-profile compatibility check is Linux-only.');
+    }
+    if (this.operatorProfileStatus().staged !== true) {
+      throw new Error('No verified, unchanged private operator profile is staged.');
+    }
+    const dir = path.join(this.backendRoot, 'common', 'operator-profiles');
+    const meta = this._readJson(path.join(dir, 'current.json'), {}) || {};
+    if (!/^[0-9a-f]{64}$/.test(String(meta.caDerSha256 || '')) ||
+        !/^[A-Za-z0-9._-]{1,128}$/.test(String(meta.expectedPeerCN || ''))) {
+      throw new Error('Stored operator identity constraint is invalid.');
+    }
+    const helper = path.join(this.backendRoot, 'linux', 'operator_profile.py');
+    if (!fs.existsSync(helper)) throw new Error('Operator-profile checker is missing.');
+    this.operatorProfileTaskBusy = true;
+    try {
+      const result = await run('python3', [
+        '-B', helper, 'native-check',
+        '--profile', path.join(dir, meta.profile),
+        '--ca-sha256', meta.caDerSha256,
+        '--peer-cn', meta.expectedPeerCN
+      ], { cwd: this.backendRoot, timeout: 20000 });
+      const response = JSON.parse(result.stdout || '{}');
+      if (response.ok !== true || response.nativeImportCompatible !== true ||
+          response.temporaryProfileRemoved !== true ||
+          response.connectionActivated !== false ||
+          response.readyForAutomaticConnection !== false) {
+        throw new Error('Temporary NetworkManager import did not finish with verified cleanup.');
+      }
+      return {
+        nativeImportCompatible: true, temporaryProfileRemoved: true,
+        connectionActivated: false, readyForAutomaticConnection: false,
+        liveTlsVerified: false
+      };
+    } finally {
+      this.operatorProfileTaskBusy = false;
+    }
+  }
+
+  async operatorConnectionTrial(username, password) {
+    if (this.platform !== 'linux' || !this.backendRoot) {
+      throw new Error('Isolated provider trial is available only on Linux.');
+    }
+    if (this.operatorTrialBusy) throw new Error('A provider trial is already active.');
+    if (this.operatorUpdateBusy) throw new Error('Wait for the pending update to complete before an isolated provider trial.');
+    if (this.operatorProfileTaskBusy) throw new Error('Wait for operator-profile import/check to complete before its trial.');
+    if (this.gatewayActionCount > 0) throw new Error('Wait for the regular gateway operation to finish before an isolated provider trial.');
+    if (this.operatorProfileStatus().staged !== true) {
+      throw new Error('No privately staged and unchanged operator profile exists.');
+    }
+    if (!/^[A-Za-z0-9._@+-]{1,96}$/.test(username) ||
+        typeof password !== 'string' || password.length < 1 ||
+        password.length > 256 || /[^\x20-\x7e]/.test(password)) {
+      throw new Error('Invalid transient provider credentials.');
+    }
+    const intent = path.join(this.backendRoot, 'state', 'desired-state');
+    try {
+      if (fs.readFileSync(intent, 'utf8').trim() !== 'off') {
+        throw new Error('Disconnect the regular OIG gateway before starting an isolated trial.');
+      }
+    } catch (error) {
+      if (error.code === 'ENOENT') {
+        throw new Error('Cannot verify gateway disconnect intent; trial refused.');
+      }
+      throw error;
+    }
+    const dir = path.join(this.backendRoot, 'common', 'operator-profiles');
+    const meta = this._readJson(path.join(dir, 'current.json'), {}) || {};
+    const script = path.join(this.backendRoot, 'linux', 'operator_trial.py');
+    if (!fs.existsSync(script)) throw new Error('Linux trial helper is not installed.');
+    this.operatorTrialBusy = true;
+    try {
+      // Credential JSON exists only in JS memory and the Python stdin pipe;
+      // never pass the password by command argument, environment or file.
+      const result = await run('python3', [
+        '-B', script, 'trial', '--profile', path.join(dir, meta.profile),
+        '--ca-sha256', meta.caDerSha256, '--peer-cn', meta.expectedPeerCN,
+        '--timer-seconds', '90', '--hold-seconds', '3'
+      ], {
+        cwd: this.backendRoot, timeout: 90000,
+        input: JSON.stringify({ username, password })
+      });
+      const data = JSON.parse(result.stdout || '{}');
+      if (data.ok !== true || data.tempProfileRemoved !== true ||
+          data.independentTimerArmedBeforeActivation !== true ||
+          data.readyForAutomaticConnection !== false ||
+          data.identityVerifiedByApp !== false) {
+        throw new Error('Trial cleanup or trust status was not confirmed.');
+      }
+      return {
+        ok: true, provider: 'VPNBook', transportAttempted: true,
+        trialTransport: data.trialTransport, tempProfileRemoved: true,
+        identityVerifiedByApp: false, liveTlsVerified: false,
+        fullDeviceTunnelVerified: false, readyForAutomaticConnection: false
+      };
+    } finally {
+      this.operatorTrialBusy = false;
+    }
   }
 
   platformInfo() {
@@ -1460,8 +1656,12 @@ exit 0
   }
 
   async action(action, options = {}) {
-    this.emit({ type: 'busy', action, busy: true });
+    if (this.platform === 'linux' && this.operatorTrialBusy && action !== 'disconnect') {
+      throw new Error('An isolated provider trial is active; normal gateway operations are temporarily blocked.');
+    }
+    this.gatewayActionCount += 1;
     try {
+      this.emit({ type: 'busy', action, busy: true });
       let result;
       if (this.platform === 'win32' && (action === 'connect' || action === 'connect-profile')) {
         await this._ensureWindowsRuntimePrerequisites();
@@ -1510,6 +1710,8 @@ exit 0
     } catch (error) {
       this.emit({ type: 'error', action, busy: false, message: error.message });
       throw error;
+    } finally {
+      this.gatewayActionCount = Math.max(0, this.gatewayActionCount - 1);
     }
   }
 

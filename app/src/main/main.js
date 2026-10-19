@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, Menu, Tray, nativeImage, shell, nativeTheme } = require('electron');
+const { app, BrowserWindow, ipcMain, Menu, Tray, nativeImage, shell, nativeTheme, dialog } = require('electron');
 const { spawn } = require('child_process');
 const path = require('path');
 const fs = require('fs');
@@ -134,28 +134,63 @@ function registerIpc() {
   ipcMain.handle('gateway:diagnostics', () => backend.diagnostics());
   ipcMain.handle('gateway:activity', () => backend.activity());
   ipcMain.handle('gateway:platform', () => backend.platformInfo());
+  ipcMain.handle('gateway:operatorProfileStatus', () => backend.operatorProfileStatus());
+  ipcMain.handle('gateway:operatorNativeCheck', () => backend.checkOperatorNativeCompatibility());
+  ipcMain.handle('gateway:operatorTrial', (_event, input = {}) => {
+    if (process.platform !== 'linux') throw new Error('Operator VPN trial is Linux-only.');
+    return backend.operatorConnectionTrial(input.username, input.password);
+  });
+  ipcMain.handle('gateway:stageOperatorProfile', async (_e, input = {}) => {
+    if (process.platform !== 'linux') throw new Error('Operator profile import is Linux-only.');
+    const caSha256 = String(input?.caSha256 || '');
+    const peerCN = String(input?.peerCN || '');
+    // Validate before opening the native file chooser, and never accept a
+    // filesystem path supplied by the renderer. The chooser remains cancelable.
+    if (!/^(?:[a-fA-F0-9]{2}:?){32}$/.test(caSha256) ||
+        !/^[A-Za-z0-9._-]{1,128}$/.test(peerCN)) {
+      throw new Error('Enter an independently verified CA SHA-256 and expected server certificate CN.');
+    }
+    const chosen = await dialog.showOpenDialog(mainWindow, {
+      title: 'Choose VPNBook OpenVPN configuration (offline staging only)',
+      properties: ['openFile'],
+      filters: [{ name: 'OpenVPN configuration', extensions: ['ovpn'] }]
+    });
+    if (chosen.canceled || chosen.filePaths?.length !== 1) return { canceled: true };
+    return backend.stageOperatorProfile(chosen.filePaths[0], caSha256, peerCN);
+  });
   ipcMain.handle('gateway:openLogs', async () => shell.openPath(await backend.logsPath()));
   ipcMain.handle('gateway:updateInfo', (_e, force) => backend.updateInfo(!!force));
   ipcMain.handle('gateway:installUpdate', async () => {
-    const result = await backend.downloadUpdate();
-    if (result.alreadyCurrent || !result.path) return { ...result, applying: false };
-    const launched = await backend.launchDownloadedUpdate(result, {
-      appPid: process.pid,
-      currentExecutable: process.execPath
-    });
-    if (launched?.applying) {
-      if (process.platform === 'linux' && backend?.backendRoot) {
-        // Disarm the old parent-exit watchdog. The new app writes its own lease
-        // after restart; a failed updater helper relaunches the previous app.
-        try {
-          const lease = path.join(backend.backendRoot, 'state', 'app-process.lease');
-          fs.mkdirSync(path.dirname(lease), { recursive: true });
-          fs.writeFileSync(lease, 'update ' + process.pid + ' ' + Date.now() + '\n');
-        } catch {}
+    if (backend.operatorTrialBusy) throw new Error('Wait for isolated VPN trial cleanup before updating.');
+    if (backend.operatorProfileTaskBusy) throw new Error('Wait for operator-profile import/check to complete before updating.');
+    if (backend.operatorUpdateBusy) throw new Error('An update is already in progress.');
+    backend.operatorUpdateBusy = true;
+    let handedOff = false;
+    try {
+      const result = await backend.downloadUpdate();
+      if (result.alreadyCurrent || !result.path) return { ...result, applying: false };
+      const launched = await backend.launchDownloadedUpdate(result, {
+        appPid: process.pid,
+        currentExecutable: process.execPath
+      });
+      if (launched?.applying) {
+        if (process.platform === 'linux' && backend?.backendRoot) {
+          // Disarm the old parent-exit watchdog. The new app writes its own lease
+          // after restart; a failed updater helper relaunches the previous app.
+          try {
+            const lease = path.join(backend.backendRoot, 'state', 'app-process.lease');
+            fs.mkdirSync(path.dirname(lease), { recursive: true });
+            fs.writeFileSync(lease, 'update ' + process.pid + ' ' + Date.now() + '\n');
+          } catch {}
+        }
+        handedOff = true;
+        setTimeout(requestProcessExitPreservingTunnel, 500);
       }
-      setTimeout(requestProcessExitPreservingTunnel, 500);
+      return { ...result, ...launched };
+    } finally {
+      // If update handoff started, block new trials until process exit.
+      if (!handedOff) backend.operatorUpdateBusy = false;
     }
-    return { ...result, ...launched };
   });
   ipcMain.handle('gateway:openRelease', async () => {
     let url = 'https://github.com/GOD13emad/OpenInternetGateway/releases/latest';
@@ -208,6 +243,11 @@ async function disconnectBeforeQuit() {
 
 async function requestQuit() {
   if (quitInProgress || allowQuit) return;
+  if (backend?.operatorTrialBusy || backend?.operatorProfileTaskBusy) {
+    console.warn('OpenInternetGateway: a provider trial is active; Quit waits for cleanup.');
+    showDashboard();
+    return;
+  }
   quitInProgress = true;
   app.isQuitting = true;
   if (trayPoll) clearInterval(trayPoll);
@@ -225,6 +265,10 @@ async function requestQuit() {
 
 function requestProcessExitPreservingTunnel() {
   if (allowQuit) return;
+  if (backend?.operatorTrialBusy || backend?.operatorProfileTaskBusy) {
+    console.warn('OpenInternetGateway: cannot exit during provider trial cleanup.');
+    return;
+  }
   // Installer/update lifecycle exits are not the user's explicit Quit command.
   // Keep desired-state and the independent tunnel intact while the dashboard
   // is replaced and restarted.
