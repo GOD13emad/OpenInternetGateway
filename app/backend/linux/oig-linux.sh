@@ -62,13 +62,22 @@ delete_named_connections() {
   delete_connection_name "$LEGACY_CONN"
 }
 
+# dns.google A-response is a heuristic, not cryptographic DNS authentication.
+dns_google_answer_state() {
+  local answers="$1"
+  if [[ -z "$answers" ]]; then echo unknown
+  elif printf '%s\n' "$answers" | tr ',' '\n' | grep -Evqx '8\.8\.8\.8|8\.8\.4\.4'; then echo true
+  else echo false
+  fi
+}
+
 json_status() {
   local cf ip loc dns poison routes iface relay auto_state auto effective desired managed_active profile_ip profile_country probe_degraded
   cf="$(curl -4 --max-time 4 -s https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null || true)"
   ip="$(printf '%s\n' "$cf" | awk -F= '$1=="ip"{print $2;exit}')"
   loc="$(printf '%s\n' "$cf" | awk -F= '$1=="loc"{print $2;exit}')"
   dns="$(getent ahostsv4 dns.google 2>/dev/null | awk '{print $1}' | sort -u | paste -sd, - || true)"
-  if printf '%s' "$dns" | grep -q '10.10.34.35'; then poison=true; else poison=false; fi
+  poison="$(dns_google_answer_state "$dns")"
 
   effective="$(ip -4 route get 1.1.1.1 2>/dev/null | head -1 || true)"
   iface="$(printf '%s\n' "$effective" | awk '{for(i=1;i<=NF;i++)if($i=="dev"){print $(i+1);exit}}')"
@@ -125,7 +134,7 @@ r=int(routes or 0)
 connected=(r>=2 and managed=="true" and bool(loc) and loc!="IR" and poison=="false")
 print(json.dumps({
     "connected":connected,"ip":ip,"country":loc,"dns":dns_list,
-    "poison":poison=="true","fullRoutes":r,"relay":relay,
+    "poison":None if poison=="unknown" else poison=="true","fullRoutes":r,"relay":relay,
     "autoRecovery":auto=="true","autoRecoveryState":state,"interface":iface,
     "desiredState":desired,"managedTunnelActive":managed=="true",
     "healthProbeDegraded":probe_degraded=="true"

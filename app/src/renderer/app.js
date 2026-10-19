@@ -84,18 +84,22 @@ function renderStatus(s) {
   setText('relayName', s.relay || (connected ? 'Validated relay' : 'Not connected'));
   setText('relayMeta', connected ? ((s.engine === 'HeadlessConnector' ? 'Headless · sticky' : (s.interface || 'Tunnel interface')) + ' · anti-flap') : 'Validated endpoint · stable mode');
 
-  const routeOk = Number(s.fullRoutes || 0) >= 2;
-  const dnsOk = s.poison === false;
+  const routeOk = connected && Number(s.fullRoutes || 0) >= 2;
+  const dnsOk = connected && s.poison === false;
   const recoveryState = String(s.autoRecoveryState || '').toLowerCase();
   const recoveryOk = !!s.autoRecovery && !['inactive','failed','missing','disabled'].includes(recoveryState);
   const pool = s.configPool || {};
   const factoryOk = !!pool.healthy && Number(pool.pool || 0) >= 3;
   markHealth('routeIcon', 'routeHealth', routeOk, routeOk ? 'All IPv4 traffic protected' : 'Full-route not active');
-  markHealth('dnsIcon', 'dnsHealth', dnsOk, dnsOk ? 'Poison fingerprint absent' : 'DNS protection incomplete');
+  markHealth('dnsIcon', 'dnsHealth', dnsOk,
+    dnsOk ? 'DNS A-response matches reference (not authenticated)'
+      : (s.poison === true ? 'Unexpected dns.google A-response'
+          : (s.poison == null ? 'DNS check unavailable' : 'Requires active VPN tunnel')));
   markHealth('recoveryIcon', 'recoveryHealth', recoveryOk, recoveryOk ? (s.autoRecoveryState || 'Installed') : 'Not installed');
   markHealth('factoryIcon', 'factoryHealth', factoryOk, factoryOk ? (String(pool.validated || 0) + ' validated · ' + String(pool.pool || 0) + ' total') : 'Pool needs regeneration');
   const score = [routeOk, dnsOk, recoveryOk, factoryOk].filter(Boolean).length;
-  setText('healthScore', Math.round(score / 4 * 100) + '%');
+  // Protection is zero while the tunnel is disconnected; readiness is separate.
+  setText('healthScore', (connected ? Math.round(score / 4 * 100) : 0) + '%');
   $('autoButton').textContent = recoveryOk ? 'Installed' : 'Install';
   $('powerButton').title = connected ? 'Disconnect' : 'Connect';
 
