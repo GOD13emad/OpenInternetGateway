@@ -1,6 +1,7 @@
 [CmdletBinding()]
 param([int]$Count=48,[int]$PerCountry=6,[int]$PreserveOld=8,[int]$KeepGenerations=4)
 $ErrorActionPreference='Stop'
+. (Join-Path $PSScriptRoot 'Profile-Policy.ps1')
 $Root=Split-Path -Parent $PSScriptRoot
 $csv=Join-Path $Root 'evidence\vpngate-mirror-api.csv'
 if(-not(Test-Path $csv)){throw 'VPN Gate mirror API cache missing.'}
@@ -49,7 +50,7 @@ foreach($line in Get-Content -LiteralPath $csv){
  if($text -notmatch '(?s)<cert>.+?</cert>'){continue}
  if($text -notmatch '(?s)<key>.+?</key>'){continue}
  # Treat public profiles as data, never executable local policy.
- if($text -match '(?mi)^\s*(?:script-security|up|down|route-up|route-pre-down|ipchange|plugin|client-connect|client-disconnect|learn-address)'){continue}
+ if(-not (Test-OigVpnProfile -Text $text -ExpectedIP $ip -ExpectedPort $port -ExpectedProtocol $transport)){continue}
  $rows += [pscustomobject]@{
    Host=$p[0];IP=$ip;Score=[int64]$p[2];Ping=$p[3];Speed=[int64]$p[4];
    Sessions=[int]$p[7];Port=$port;Text=$text;Source='VPNGate';
@@ -108,6 +109,8 @@ foreach($wrap in $oldSorted){
  if((Get-FileHash -Algorithm SHA256 $oldPath).Hash.ToLowerInvariant() -ne $sha){continue}
  $text=Get-Content -Raw $oldPath
  $protocol=if($text -match '(?m)^proto\s+udp'){'udp'}elseif($text -match '(?m)^proto\s+tcp'){'tcp'}else{'unknown'}
+ if($protocol -notin @('udp','tcp')){continue}
+ if(-not (Test-OigVpnProfile -Text $text -ExpectedIP ([string]$o.IP) -ExpectedPort ([int]$o.Port) -ExpectedProtocol $protocol)){continue}
  $i++;$kept++
  $file=('LKG-{0:D2}-{1}' -f $kept,(Split-Path $oldPath -Leaf))
  Copy-Item -LiteralPath $oldPath -Destination (Join-Path $stage $file) -Force

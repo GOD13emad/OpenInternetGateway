@@ -944,7 +944,13 @@ test('Windows OpenVPN quality engine mirrors evidence-backed pool and profile sa
   assert.match(build,/Count=48/);
   assert.match(build,/PerCountry=6/);
   assert.match(build,/PreserveOld=8/);
-  for(const token of ['script-security','route-up','route-pre-down','ipchange','plugin','client-connect','client-disconnect','learn-address']) assert.ok(build.includes(token));
+  // Do not rely on an untrusted directive denylist. The shared allowlist must
+  // be invoked at generation, during LKG preservation and before connector use.
+  const policy=fs.readFileSync(path.join(root,'backend/windows/scripts/Profile-Policy.ps1'),'utf8');
+  assert.match(policy,/function Test-OigVpnProfile/);
+  assert.match(build,/Test-OigVpnProfile -Text \$text -ExpectedIP \$ip/);
+  assert.match(build,/Test-OigVpnProfile -Text \$text -ExpectedIP \(\[string\]\$o.IP\)/);
+  assert.doesNotMatch(build,/\x08/);
 });
 
 test('Windows VPN Gate refresh is bounded, parallel, HTTPS-first and merges multiple snapshots',()=>{
