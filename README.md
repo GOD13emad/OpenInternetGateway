@@ -1,5 +1,9 @@
 # Open Internet Gateway
 
+<p align="center">
+  <img src="https://raw.githubusercontent.com/TandemVector-Labs/.github/main/brand/social/OpenInternetGateway.png" alt="Open Internet Gateway visual project card" width="720">
+</p>
+
 Open Internet Gateway (OIG) is a cross-platform desktop application for maintaining a validated, full-device Internet egress path on restrictive or unreliable networks.
 
 The Windows and Linux backends are different, but both sit behind the same Electron dashboard, lifecycle model, health gates, multi-country relay inventory, Self-Healing Config Factory, and verified GitHub update workflow.
