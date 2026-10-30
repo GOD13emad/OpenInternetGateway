@@ -1,8 +1,9 @@
 # Open Internet Gateway
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/TandemVector-Labs/.github/main/brand/social/OpenInternetGateway.png" alt="Open Internet Gateway visual project card" width="720">
+  <a href="docs/dashboard.png"><img src="docs/dashboard.png" alt="Open Internet Gateway desktop dashboard — real project UI preview from an earlier build" width="940"></a>
 </p>
+<p align="center"><sub>Repository UI screenshot from an earlier build · Illustrative only; not evidence of the latest release version, active protection, location, or connection health.</sub></p>
 
 Open Internet Gateway (OIG) is a cross-platform desktop application for maintaining a validated, full-device Internet egress path on restrictive or unreliable networks.
 
