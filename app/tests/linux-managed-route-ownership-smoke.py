@@ -48,6 +48,18 @@ elif cmd=='ip':
         target=args[3]
         iface='tun1' if scenario=='upper_effective_foreign' and target=='208.67.222.222' else 'tun0'
         print(target+' dev '+iface+' src '+source+' uid 1000')
+    elif args[:3]==['-6','route','get']:
+        target=args[3]
+        if scenario=='foreign_ipv6' or (scenario=='foreign_ipv6_upper' and target=='2001:4860:4860::8888'):
+            print(target+' via fe80::1 dev enp1s0 src 2001:db8::2')
+        elif scenario=='owned_ipv6':
+            print(target+' dev tun0 src 2001:db8:5::2')
+        elif scenario=='ipv6_probe_error':
+            sys.stderr.write('RTNETLINK answers: Operation not permitted\n')
+            sys.exit(1)
+        else:
+            sys.stderr.write('RTNETLINK answers: Network is unreachable\n')
+            sys.exit(2)
     elif args==['-4','route','show','table','main']:
         if scenario=='owned_default':
             print('default dev tun0 metric 50')
@@ -90,8 +102,9 @@ def verify_case(name, expect_connected):
         status = json.loads(done.stdout)
         assert status["desiredState"] == "off", (name, status)
         assert status["managedTunnelActive"] == (name != "foreign_tun"), (name,status)
-        assert status["fullRoutes"] == (2 if expect_connected else 0), (name,status)
+        assert status["fullRoutes"] == (2 if expect_connected or name in ("foreign_ipv6","foreign_ipv6_upper","ipv6_probe_error") else 0), (name,status)
         assert status["connected"] == expect_connected, (name,status)
+        assert status["ipv6LeakRisk"] == (name in ("foreign_ipv6","foreign_ipv6_upper","ipv6_probe_error")), (name,status)
         assert (state / "desired-state").read_text() == "off\n"
         assert not (state / "benchmark-upload.bin").exists()
 
@@ -107,6 +120,10 @@ if __name__ == "__main__":
         ("only_lower", False),
         ("upper_table_foreign", False),
         ("upper_effective_foreign", False),
+        ("foreign_ipv6", False),
+        ("foreign_ipv6_upper", False),
+        ("owned_ipv6", True),
+        ("ipv6_probe_error", False),
     ):
         verify_case(case, accepted)
-    print("PASS: only managed VPN source with owned full IPv4 routes can claim tunnel health (9 offline cases)")
+    print("PASS: only managed VPN source with owned full IPv4 routes can claim tunnel health (13 offline cases)")

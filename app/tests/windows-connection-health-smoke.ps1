@@ -16,7 +16,17 @@ $script:serviceStatus='Running'
 $script:country='US'
 $script:dns=@('8.8.8.8')
 $script:winnerMode='matching'
-function Get-NetRoute {param([string]$AddressFamily,[string]$ErrorAction) return $script:routes}
+$script:v6Mode='none'
+function Get-NetRoute {
+ param([string]$AddressFamily,[string]$ErrorAction)
+ if($AddressFamily -eq 'IPv6'){
+   if($script:v6Mode -in @('foreign','owned','unverified')){
+     return [pscustomobject]@{DestinationPrefix='::/0';InterfaceIndex=19}
+   }
+   return
+ }
+ return $script:routes
+}
 function Get-NetAdapter {param([int]$InterfaceIndex,[string]$ErrorAction)
  return [pscustomobject]@{InterfaceDescription=$script:driver;InterfaceIndex=$InterfaceIndex}
 }
@@ -25,6 +35,15 @@ function Get-Service {param([string]$Name,[string]$ErrorAction)
 }
 function Find-NetRoute {
  param([string]$RemoteIPAddress,[string]$ErrorAction)
+ if($RemoteIPAddress -match ':'){
+   if($script:v6Mode -eq 'foreign'){
+     return [pscustomobject]@{DestinationPrefix='::/0';InterfaceIndex=19}
+   }
+   if($script:v6Mode -eq 'owned'){
+     return [pscustomobject]@{DestinationPrefix='::/0';InterfaceIndex=20}
+   }
+   return
+ }
  $prefix=$(if($RemoteIPAddress -eq '1.1.1.1'){'0.0.0.0/1'}else{'128.0.0.0/1'})
  [pscustomobject]@{IPAddress='10.8.0.9'}
  if($script:winnerMode -eq 'foreign-upper' -and $prefix -eq '128.0.0.0/1'){
@@ -72,4 +91,11 @@ $script:dns=@()
 Expect $false 2 'DNS unknown must not be healthy'
 $script:dns=@('8.8.8.8')
 Expect $false 2 'expected-country mismatch' 'JP'
-Write-Output 'PASS: Windows headless health refuses effective foreign routes, stopped connector and untrusted DNS (10 offline cases)'
+$script:v6Mode='foreign'
+Expect $false 2 'foreign IPv6 default despite owned IPv4'
+$script:v6Mode='unverified'
+Expect $false 2 'IPv6 default but no verified selected route'
+$script:v6Mode='owned'
+Expect $true 2 'IPv6 egress selected on managed OpenVPN adapter'
+$script:v6Mode='none'
+Write-Output 'PASS: Windows headless health refuses effective foreign IPv4/IPv6 routes, stopped connector and untrusted DNS (13 offline cases)'
