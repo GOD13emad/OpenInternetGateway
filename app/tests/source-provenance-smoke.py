@@ -48,10 +48,10 @@ def scenario(secure_available, limit, expected_security, expected_source):
         assert csv.read_text().splitlines()[0].startswith(
             "secure-" if secure_available else "untrusted-"
         ), "HTTP first response must not displace the HTTPS source"
-        if secure_available and limit == 1:
+        if secure_available:
             assert all("untrusted-" not in line for line in csv.read_text().splitlines())
-        if secure_available and limit == 2:
-            assert "untrusted-" in csv.read_text()
+            assert result["usedMirrors"] == [secure], result
+            assert result["sourceCount"] == 1, result
 
         # Unknown trust when working solely from existing cached snapshots.
         with patch.dict(os.environ, {"OIG_FACTORY_OFFLINE": "1"}):
@@ -121,7 +121,7 @@ def promotion_scenario():
 
 if __name__ == "__main__":
     scenario(True, 1, "https-only", "https://official.example")
-    scenario(True, 2, "http-fallback", "https://official.example")
+    scenario(True, 2, "https-only", "https://official.example")
     scenario(False, 1, "http-fallback", "http://mirror.example")
     promotion_scenario()
     print("PASS: HTTPS-first, HTTP fallback, pool promotion and rollback trust")

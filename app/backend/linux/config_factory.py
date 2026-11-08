@@ -98,8 +98,12 @@ def refresh_snapshot(evidence, max_sources=3):
                 if len(rows) >= 8:
                     candidates.append((base, rows, partial))
 
-        # Transport-first order, then larger snapshots; HTTP remains an
-        # explicitly labeled fallback when HTTPS sources are blocked.
+        # Never mix unauthenticated HTTP rows into an available trusted HTTPS
+        # snapshot. HTTP mirrors are a fallback only when no complete HTTPS
+        # candidate exists; trust status must describe the selected rows.
+        https_candidates = [item for item in candidates if item[0].lower().startswith("https://")]
+        if https_candidates:
+            candidates = https_candidates
         candidates.sort(key=lambda item: (not item[0].lower().startswith("https://"), -len(item[1])))
         for base, rows, partial in candidates[:max_sources]:
             added = 0
