@@ -71,8 +71,47 @@ dns_google_answer_state() {
   fi
 }
 
+# Do not mistake an unrelated default tun/tap (or a scoped QA preflight)
+# for OIG's full-device route. NetworkManager may list the VPN parent Ethernet
+# under GENERAL.DEVICES, so use the VPN's assigned IP4.ADDRESS instead.
+managed_full_ipv4_route() {
+  local tunnel="$1" source="$2" assigned table destination current
+  [[ "$tunnel" =~ ^(tun|tap)[A-Za-z0-9_.:-]{0,12}$ ]] || return 1
+  [[ "$source" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || return 1
+
+  assigned="$(nmcli -g IP4.ADDRESS connection show --active "$CONN" 2>/dev/null |
+    awk -F/ '{print $1}' || true)"
+  printf '%s\n' "$assigned" | grep -Fxq "$source" || return 1
+
+  # Require that the kernel actually assigned the source IP to this tunnel.
+  ip -4 -o addr show dev "$tunnel" 2>/dev/null |
+    grep -Fq " inet $source/" || return 1
+
+  # Route-table ownership must cover the entire IPv4 space: owned 0/0 or
+  # both owned redirect-gateway def1 half-routes, not a single host probe.
+  table="$(ip -4 route show table main 2>/dev/null)" || return 1
+  printf '%s\n' "$table" | awk -v owned="$tunnel" '
+    function uses_owned( i ) {
+      for (i=1;i<=NF;i++) if ($i=="dev" && $(i+1)==owned) return 1
+      return 0
+    }
+    $1=="default" && uses_owned() { whole=1 }
+    $1=="0.0.0.0/1" && uses_owned() { lower=1 }
+    $1=="128.0.0.0/1" && uses_owned() { upper=1 }
+    END { exit (whole || (lower && upper)) ? 0 : 1 }
+  ' || return 1
+
+  # The effective route must agree for both IPv4 halves, even if a competing
+  # policy/metric route is present. These are kernel reads, not probe traffic.
+  for destination in 1.1.1.1 208.67.222.222; do
+    current="$(ip -4 route get "$destination" 2>/dev/null | head -1)" || return 1
+    [[ " $current " == *" dev $tunnel "* ]] || return 1
+    [[ " $current " == *" src $source "* ]] || return 1
+  done
+}
+
 json_status() {
-  local cf ip loc dns poison routes iface relay auto_state auto effective desired managed_active profile_ip profile_country probe_degraded
+  local cf ip loc dns poison routes iface relay auto_state auto effective desired managed_active profile_ip profile_country probe_degraded source
   cf="$(curl -4 --max-time 4 -s https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null || true)"
   ip="$(printf '%s\n' "$cf" | awk -F= '$1=="ip"{print $2;exit}')"
   loc="$(printf '%s\n' "$cf" | awk -F= '$1=="loc"{print $2;exit}')"
@@ -81,12 +120,16 @@ json_status() {
 
   effective="$(ip -4 route get 1.1.1.1 2>/dev/null | head -1 || true)"
   iface="$(printf '%s\n' "$effective" | awk '{for(i=1;i<=NF;i++)if($i=="dev"){print $(i+1);exit}}')"
-  if [[ "$iface" == tun* || "$iface" == tap* ]]; then routes=2; else routes=0; fi
+  source="$(printf '%s\n' "$effective" | awk '{for(i=1;i<=NF;i++)if($i=="src"){print $(i+1);exit}}')"
 
   managed_active=false
   if nmcli -t -f NAME,TYPE,DEVICE connection show --active 2>/dev/null |
       awk -F: -v n="$CONN" '$1==n && $2=="vpn" {found=1} END{exit(found?0:1)}'; then
     managed_active=true
+  fi
+  routes=0
+  if [[ "$managed_active" == true ]] && managed_full_ipv4_route "$iface" "$source"; then
+    routes=2
   fi
 
   relay=""
