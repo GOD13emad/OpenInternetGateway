@@ -14,6 +14,19 @@ function Get-NetAdapter {
 function Row([string]$prefix,[int]$index,[string]$alias) {
  [pscustomobject]@{DestinationPrefix=$prefix;InterfaceIndex=$index;InterfaceAlias=$alias}
 }
+$script:winnerMode='matching'
+function Find-NetRoute {
+ param([string]$RemoteIPAddress,[string]$ErrorAction)
+ $prefix=$(if($RemoteIPAddress -eq '1.1.1.1'){'0.0.0.0/1'}else{'128.0.0.0/1'})
+ $idx=20;$alias='OpenVPN Connect DCO Adapter'
+ if($script:winnerMode -eq 'foreign-upper' -and $prefix -eq '128.0.0.0/1'){$idx=37;$alias='Foreign VPN'}
+ if($script:winnerMode -eq 'physical-lower' -and $prefix -eq '0.0.0.0/1'){$idx=19;$alias='Ethernet 3'}
+ if($script:winnerMode -eq 'specific-lower' -and $prefix -eq '0.0.0.0/1'){$prefix='1.1.1.1/32'}
+ [pscustomobject]@{IPAddress='10.8.0.9'} # Windows returns source IP before the route.
+ if($script:winnerMode -eq 'missing-upper' -and $prefix -eq '128.0.0.0/1'){return}
+ Row $prefix $idx $alias
+ if($script:winnerMode -eq 'ambiguous-upper' -and $prefix -eq '128.0.0.0/1'){Row $prefix $idx $alias}
+}
 function Check([object[]]$routes,[bool]$expected,[string]$name) {
  $actual=[bool](Test-OigFullRoutePair -Routes $routes)
  if($actual -ne $expected){throw "Route pair fixture failed: $name got=$actual expected=$expected"}
@@ -40,4 +53,16 @@ Check $normal $false 'unavailable adapter evidence'
 $script:adapterMissing=$false
 $script:fakeDriver='TAP-Windows Adapter V9 for OpenVPN Connect'
 Check $normal $true 'legacy TAP OpenVPN driver'
-Write-Output 'PASS: Windows read-only status route pair only accepts one OpenVPN-capable adapter (14 offline scenarios)'
+$script:winnerMode='foreign-upper'
+Check $normal $false 'foreign upper effective route despite installed OpenVPN route pair'
+$script:winnerMode='physical-lower'
+Check $normal $false 'physical lower effective route wins'
+$script:winnerMode='missing-upper'
+Check $normal $false 'missing selected upper route'
+$script:winnerMode='specific-lower'
+Check $normal $false 'more specific non-tunnel host route'
+$script:winnerMode='ambiguous-upper'
+Check $normal $false 'ambiguous selected upper route'
+$script:winnerMode='matching'
+Check $normal $true 'both effective routes return to the managed OpenVPN adapter'
+Write-Output 'PASS: Windows OpenVPN route pair and winning routes reject foreign alternatives (20 offline scenarios)'

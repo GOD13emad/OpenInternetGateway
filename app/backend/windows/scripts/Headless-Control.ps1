@@ -80,7 +80,7 @@ function Get-Health([string]$ExpectedCountry='') {
  $poison=if($dns.Count -eq 0){$null}else{@($dns|Where-Object{$_ -notin @('8.8.8.8','8.8.4.4')}).Count -gt 0}
  $foreign=($loc -and $loc -ne 'IR')
  $countryOk=([string]::IsNullOrWhiteSpace($ExpectedCountry) -or $loc -eq $ExpectedCountry)
- [pscustomobject]@{Healthy=($routePairValid -and $managedActive -and $foreign -and $countryOk -and $poison -eq $false);IP=$ip;Country=$loc;DNS=$dns;Poison=$poison;FullRoutes=$(if($routePairValid -and $managedActive){2}else{0})}
+ [pscustomobject]@{Healthy=($routePairValid -and $managedActive -and $foreign -and $countryOk -and $poison -eq $false);IP=$ip;Country=$loc;DNS=$dns;Poison=$poison;FullRoutes=$(if($routePairValid){2}else{0})}
 }
 function Wait-Health([bool]$Want,[int]$Seconds,[string]$ExpectedCountry=''){
  $until=(Get-Date).AddSeconds($Seconds)

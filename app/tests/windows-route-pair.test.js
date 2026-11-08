@@ -13,7 +13,7 @@ test('Windows route-pair validator rejects mixed interfaces and physical shadow 
     encoding: 'utf8', timeout: 10000
   });
   assert.equal(r.status, 0, r.stderr || r.stdout);
-  assert.match(r.stdout, /PASS: Windows read-only status route pair/);
+  assert.match(r.stdout, /PASS: Windows OpenVPN route pair and winning routes/);
 });
 
 test('both Windows status paths use the same fail-closed OpenVPN route-pair validator', () => {
