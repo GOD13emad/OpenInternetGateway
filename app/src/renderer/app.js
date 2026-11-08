@@ -67,35 +67,55 @@ function syncConnectionInventoryToStatus(s) {
   }
 }
 
+// No connected-volunteer relay may be called protected until its own
+// certificate identity is independently authenticated, not merely CA-valid.
+function protectionStatusLabel(connected, identityVerified, score) {
+  if (!connected) return '0%';
+  if (!identityVerified) return 'Unverified';
+  return Math.round(score / 4 * 100) + '%';
+}
+
 function renderStatus(s) {
   state.status = s || {};
   const connected = !!s.connected;
+  const identityVerified = s.serverIdentityVerified === true;
   syncConnectionInventoryToStatus(s);
   $('powerButton').classList.toggle('connected', connected);
   $('sidebarDot').classList.toggle('online', connected);
-  setText('sidebarStatus', connected ? 'Protected' : 'Direct connection');
+  setText('sidebarStatus', connected ? (identityVerified ? 'Protected' : 'Tunnel · unverified') : 'Direct connection');
   setText('sidebarCountry', connected ? ((s.country || 'Foreign') + ' egress') : 'Tunnel disconnected');
-  setText('connectionTitle', connected ? 'Internet protected' : 'Protection is off');
-  setText('connectionDetail', connected ? ('Traffic exits through ' + (s.country || 'validated relay') + ' · ' + (s.ip || 'IP pending')) : 'Connect to establish a validated full-device route.');
+  setText('connectionTitle', connected ? (identityVerified ? 'Internet protected' : 'Tunnel active · relay unverified') : 'Protection is off');
+  setText('connectionDetail', connected
+    ? ('Traffic exits through ' + (s.country || 'relay') + ' · ' + (s.ip || 'IP pending')
+      + (identityVerified ? '' : ' · Server certificate identity not independently verified.'))
+    : 'Connect to establish a validated full-device route.');
   setText('ipStat', s.ip || '—');
   setText('countryStat', s.country || 'Direct');
   setText('dnsStat', safeArray(s.dns).join(' · ') || '—');
   setText('routesStat', String(s.fullRoutes ?? 0) + ' / 2');
-  setText('relayName', s.relay || (connected ? 'Validated relay' : 'Not connected'));
-  setText('relayMeta', connected ? ((s.engine === 'HeadlessConnector' ? 'Headless · sticky' : (s.interface || 'Tunnel interface')) + ' · anti-flap') : 'Validated endpoint · stable mode');
+  setText('relayName', s.relay || (connected ? 'Connected relay' : 'Not connected'));
+  setText('relayMeta', connected ? ((s.engine === 'HeadlessConnector' ? 'Headless · sticky' : (s.interface || 'Tunnel interface')) + (identityVerified ? ' · identity verified' : ' · relay identity unverified')) : 'No authenticated relay session');
 
-  const routeOk = Number(s.fullRoutes || 0) >= 2;
-  const dnsOk = s.poison === false;
+  const routeOk = connected && Number(s.fullRoutes || 0) >= 2;
+  const dnsOk = connected && s.poison === false;
   const recoveryState = String(s.autoRecoveryState || '').toLowerCase();
   const recoveryOk = !!s.autoRecovery && !['inactive','failed','missing','disabled'].includes(recoveryState);
   const pool = s.configPool || {};
   const factoryOk = !!pool.healthy && Number(pool.pool || 0) >= 3;
-  markHealth('routeIcon', 'routeHealth', routeOk, routeOk ? 'All IPv4 traffic protected' : 'Full-route not active');
-  markHealth('dnsIcon', 'dnsHealth', dnsOk, dnsOk ? 'Poison fingerprint absent' : 'DNS protection incomplete');
+  markHealth('routeIcon', 'routeHealth', routeOk, routeOk
+    ? (identityVerified ? 'All IPv4 traffic protected' : 'IPv4 uses VPN; relay identity unverified')
+    : 'Full-route not active', routeOk && !identityVerified);
+  markHealth('dnsIcon', 'dnsHealth', dnsOk,
+    dnsOk ? 'DNS A-response matches reference (not authenticated)'
+      : (s.poison === true ? 'Unexpected dns.google A-response'
+          : (s.poison == null ? 'DNS check unavailable' : 'Requires active VPN tunnel')),
+    dnsOk && !identityVerified);
   markHealth('recoveryIcon', 'recoveryHealth', recoveryOk, recoveryOk ? (s.autoRecoveryState || 'Installed') : 'Not installed');
   markHealth('factoryIcon', 'factoryHealth', factoryOk, factoryOk ? (String(pool.validated || 0) + ' validated · ' + String(pool.pool || 0) + ' total') : 'Pool needs regeneration');
   const score = [routeOk, dnsOk, recoveryOk, factoryOk].filter(Boolean).length;
-  setText('healthScore', Math.round(score / 4 * 100) + '%');
+  // Encryption/route reachability never certifies an arbitrary relay's identity.
+  // A disconnected tunnel is 0%; a live but unverified relay has no protection score.
+  setText('healthScore', protectionStatusLabel(connected, identityVerified, score));
   $('autoButton').textContent = recoveryOk ? 'Installed' : 'Install';
   $('powerButton').title = connected ? 'Disconnect' : 'Connect';
 
@@ -108,13 +128,20 @@ function renderStatus(s) {
     : '—';
   setText('poolProtocols', protocols || '—');
   setText('poolAge', pool.ageHours == null ? '—' : (Number(pool.ageHours).toFixed(1) + 'h'));
-  setText('factorySource', pool.source ? ('Source: ' + pool.source) : 'Maintains multiple validated and standby tunnel profiles automatically.');
+  const sourceTrust = pool.sourceSecurity === 'https-only'
+    ? 'HTTPS directory transport; relay identity not independently verified'
+    : (pool.sourceSecurity === 'http-fallback'
+        ? 'CAUTION: HTTP directory data is unauthenticated; relay identity unverified'
+        : 'Directory authenticity unknown; relay identity unverified');
+  setText('factorySource', pool.source ? ('Source: ' + pool.source + ' · ' + sourceTrust)
+    : 'Maintains relay profiles; source and relay authenticity are not independently verified.');
 }
 
-function markHealth(iconId, textId, ok, label) {
+function markHealth(iconId, textId, ok, label, caution = false) {
   const icon = $(iconId);
-  icon.textContent = ok ? '✓' : '!';
-  icon.className = 'health-icon ' + (ok ? 'ok' : 'bad');
+  icon.textContent = ok && !caution ? '✓' : '!';
+  // Operational route/DNS reachability is not proof of a trusted remote peer.
+  icon.className = 'health-icon ' + (caution ? 'warn' : (ok ? 'ok' : 'bad'));
   setText(textId, label);
 }
 
@@ -305,9 +332,11 @@ function renderConnections() {
               ? (p.benchmark.httpsLatencyMs + ' ms HTTPS')
               : (wasFastTested ? 'No reply' : 'Not tested')));
     livePing.classList.toggle('metric-unavailable', fastPing == null && p.benchmark?.icmpPingMs == null && p.benchmark?.httpsLatencyMs == null);
-    livePing.title = wasFastTested && fastPing == null
-      ? 'Direct probe completed, but this relay did not answer the ICMP/TCP reachability probe. Source ping is shown separately.'
-      : (!wasFastTested ? 'Run Test all relays for a direct reachability probe, or Speed for a real tunnel measurement.' : '');
+    livePing.title = wasFastTested && p.benchmark?.fastMethod === 'icmp-only'
+      ? 'ICMP-only host response; this TCP port did not accept a direct connection. OpenVPN handshake not verified.'
+      : (wasFastTested && fastPing == null
+          ? 'Direct probe completed with no ICMP/TCP transport response. Source ping is shown separately.'
+          : (!wasFastTested ? 'Run Test all relays for a direct reachability probe, or Speed for a real tunnel measurement.' : ''));
 
     const down = document.createElement('td'); down.className = 'metric-real';
     down.textContent = p.benchmark?.downloadMbps == null ? 'Not tested' : (p.benchmark.downloadMbps + ' Mbps');
@@ -409,7 +438,7 @@ async function benchmarkCurrent() {
     renderConnections();
     const seconds = Math.max(0.1, Number(result?.elapsedMs || 0) / 1000).toFixed(1);
     const via = result?.directPath?.interface ? (' via ' + result.directPath.interface) : '';
-    showToast('Tested ' + String(result?.tested || 0) + ' relays in ' + seconds + 's • ' + String(result?.reachable || 0) + ' replied • ' + String(result?.noReply || 0) + ' no reply' + via + ' • direct Internet / proxy bypass.');
+    showToast('Tested ' + String(result?.tested || 0) + ' relays in ' + seconds + 's • ' + String(result?.reachable || 0) + ' passed quick probe • ' + String(result?.noReply || 0) + ' not reached' + via + ' • direct Internet / proxy bypass.');
   } catch (e) {
     showToast(e.message || 'Fast relay test failed.', true);
   } finally {

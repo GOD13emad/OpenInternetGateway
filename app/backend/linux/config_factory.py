@@ -279,6 +279,20 @@ def promote(common, evidence, count=48, keep_generations=4, preserve_count=8):
         })
 
     kept = preserve_old(active, stage, meta, success, preserve_count) if active.exists() else 0
+    # Provenance belongs to the promoted generation, not the latest attempted refresh.
+    # A pool containing preserved profiles is conservatively unknown.
+    mirror = read_json(evidence / "mirror-refresh-last.json", {})
+    security = (mirror.get("sourceSecurity", "unknown")
+                if mirror.get("refresh") and kept == 0 else "unknown")
+    if security not in ("https-only", "http-fallback"):
+        security = "unknown"
+    write_json(stage / "source-provenance.json", {
+        "sourceSecurity": security,
+        "source": mirror.get("source") or "cached VPN Gate mirror snapshot",
+        "sourceAt": mirror.get("at") if mirror.get("refresh") else None,
+        "preservedProfiles": kept,
+        "promotedAt": generated
+    })
     write_json(stage/"index.json", meta)
     for c in meta:
         p=stage/Path(str(c["Profile"]).replace("\\","/")).name
@@ -312,10 +326,13 @@ def status(common, evidence, min_pool=6):
     validated=sum(1 for c in idx if str(c.get("SHA256","")).lower() in success)
     last=None
     source="Bundled VPN Gate snapshot" if idx else ""
-    mirror=read_json(evidence/"mirror-refresh-last.json",{})
-    if mirror:
-        last=mirror.get("at")
-        source=mirror.get("usedMirror") or mirror.get("source") or "cached VPN Gate mirror snapshot"
+    # Legacy pools without promotion provenance remain UNKNOWN.
+    provenance=read_json(active/"source-provenance.json",{})
+    source_security=provenance.get("sourceSecurity", "unknown")
+    if source_security not in ("https-only", "http-fallback"):
+        source_security="unknown"
+    source=provenance.get("source") or source
+    last=provenance.get("sourceAt") or provenance.get("promotedAt")
     if not last and idx:
         last=idx[0].get("GeneratedAt")
     age=None
@@ -337,7 +354,8 @@ def status(common, evidence, min_pool=6):
         "at":now(),"schemaVersion":2,"pool":len(idx),"validated":validated,
         "standby":max(0,len(idx)-validated),"quarantined":len(quarantine),
         "generations":generations,"lastRefresh":last,"ageHours":age,
-        "source":source,"healthy":len(idx)>=min_pool,"metadataComplete":metadata_complete,
+        "source":source,"sourceSecurity":source_security,
+        "healthy":len(idx)>=min_pool,"metadataComplete":metadata_complete,
         "protocols":protocols,"countries":countries
     }
     write_json(factory/"status.json",obj)

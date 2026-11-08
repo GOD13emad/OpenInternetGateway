@@ -2,6 +2,7 @@
 param([ValidateSet('Ensure','Connect','Disconnect','Status')][string]$Action='Ensure',[string]$ProfileSha='')
 $ErrorActionPreference='Stop'
 . (Join-Path $PSScriptRoot 'Route-Pair.ps1')
+. (Join-Path $PSScriptRoot 'Profile-Policy.ps1')
 $Root=Split-Path -Parent $PSScriptRoot
 $connector='C:\Program Files\OpenVPN Connect\ovpnconnector.exe'
 $service='OVPNConnectorService'
@@ -172,8 +173,8 @@ function Get-QualityScore($c,[string]$Key,[hashtable]$Success,[hashtable]$Failur
   try{
    if(Test-Fresh $b.fastAt 24){
     $fast=Get-Number $b.fastPingMs
-    if($null -ne $fast){$score+=[Math]::Max(-80,140-$fast*0.45)}
-    elseif($proto -eq 'tcp' -and $null -ne $b.fastReachable -and -not [bool]$b.fastReachable){$score-=180}
+    if($proto -eq 'tcp' -and $null -ne $b.fastReachable -and -not [bool]$b.fastReachable){$score-=180}
+    elseif($null -ne $fast){$score+=[Math]::Max(-80,140-$fast*0.45)}
    }
    if(Test-Fresh $b.at 72){
     $down=Get-Number $b.downloadMbps;$up=Get-Number $b.uploadMbps;$lat=Get-Number $b.httpsLatencyMs
@@ -339,6 +340,8 @@ function Try-Candidate($c){
  if(-not(Test-Path $profile)){Record-Failure $c 'PROFILE_MISSING';return $null}
  $sha=(Get-FileHash -Algorithm SHA256 $profile).Hash.ToLowerInvariant()
  if($c.SHA256 -and $sha -ne ([string]$c.SHA256).ToLowerInvariant()){Record-Failure $c 'HASH_MISMATCH';return $null}
+ try{$policyOK=Test-OigVpnProfile -Text ([IO.File]::ReadAllText($profile)) -ExpectedIP ([string]$c.IP) -ExpectedPort ([int]$c.Port) -ExpectedProtocol ([string]$c.Protocol)}catch{$policyOK=$false}
+ if(-not $policyOK){Record-Failure $c 'PROFILE_POLICY_DENIED';return $null}
  Stop-Connector
  Copy-Item -LiteralPath $profile -Destination $serviceProfile -Force
  if((Get-FileHash -Algorithm SHA256 $serviceProfile).Hash.ToLowerInvariant() -ne $sha){throw 'ProgramData profile copy hash mismatch.'}

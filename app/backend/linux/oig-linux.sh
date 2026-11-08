@@ -39,7 +39,9 @@ desired_state() {
   if [[ -f "$DESIRED" ]]; then
     tr -d '\r\n' < "$DESIRED"
   else
-    echo on
+    # Missing intent is NOT consent to establish a new VPN on first launch.
+    # Only an explicit Connect or saved desired=on may restore a tunnel.
+    echo off
   fi
 }
 
@@ -290,8 +292,8 @@ def quality(c):
     if pref and sha==pref: score += 20.0
     fast=num(b.get("fastPingMs"))
     if fresh_iso(b.get("fastAt"),24):
-        if fast is not None: score += max(-80.0,140.0-fast*0.45)
-        elif proto=="tcp" and b.get("fastReachable") is False: score -= 180.0
+        if proto=="tcp" and b.get("fastReachable") is False: score -= 180.0
+        elif fast is not None: score += max(-80.0,140.0-fast*0.45)
     down=num(b.get("downloadMbps")); up=num(b.get("uploadMbps")); lat=num(b.get("httpsLatencyMs"))
     if fresh_iso(b.get("at"),72) and (down is not None or up is not None or lat is not None):
         if down is not None: score += min(260.0,down*12.0)
