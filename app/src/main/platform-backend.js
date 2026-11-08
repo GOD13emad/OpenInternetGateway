@@ -22,8 +22,6 @@ function run(file, args, options = {}) {
       cwd: options.cwd,
       windowsHide: true,
       shell: false,
-      // curl telnet:// waits for stdin EOF; use /dev/null (or NUL) for the
-      // quick TCP-port probe only, without changing other command behavior.
       stdio: options.closeStdin ? ['ignore','pipe','pipe'] : ['pipe','pipe','pipe'],
       env: { ...process.env, ...(options.env || {}) }
     });
@@ -375,8 +373,12 @@ class Backend {
 
     if (action === 'status') {
       const statePath = path.join(this.backendRoot, 'state', 'current-openvpn-profile.json').replace(/'/g, "''");
+      const routeGuard = path.join(this.backendRoot, 'scripts', 'Route-Pair.ps1').replace(/'/g, "''");
       const script = [
+        ". '" + routeGuard + "'",
         "$routes=@(Get-NetRoute -AddressFamily IPv4 -ErrorAction SilentlyContinue|Where-Object{$_.DestinationPrefix -in @('0.0.0.0/1','128.0.0.0/1')})",
+        "$routePairValid=Test-OigFullRoutePair -Routes $routes",
+        "$ipv6Safe=if($routePairValid){Test-OigIpv6EgressSafe -InterfaceIndex ([int]$routes[0].InterfaceIndex)}else{$false}",
         "$cf=@(curl.exe -4 --max-time 4 -s https://www.cloudflare.com/cdn-cgi/trace)",
         "$ip=[string]((($cf|Where-Object{$_ -like 'ip=*'}|Select-Object -First 1)-replace '^ip=',''));$ip=$ip.Trim()",
         "$loc=[string]((($cf|Where-Object{$_ -like 'loc=*'}|Select-Object -First 1)-replace '^loc=',''));$loc=$loc.Trim()",
@@ -391,8 +393,8 @@ class Backend {
         "$state='" + statePath + "'",
         "$relay='';$profileIP='';$profileCountry='';if(Test-Path $state){try{$s=Get-Content -Raw $state|ConvertFrom-Json;$relay=([string]$s.serverIP)+':'+([string]$s.port);$profileIP=[string]$s.observedIP;if(-not $profileIP){$profileIP=[string]$s.serverIP};$profileCountry=[string]$s.country;if(-not $profileCountry){$profileCountry=[string]$s.configuredCountry}}catch{}}",
         "$managedActive=($svc -and $svc.Status -eq 'Running')",
-        "$probeDegraded=$false;if(-not $loc -and $managedActive -and $routes.Count -ge 2 -and $poison -eq $false -and $profileCountry){$loc=$profileCountry;if(-not $ip){$ip=$profileIP};$probeDegraded=$true}",
-        "[ordered]@{connected=($routes.Count -ge 2 -and $managedActive -and $loc -and $loc -ne 'IR' -and $poison -eq $false);ip=$ip.Trim();country=$loc.Trim();dns=$dns;poison=$poison;fullRoutes=$routes.Count;relay=$relay;autoRecovery=[bool]$task;autoRecoveryState=$(if(-not $task){'Missing'}elseif(-not [bool]$task.Settings.Enabled){'Disabled'}else{[string]$task.State});interface=($routes|Select-Object -First 1 -ExpandProperty InterfaceAlias -ErrorAction SilentlyContinue);engine=$(if($svc){'HeadlessConnector'}else{'Missing'});connectorService=$(if($svc){[string]$svc.Status}else{'Missing'});managedTunnelActive=[bool]$managedActive;healthProbeDegraded=[bool]$probeDegraded;desiredState=$desired;failureStreak=$(if($guard){[int]$guard.failureStreak}else{0});rotations24h=$(if($guard){@($guard.rotations).Count}else{0})}|ConvertTo-Json -Compress"
+        "$probeDegraded=$false;if(-not $loc -and $managedActive -and $routes.Count -ge 2 -and $routePairValid -and $ipv6Safe -and $poison -eq $false -and $profileCountry){$loc=$profileCountry;if(-not $ip){$ip=$profileIP};$probeDegraded=$true}",
+        "[ordered]@{connected=($routes.Count -ge 2 -and $routePairValid -and $ipv6Safe -and $managedActive -and $loc -and $loc -ne 'IR' -and $poison -eq $false);ip=$ip.Trim();country=$loc.Trim();dns=$dns;poison=$poison;fullRoutes=$(if($routePairValid){2}else{0});ipv6LeakRisk=[bool]($routePairValid -and -not $ipv6Safe);relay=$relay;autoRecovery=[bool]$task;autoRecoveryState=$(if(-not $task){'Missing'}elseif(-not [bool]$task.Settings.Enabled){'Disabled'}else{[string]$task.State});interface=$(if($routePairValid){[string]($routes|Select-Object -First 1 -ExpandProperty InterfaceAlias -ErrorAction SilentlyContinue)}else{''});engine=$(if($svc){'HeadlessConnector'}else{'Missing'});connectorService=$(if($svc){[string]$svc.Status}else{'Missing'});managedTunnelActive=[bool]$managedActive;healthProbeDegraded=[bool]$probeDegraded;desiredState=$desired;failureStreak=$(if($guard){[int]$guard.failureStreak}else{0});rotations24h=$(if($guard){@($guard.rotations).Count}else{0})}|ConvertTo-Json -Compress"
       ].join(';');
       const r = await run(pwsh, ['-NoProfile','-Command',script], { timeout: 12000 });
       return JSON.parse(r.stdout || '{}');
@@ -803,8 +805,7 @@ class Backend {
       ? this._directTcpConnectMs(profile.ip, profile.port, pathInfo)
       : Promise.resolve(null);
     const [icmpPingMs, tcpConnectMs] = await Promise.all([pingPromise, tcpPromise]);
-    // A TCP host answering ICMP is not evidence that its advertised port is open.
-    // Report the TCP connect latency when proven; keep ICMP-only as a separate hint.
+    // ICMP reachability does not prove that a TCP relay port is open.
     const fastPingMs = profile.protocol === 'tcp' ? (tcpConnectMs ?? icmpPingMs) : icmpPingMs;
     return {
       fastAt: new Date().toISOString(),
@@ -1437,9 +1438,7 @@ exit 0
       const configPool = await this._factoryStatus();
       const current = this._readJson(this._profileStatePath(), {}) || {};
       const activeSha = base?.connected ? String(current.sha256 || '').toLowerCase() : '';
-      // Volunteer VPN Gate configurations do not pin an independently
-      // authenticated relay certificate. A working tunnel is not identity proof.
-      // Never derive this claim from untrusted cached metadata or claimed country.
+      // A working volunteer relay is not independently authenticated identity.
       return { ...base, activeSha, configPool, serverIdentityVerified: false };
     } catch (error) {
       return {

@@ -57,8 +57,10 @@ function createWindow({ showWhenReady = !startInBackground } = {}) {
           fs.writeFileSync(process.env.OIG_CAPTURE_PATH, image.toPNG());
         } finally {
           if (process.env.OIG_CAPTURE_ONLY === '1') {
+            // Capture-only has no managed tunnel, and must exit without
+            // triggering quit hooks or keeping hidden windows alive.
             app.isQuitting = true;
-            app.quit();
+            app.exit(0);
           }
         }
       }, 350);
@@ -279,12 +281,13 @@ app.on('second-instance', (_event, argv, _workingDirectory, additionalData) => {
     }
     startLinuxExitWatchdog();
     if (quitRequestedAtLaunch) { requestQuit(); return; }
-    if (process.platform === 'win32' && app.isPackaged) {
+    if (process.platform === 'win32' && app.isPackaged && process.env.OIG_CAPTURE_ONLY !== '1') {
       app.setLoginItemSettings({ openAtLogin: true, path: process.execPath, args: ['--background'] });
     }
     registerIpc();
     createWindow();
-    createTray();
+    // Passive installed-GUI captures must not create a tray icon.
+    if (process.platform !== 'win32' || process.env.OIG_CAPTURE_ONLY !== '1') createTray();
   });
   
   app.on('activate', () => {

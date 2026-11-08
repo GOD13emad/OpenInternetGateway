@@ -98,8 +98,12 @@ def refresh_snapshot(evidence, max_sources=3):
                 if len(rows) >= 8:
                     candidates.append((base, rows, partial))
 
-        # Transport-first order, then larger snapshots; HTTP remains an
-        # explicitly labeled fallback when HTTPS sources are blocked.
+        # Never mix unauthenticated HTTP rows into an available trusted HTTPS
+        # snapshot. HTTP mirrors are a fallback only when no complete HTTPS
+        # candidate exists; trust status must describe the selected rows.
+        https_candidates = [item for item in candidates if item[0].lower().startswith("https://")]
+        if https_candidates:
+            candidates = https_candidates
         candidates.sort(key=lambda item: (not item[0].lower().startswith("https://"), -len(item[1])))
         for base, rows, partial in candidates[:max_sources]:
             added = 0
@@ -275,9 +279,8 @@ def promote(common, evidence, count=48, keep_generations=4, preserve_count=8):
         })
 
     kept = preserve_old(active, stage, meta, success, preserve_count) if active.exists() else 0
-    # Attach provenance to the *promoted generation*, not merely the last
-    # attempted mirror download. Preserved older profiles are conservatively
-    # unknown even if the new snapshot was HTTPS-only.
+    # Provenance belongs to the promoted generation, not the latest attempted refresh.
+    # A pool containing preserved profiles is conservatively unknown.
     mirror = read_json(evidence / "mirror-refresh-last.json", {})
     security = (mirror.get("sourceSecurity", "unknown")
                 if mirror.get("refresh") and kept == 0 else "unknown")
@@ -323,8 +326,7 @@ def status(common, evidence, min_pool=6):
     validated=sum(1 for c in idx if str(c.get("SHA256","")).lower() in success)
     last=None
     source="Bundled VPN Gate snapshot" if idx else ""
-    # Legacy pools with no promotion provenance remain UNKNOWN, even if a
-    # newer unrelated mirror refresh succeeded after their promotion.
+    # Legacy pools without promotion provenance remain UNKNOWN.
     provenance=read_json(active/"source-provenance.json",{})
     source_security=provenance.get("sourceSecurity", "unknown")
     if source_security not in ("https-only", "http-fallback"):
