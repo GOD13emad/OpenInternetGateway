@@ -582,7 +582,7 @@ class Backend {
 
     if (action === 'status') {
       const statePath = path.join(this.backendRoot, 'state', 'current-openvpn-profile.json').replace(/'/g, "''");
-      const routeGuard = path.join(this.backendRoot, 'windows', 'scripts', 'Route-Pair.ps1').replace(/'/g, "''");
+      const routeGuard = path.join(this.backendRoot, 'scripts', 'Route-Pair.ps1').replace(/'/g, "''");
       const script = [
         ". '" + routeGuard + "'",
         "$routes=@(Get-NetRoute -AddressFamily IPv4 -ErrorAction SilentlyContinue|Where-Object{$_.DestinationPrefix -in @('0.0.0.0/1','128.0.0.0/1')})",
