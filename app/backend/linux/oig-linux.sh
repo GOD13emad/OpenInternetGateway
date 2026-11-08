@@ -60,6 +60,15 @@ delete_named_connections() {
   delete_connection_name "$LEGACY_CONN"
 }
 
+# dns.google A-response is a heuristic, not cryptographic DNS authentication.
+dns_google_answer_state() {
+  local answers="$1"
+  if [[ -z "$answers" ]]; then echo unknown
+  elif printf '%s\n' "$answers" | tr ',' '\n' | grep -Evqx '8\.8\.8\.8|8\.8\.4\.4'; then echo true
+  else echo false
+  fi
+}
+
 # Do not mistake an unrelated default tun/tap (or a scoped QA preflight)
 # for OIG's full-device route. NetworkManager may list the VPN parent Ethernet
 # under GENERAL.DEVICES, so use the VPN's assigned IP4.ADDRESS instead.
@@ -99,13 +108,29 @@ managed_full_ipv4_route() {
   done
 }
 
+# Detect public IPv6 egress outside the OIG-owned tunnel without sending packets.
+# An absent IPv6 route is safe, but unexpected command failures fail closed.
+managed_ipv6_egress_safe() {
+  local owned="$1" destination response
+  for destination in 2606:4700:4700::1111 2001:4860:4860::8888; do
+    if response="$(ip -6 route get "$destination" 2>&1)"; then
+      response="$(printf '%s\n' "$response" | head -1)"
+      [[ "$response" == unreachable* || "$response" == prohibit* || "$response" == blackhole* ]] && continue
+      [[ " $response " == *" dev $owned "* ]] || return 1
+    else
+      [[ "$response" == *"Network is unreachable"* || "$response" == *"No route to host"* ]] || return 1
+    fi
+  done
+  return 0
+}
+
 json_status() {
-  local cf ip loc dns poison routes iface relay auto_state auto effective desired managed_active profile_ip profile_country probe_degraded source
+  local cf ip loc dns poison routes iface relay auto_state auto effective desired managed_active profile_ip profile_country probe_degraded source ipv6_leak
   cf="$(curl -4 --max-time 4 -s https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null || true)"
   ip="$(printf '%s\n' "$cf" | awk -F= '$1=="ip"{print $2;exit}')"
   loc="$(printf '%s\n' "$cf" | awk -F= '$1=="loc"{print $2;exit}')"
   dns="$(getent ahostsv4 dns.google 2>/dev/null | awk '{print $1}' | sort -u | paste -sd, - || true)"
-  if printf '%s' "$dns" | grep -q '10.10.34.35'; then poison=true; else poison=false; fi
+  poison="$(dns_google_answer_state "$dns")"
 
   effective="$(ip -4 route get 1.1.1.1 2>/dev/null | head -1 || true)"
   iface="$(printf '%s\n' "$effective" | awk '{for(i=1;i<=NF;i++)if($i=="dev"){print $(i+1);exit}}')"
@@ -117,8 +142,11 @@ json_status() {
     managed_active=true
   fi
   routes=0
+  ipv6_leak=false
   if [[ "$managed_active" == true ]] && managed_full_ipv4_route "$iface" "$source"; then
     routes=2
+    # Preserve IPv4 route evidence for rollback even if IPv6 is unsafe.
+    if ! managed_ipv6_egress_safe "$iface"; then ipv6_leak=true; fi
   fi
 
   relay=""
@@ -142,7 +170,7 @@ PY
   fi
 
   probe_degraded=false
-  if [[ -z "$loc" && "$managed_active" == true && "$routes" -ge 2 && "$poison" == false && -n "$profile_country" ]]; then
+  if [[ -z "$loc" && "$managed_active" == true && "$routes" -ge 2 && "$ipv6_leak" == false && "$poison" == false && -n "$profile_country" ]]; then
     loc="$profile_country"
     [[ -n "$ip" ]] || ip="$profile_ip"
     probe_degraded=true
@@ -158,18 +186,18 @@ PY
     auto_state="Missing"
   fi
 
-  python3 - "$ip" "$loc" "$dns" "$poison" "$routes" "$relay" "$auto" "$auto_state" "$iface" "$desired" "$managed_active" "$probe_degraded" <<'PY'
+  python3 - "$ip" "$loc" "$dns" "$poison" "$routes" "$relay" "$auto" "$auto_state" "$iface" "$desired" "$managed_active" "$probe_degraded" "$ipv6_leak" <<'PY'
 import json,sys
-ip,loc,dns,poison,routes,relay,auto,state,iface,desired,managed,probe_degraded=sys.argv[1:]
+ip,loc,dns,poison,routes,relay,auto,state,iface,desired,managed,probe_degraded,ipv6_leak=sys.argv[1:]
 dns_list=[x for x in dns.split(",") if x]
 r=int(routes or 0)
-connected=(r>=2 and managed=="true" and bool(loc) and loc!="IR" and poison=="false")
+connected=(r>=2 and managed=="true" and bool(loc) and loc!="IR" and poison=="false" and ipv6_leak=="false")
 print(json.dumps({
     "connected":connected,"ip":ip,"country":loc,"dns":dns_list,
-    "poison":poison=="true","fullRoutes":r,"relay":relay,
+    "poison":None if poison=="unknown" else poison=="true","fullRoutes":r,"relay":relay,
     "autoRecovery":auto=="true","autoRecoveryState":state,"interface":iface,
     "desiredState":desired,"managedTunnelActive":managed=="true",
-    "healthProbeDegraded":probe_degraded=="true"
+    "healthProbeDegraded":probe_degraded=="true", "ipv6LeakRisk":ipv6_leak=="true"
 },separators=(",",":")))
 PY
 }

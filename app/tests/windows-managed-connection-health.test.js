@@ -13,7 +13,7 @@ test('Headless OpenVPN health rejects mixed half routes, stopped service and poi
     encoding: 'utf8', timeout: 12000
   });
   assert.equal(result.status, 0, result.stderr || result.stdout);
-  assert.match(result.stdout, /PASS: Windows headless health refuses effective foreign routes/);
+  assert.match(result.stdout, /PASS: Windows headless health refuses effective foreign IPv4\/IPv6 routes/);
 });
 
 test('Windows connection and recovery cannot credit two arbitrary routes as OIG transport', () => {
@@ -25,9 +25,9 @@ test('Windows connection and recovery cannot credit two arbitrary routes as OIG 
   }
   const health = headless.slice(headless.indexOf('function Get-Health('), headless.indexOf('function Wait-Health('));
   assert.match(health, /\$managedActive=\(\$managedService -and \$managedService\.Status -eq 'Running'\)/);
-  assert.match(health, /Healthy=\(\$routePairValid -and \$managedActive/);
+  assert.match(health, /Healthy=\(\$routePairValid -and \$ipv6Safe -and \$managedActive/);
   assert.match(health, /FullRoutes=\$\(if\(\$routePairValid\)\{2\}else\{0\}\)/);
-  assert.match(connect, /if\(\$routePairValid -and \$loc/);
-  assert.match(connect, /-or -not \$routePairValid\)\{/);
+  assert.match(connect, /if\(\$routePairValid -and \$ipv6Safe -and \$loc/);
+  assert.match(connect, /-or -not \$routePairValid -or -not \$ipv6Safe\)\{/);
   assert.doesNotMatch(connect, /if\(\$routes\.Count -ge 2 -and \$loc/);
 });
