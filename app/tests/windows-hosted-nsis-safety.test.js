@@ -22,11 +22,19 @@ test('hosted NSIS install, GUI, tray and uninstall smoke is limited to disposabl
 
 test('stable Windows capture-only exits without autostart registration or tray', () => {
   const main = fs.readFileSync(path.join(root, 'src/main/main.js'), 'utf8');
-  const capture = main.slice(main.indexOf('fs.writeFileSync(process.env.OIG_CAPTURE_PATH'),
-    main.indexOf('fs.writeFileSync(process.env.OIG_CAPTURE_PATH') + 420);
-  assert.match(capture, /if \(process\.env\.OIG_CAPTURE_ONLY === '1'\)/);
-  assert.match(capture, /app\.exit\(0\)/);
-  assert.doesNotMatch(capture, /app\.quit\(\)/);
+  // Verify both LF and CRLF to catch Windows-only false negatives caused
+  // by fixed-length slicing of the captured callback.
+  for (const lineEnding of ['\n', '\r\n']) {
+    const source = main.replace(/\r?\n/g, lineEnding);
+    const captureStart = source.indexOf('fs.writeFileSync(process.env.OIG_CAPTURE_PATH');
+    const captureEnd = source.indexOf("win.on('close'", captureStart);
+    assert.ok(captureStart >= 0 && captureEnd > captureStart,
+      'The capture callback must precede the window close handler');
+    const capture = source.slice(captureStart, captureEnd);
+    assert.match(capture, /if \(process\.env\.OIG_CAPTURE_ONLY === '1'\)/);
+    assert.match(capture, /app\.exit\(0\)/);
+    assert.doesNotMatch(capture, /app\.quit\(\)/);
+  }
   assert.match(main, /app\.isPackaged && process\.env\.OIG_CAPTURE_ONLY !== '1'/);
   assert.match(main, /process\.platform !== 'win32' \|\| process\.env\.OIG_CAPTURE_ONLY !== '1'\) createTray\(\)/);
 });

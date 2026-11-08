@@ -1,8 +1,8 @@
 [CmdletBinding()]
 param([ValidateSet('Ensure','Connect','Disconnect','Status')][string]$Action='Ensure',[string]$ProfileSha='')
 $ErrorActionPreference='Stop'
-. (Join-Path $PSScriptRoot 'Profile-Policy.ps1')
 . (Join-Path $PSScriptRoot 'Route-Pair.ps1')
+. (Join-Path $PSScriptRoot 'Profile-Policy.ps1')
 $Root=Split-Path -Parent $PSScriptRoot
 $connector='C:\Program Files\OpenVPN Connect\ovpnconnector.exe'
 $service='OVPNConnectorService'

@@ -23,8 +23,6 @@ function run(file, args, options = {}) {
       cwd: options.cwd,
       windowsHide: true,
       shell: false,
-      // curl telnet:// waits for stdin EOF; use /dev/null (or NUL) for the
-      // quick TCP-port probe only, without changing other command behavior.
       stdio: options.closeStdin ? ['ignore','pipe','pipe'] : ['pipe','pipe','pipe'],
       env: { ...process.env, ...(options.env || {}) }
     });
@@ -1063,8 +1061,7 @@ class Backend {
       ? this._directTcpConnectMs(profile.ip, profile.port, pathInfo)
       : Promise.resolve(null);
     const [icmpPingMs, tcpConnectMs] = await Promise.all([pingPromise, tcpPromise]);
-    // A TCP host answering ICMP is not evidence that its advertised port is open.
-    // Report the TCP connect latency when proven; keep ICMP-only as a separate hint.
+    // ICMP reachability does not prove that a TCP relay port is open.
     const fastPingMs = profile.protocol === 'tcp' ? (tcpConnectMs ?? icmpPingMs) : icmpPingMs;
     return {
       fastAt: new Date().toISOString(),
@@ -1781,9 +1778,7 @@ exit 0
       const configPool = await this._factoryStatus();
       const current = this._readJson(this._profileStatePath(), {}) || {};
       const activeSha = base?.connected ? String(current.sha256 || '').toLowerCase() : '';
-      // Volunteer VPN Gate configurations do not pin an independently
-      // authenticated relay certificate. A working tunnel is not identity proof.
-      // Never derive this claim from untrusted cached metadata or claimed country.
+      // A working volunteer relay is not independently authenticated identity.
       return { ...base, activeSha, configPool, serverIdentityVerified: false };
     } catch (error) {
       return {

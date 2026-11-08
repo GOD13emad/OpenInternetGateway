@@ -279,9 +279,8 @@ def promote(common, evidence, count=48, keep_generations=4, preserve_count=8):
         })
 
     kept = preserve_old(active, stage, meta, success, preserve_count) if active.exists() else 0
-    # Attach provenance to the *promoted generation*, not merely the last
-    # attempted mirror download. Preserved older profiles are conservatively
-    # unknown even if the new snapshot was HTTPS-only.
+    # Provenance belongs to the promoted generation, not the latest attempted refresh.
+    # A pool containing preserved profiles is conservatively unknown.
     mirror = read_json(evidence / "mirror-refresh-last.json", {})
     security = (mirror.get("sourceSecurity", "unknown")
                 if mirror.get("refresh") and kept == 0 else "unknown")
@@ -327,8 +326,7 @@ def status(common, evidence, min_pool=6):
     validated=sum(1 for c in idx if str(c.get("SHA256","")).lower() in success)
     last=None
     source="Bundled VPN Gate snapshot" if idx else ""
-    # Legacy pools with no promotion provenance remain UNKNOWN, even if a
-    # newer unrelated mirror refresh succeeded after their promotion.
+    # Legacy pools without promotion provenance remain UNKNOWN.
     provenance=read_json(active/"source-provenance.json",{})
     source_security=provenance.get("sourceSecurity", "unknown")
     if source_security not in ("https-only", "http-fallback"):
