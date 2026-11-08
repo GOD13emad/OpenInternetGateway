@@ -110,8 +110,24 @@ managed_full_ipv4_route() {
   done
 }
 
+# Detect public IPv6 egress outside the OIG-owned tunnel without sending packets.
+# An absent IPv6 route is safe, but unexpected command failures fail closed.
+managed_ipv6_egress_safe() {
+  local owned="$1" destination response
+  for destination in 2606:4700:4700::1111 2001:4860:4860::8888; do
+    if response="$(ip -6 route get "$destination" 2>&1)"; then
+      response="$(printf '%s\n' "$response" | head -1)"
+      [[ "$response" == unreachable* || "$response" == prohibit* || "$response" == blackhole* ]] && continue
+      [[ " $response " == *" dev $owned "* ]] || return 1
+    else
+      [[ "$response" == *"Network is unreachable"* || "$response" == *"No route to host"* ]] || return 1
+    fi
+  done
+  return 0
+}
+
 json_status() {
-  local cf ip loc dns poison routes iface relay auto_state auto effective desired managed_active profile_ip profile_country probe_degraded source
+  local cf ip loc dns poison routes iface relay auto_state auto effective desired managed_active profile_ip profile_country probe_degraded source ipv6_leak
   cf="$(curl -4 --max-time 4 -s https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null || true)"
   ip="$(printf '%s\n' "$cf" | awk -F= '$1=="ip"{print $2;exit}')"
   loc="$(printf '%s\n' "$cf" | awk -F= '$1=="loc"{print $2;exit}')"
@@ -128,8 +144,11 @@ json_status() {
     managed_active=true
   fi
   routes=0
+  ipv6_leak=false
   if [[ "$managed_active" == true ]] && managed_full_ipv4_route "$iface" "$source"; then
     routes=2
+    # Preserve IPv4 route evidence for rollback even if IPv6 is unsafe.
+    if ! managed_ipv6_egress_safe "$iface"; then ipv6_leak=true; fi
   fi
 
   relay=""
@@ -153,7 +172,7 @@ PY
   fi
 
   probe_degraded=false
-  if [[ -z "$loc" && "$managed_active" == true && "$routes" -ge 2 && "$poison" == false && -n "$profile_country" ]]; then
+  if [[ -z "$loc" && "$managed_active" == true && "$routes" -ge 2 && "$ipv6_leak" == false && "$poison" == false && -n "$profile_country" ]]; then
     loc="$profile_country"
     [[ -n "$ip" ]] || ip="$profile_ip"
     probe_degraded=true
@@ -169,18 +188,18 @@ PY
     auto_state="Missing"
   fi
 
-  python3 - "$ip" "$loc" "$dns" "$poison" "$routes" "$relay" "$auto" "$auto_state" "$iface" "$desired" "$managed_active" "$probe_degraded" <<'PY'
+  python3 - "$ip" "$loc" "$dns" "$poison" "$routes" "$relay" "$auto" "$auto_state" "$iface" "$desired" "$managed_active" "$probe_degraded" "$ipv6_leak" <<'PY'
 import json,sys
-ip,loc,dns,poison,routes,relay,auto,state,iface,desired,managed,probe_degraded=sys.argv[1:]
+ip,loc,dns,poison,routes,relay,auto,state,iface,desired,managed,probe_degraded,ipv6_leak=sys.argv[1:]
 dns_list=[x for x in dns.split(",") if x]
 r=int(routes or 0)
-connected=(r>=2 and managed=="true" and bool(loc) and loc!="IR" and poison=="false")
+connected=(r>=2 and managed=="true" and bool(loc) and loc!="IR" and poison=="false" and ipv6_leak=="false")
 print(json.dumps({
     "connected":connected,"ip":ip,"country":loc,"dns":dns_list,
     "poison":None if poison=="unknown" else poison=="true","fullRoutes":r,"relay":relay,
     "autoRecovery":auto=="true","autoRecoveryState":state,"interface":iface,
     "desiredState":desired,"managedTunnelActive":managed=="true",
-    "healthProbeDegraded":probe_degraded=="true"
+    "healthProbeDegraded":probe_degraded=="true", "ipv6LeakRisk":ipv6_leak=="true"
 },separators=(",",":")))
 PY
 }

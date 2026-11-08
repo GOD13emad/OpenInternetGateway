@@ -13,7 +13,7 @@ test('Windows route-pair validator rejects mixed interfaces and physical shadow 
     encoding: 'utf8', timeout: 10000
   });
   assert.equal(r.status, 0, r.stderr || r.stdout);
-  assert.match(r.stdout, /PASS: Windows OpenVPN route pair and winning routes/);
+  assert.match(r.stdout, /PASS: Windows OpenVPN IPv4 and IPv6 winning routes/);
 });
 
 test('both Windows status paths use the same fail-closed OpenVPN route-pair validator', () => {
@@ -24,9 +24,11 @@ test('both Windows status paths use the same fail-closed OpenVPN route-pair vali
   assert.match(native, /Route-Pair\.ps1/);
   for (const status of [backend, native]) {
     assert.match(status, /Test-OigFullRoutePair -Routes \$routes/);
+    assert.match(status, /Test-OigIpv6EgressSafe -InterfaceIndex/);
     assert.match(status, /connected=\(\$routes\.Count -ge 2 -and \$routePairValid/i);
     assert.match(status, /FullRoutes=\$\(if\(\$routePairValid\)\{2\}else\{0\}\)/i);
   }
   assert.match(helper, /Get-NetAdapter -InterfaceIndex/);
+  assert.match(helper, /Find-NetRoute -RemoteIPAddress \$destination/);
   assert.match(helper, /OpenVPN\|TAP-Windows/);
 });

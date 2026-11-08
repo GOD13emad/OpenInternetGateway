@@ -33,3 +33,28 @@ function Test-OigFullRoutePair {
  }
  return $true
 }
+
+# IPv4 tunnel ownership does not prevent a parallel IPv6 escape on dual-stack
+# networks. Inspect the two effective public-IPv6 route selections without
+# sending packets or modifying network configuration. No IPv6 route is safe;
+# a physical/foreign selected IPv6 route is not.
+function Test-OigIpv6EgressSafe {
+ [CmdletBinding()]
+ param([int]$InterfaceIndex)
+ if($InterfaceIndex -lt 1){return $false}
+ $configured=@(Get-NetRoute -AddressFamily IPv6 -ErrorAction SilentlyContinue |
+   Where-Object {$_.DestinationPrefix -in @('::/0','::/1','8000::/1')})
+ foreach($destination in @('2606:4700:4700::1111','2001:4860:4860::8888')){
+   $selected=@(Find-NetRoute -RemoteIPAddress $destination -ErrorAction SilentlyContinue |
+     Where-Object {$_.PSObject.Properties['DestinationPrefix']})
+   if($selected.Count -eq 0){
+     # No viable IPv6 route is safe only if there is no global default /1.
+     if($configured.Count -ne 0){return $false}
+     continue
+   }
+   if($selected.Count -ne 1 -or [int]$selected[0].InterfaceIndex -ne $InterfaceIndex){
+     return $false
+   }
+ }
+ return $true
+}
