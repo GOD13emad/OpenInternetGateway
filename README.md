@@ -9,7 +9,7 @@ Open Internet Gateway (OIG) is a cross-platform desktop application for maintain
 
 The Windows and Linux backends are different, but both sit behind the same Electron dashboard, lifecycle model, health gates, multi-country relay inventory, Self-Healing Config Factory, and verified GitHub update workflow.
 
-## Current release line: 2.5.14
+## Current public release: 2.5.19 · 2.5.20 is Draft QA (unreleased)
 
 ### Connections
 
@@ -123,7 +123,11 @@ Validated on Ubuntu 24.04-class systems with:
 - systemd user services
 - `curl`
 
-The Debian package remains the preferred system-managed Linux install. Linux Debian installs to `/opt/open-internet-gateway` so Chromium's setuid sandbox does not inherit a path containing spaces. The Debian artifact post-build step repairs the desktop launcher and icon to mode `0644` and repacks with broadly supported `gzip` compression at level 1 to keep QA packaging bounded. It also normalizes the generated uninstall maintainer script's `update-alternatives --remove` target to `/opt/open-internet-gateway/open-internet-gateway`; the older product-name path was inconsistent with the installed payload. The desktop Quit action and Chromium sandbox modes are validated in a user-namespace install-script smoke test, not by installation on the host. Automatic in-app updates use the AppImage release extracted into `~/.local/opt` so they do not require root; some distributions may require FUSE compatibility only when launching AppImage directly.
+The Debian package remains the preferred system-managed Linux install. Linux Debian installs to `/opt/open-internet-gateway` so Chromium's setuid sandbox does not inherit a path containing spaces. The Debian artifact post-build step repairs the desktop launcher and icon to mode `0644` and repacks with broadly supported `gzip` compression at level 1 to keep QA packaging bounded. It also normalizes the generated uninstall maintainer script's `update-alternatives --remove` target to `/opt/open-internet-gateway/open-internet-gateway`; the older product-name path was inconsistent with the installed payload. The desktop Quit action and Chromium sandbox modes are validated in a user-namespace install-script smoke test, not by installation on the host. Automatic in-app updates use the AppImage release extracted into `~/.local/opt` so they do not require root; the Debian package does not require AppImage FUSE mounting.
+
+**Ubuntu 24.04+ / 26.04 AppImage compatibility:** The current AppImage build uses the FUSE 2 runtime (`libfuse.so.2`). Ubuntu systems with FUSE 3 only need the official `libfuse2t64` compatibility library to mount the AppImage directly. Installing this library once through the Ubuntu package manager does not make ordinary app launches require administrator privileges. For a user-local, no-root alternative, download `libfuse2t64` from the configured, authenticated Ubuntu APT repository, verify its package SHA-256 against APT metadata, extract its `.deb` with `dpkg-deb -x` into a private directory, then point `LD_LIBRARY_PATH` to the extracted `usr/lib/x86_64-linux-gnu` before launching the AppImage. This approach was validated on Ubuntu 26.04 without changing system packages or routes.
+
+**Concurrent-launch caveat:** Do not use `--appimage-extract-and-run` as a long-running workaround when invoking a second copy with `--quit`; the same extract-and-run cache can be cleaned up while another instance is still using it, causing exit code `127`. Use FUSE mounting (including the verified user-local `libfuse2t64` method), the Debian package, or a carefully managed persistent extracted runtime. Never use `--no-sandbox` to work around this packaging dependency.
 
 ## Building
 
