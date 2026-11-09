@@ -14,7 +14,10 @@ $script:routes=@()
 $script:driver='OpenVPN Data Channel Offload'
 $script:serviceStatus='Running'
 $script:country='US'
-$script:dns=@('8.8.8.8')
+function DnsRecord([string]$name,[string]$type,[string]$section,[string]$ip) {
+ return [pscustomobject]@{Name=$name;Type=$type;Section=$section;IPAddress=$ip}
+}
+$script:dnsRecords=@((DnsRecord 'dns.google' 'A' 'Answer' '8.8.8.8'))
 $script:winnerMode='matching'
 $script:v6Mode='none'
 function Get-NetRoute {
@@ -56,7 +59,7 @@ function Find-NetRoute {
 function curl.exe {return @('ip=198.51.100.10',('loc='+$script:country))}
 function Resolve-DnsName {
  param([string]$Name,[string]$Type,[switch]$DnsOnly,[string]$ErrorAction)
- return @($script:dns | ForEach-Object { [pscustomobject]@{IPAddress=$_} })
+ return @($script:dnsRecords)
 }
 function Row([string]$p,[int]$i,[string]$alias) {
  return [pscustomobject]@{DestinationPrefix=$p;InterfaceIndex=$i;InterfaceAlias=$alias}
@@ -85,11 +88,22 @@ $script:driver='OpenVPN Data Channel Offload'
 $script:country='IR'
 Expect $false 2 'foreign-country requirement'
 $script:country='US'
-$script:dns=@('10.10.34.35')
-Expect $false 2 'DNS poisoning'
-$script:dns=@()
+$script:dnsRecords=@(
+ (DnsRecord 'dns.google' 'A' 'Answer' '8.8.8.8'),
+ (DnsRecord 'dns.google' 'A' 'Answer' '8.8.4.4'),
+ (DnsRecord 'ns1.google.com' 'A' 'Additional' '216.239.32.114'),
+ (DnsRecord 'ns1.google.com' 'AAAA' 'Additional' '2001:4860:4802:32::72')
+)
+Expect $true 2 'additional-section glue is not DNS answer poisoning'
+$script:dnsRecords=@((DnsRecord 'dns.google' 'A' 'Answer' '10.10.34.35'))
+Expect $false 2 'DNS poisoning in answer section'
+$script:dnsRecords=@((DnsRecord 'ns1.google.com' 'A' 'Additional' '8.8.8.8'))
+Expect $false 2 'additional-only DNS records leave answer unknown'
+$script:dnsRecords=@([pscustomobject]@{IPAddress='8.8.8.8'})
+Expect $false 2 'unclassified DNS record fails closed'
+$script:dnsRecords=@()
 Expect $false 2 'DNS unknown must not be healthy'
-$script:dns=@('8.8.8.8')
+$script:dnsRecords=@((DnsRecord 'dns.google' 'A' 'Answer' '8.8.8.8'))
 Expect $false 2 'expected-country mismatch' 'JP'
 $script:v6Mode='foreign'
 Expect $false 2 'foreign IPv6 default despite owned IPv4'
@@ -98,4 +112,4 @@ Expect $false 2 'IPv6 default but no verified selected route'
 $script:v6Mode='owned'
 Expect $true 2 'IPv6 egress selected on managed OpenVPN adapter'
 $script:v6Mode='none'
-Write-Output 'PASS: Windows headless health refuses effective foreign IPv4/IPv6 routes, stopped connector and untrusted DNS (13 offline cases)'
+Write-Output 'PASS: Windows headless health refuses effective foreign IPv4/IPv6 routes, stopped connector and untrusted DNS (16 offline cases)'
