@@ -539,7 +539,8 @@ class Backend {
     const elevate = [
       "$ErrorActionPreference='Stop'",
       "$msi='" + escapedMsi + "'",
-      "$msiArgs='/i \"' + $msi + '\" /quiet /norestart'",
+      // The pinned MSI defaults AUTOSTART=yes and runs StartApp_CA after installation; keep the vendor GUI out of OIG's headless flow.
+      "$msiArgs='/i \"' + $msi + '\" /quiet /norestart AUTOSTART=no'",
       "try {",
       "  $p=Start-Process -FilePath 'msiexec.exe' -Verb RunAs -Wait -PassThru -ArgumentList $msiArgs",
       "  exit $p.ExitCode",

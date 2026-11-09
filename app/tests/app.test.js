@@ -1193,7 +1193,7 @@ test('Windows first-connect OpenVPN prerequisite is pinned, verified and install
   assert.match(ensure,/\$msi='" \+ escapedMsi \+ "'/);
   assert.match(ensure,/\$msiArgs='\/i /);
   assert.match(ensure,/\/quiet \/norestart/);
-  assert.doesNotMatch(ensure,/AUTOSTART=/i);
+  assert.match(ensure,/\/quiet \/norestart AUTOSTART=no/);
   assert.match(ensure,/ArgumentList \$msiArgs/);
   assert.match(ensure,/run\(pwsh, \['-NoProfile','-Command',elevate\]/);
   assert.match(ensure,/administrator approval was cancelled/);

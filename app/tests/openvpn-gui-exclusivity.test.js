@@ -7,10 +7,10 @@ const backend=fs.readFileSync(path.join(root,'src/main/platform-backend.js'),'ut
 const ensure=fs.readFileSync(path.join(root,'backend/windows/scripts/Ensure-OpenInternet.ps1'),'utf8').replace(/\r\n/g,'\n');
 const daemon=fs.readFileSync(path.join(root,'backend/windows/scripts/Headless-Control.ps1'),'utf8').replace(/\r\n/g,'\n');
 
-test('first-time OpenVPN MSI uses documented quiet/no-restart switches and no guessed vendor property',()=>{
+test('first-time OpenVPN MSI suppresses the package-verified post-install GUI launch',()=>{
   const install=backend.slice(backend.indexOf('async _ensureWindowsConnector()'),backend.indexOf('async _ensureWindowsRuntimePrerequisites()'));
   assert.match(install,/\/quiet \/norestart/);
-  assert.doesNotMatch(install,/AUTOSTART=/i);
+  assert.match(install,/\/quiet \/norestart AUTOSTART=no/);
   assert.doesNotMatch(install,/Start-Process[^\r\n]*OpenVPNConnect|OpenVPNConnect\.exe/i);
   assert.match(install,/sha256 !== WINDOWS_OPENVPN_CONNECT\.sha256/);
   assert.match(install,/Start-Process -FilePath 'msiexec\.exe' -Verb RunAs/);
