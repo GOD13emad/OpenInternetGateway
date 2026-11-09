@@ -1,0 +1,72 @@
+name: Disposable Linux provider OpenVPN data-plane QA
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/hosted-linux-provider-data-plane.yml'
+      - 'app/tests/hosted-linux-provider-data-plane.py'
+
+permissions:
+  contents: read
+
+jobs:
+  isolated-linux-provider:
+    if: ${{ github.event.pull_request.head.repo.full_name == github.repository && github.head_ref == 'qa/v2.5.20-operator-safety-20261019' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Confirm disposable runner and exact trusted QA scope
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$RUNNER_ENVIRONMENT" = "github-hosted"
+          test "$GITHUB_ACTIONS" = "true"
+          test "$GITHUB_REPOSITORY" = "GOD13emad/OpenInternetGateway"
+          test "$GITHUB_BASE_REF" = "integration/qa-v2520-20261019"
+          test "$(git rev-parse HEAD)" = "${{ github.event.pull_request.head.sha }}"
+          test "$(git status --porcelain)" = ""
+          test -f app/tests/hosted-linux-provider-data-plane.py
+          python3 -B - <<'PY'
+          import ast
+          from pathlib import Path
+          ast.parse(Path('app/tests/hosted-linux-provider-data-plane.py').read_text())
+          print('PROVIDER_HARNESS_AST=PASS')
+          PY
+          set +e
+          refusal="$(env -u GITHUB_ACTIONS -u RUNNER_ENVIRONMENT -u GITHUB_REPOSITORY             python3 -B app/tests/hosted-linux-provider-data-plane.py --run-hosted-tunnel 2>&1)"
+          rc=$?
+          set -e
+          test "$rc" -ne 0
+          test "$refusal" = "REFUSED: owner host or non-disposable runner"
+          echo "NON_HOSTED_TRIAL_REJECTED=PASS"
+      - name: Verify official HTTPS config and public shared-login provenance (no VPN)
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -B app/tests/hosted-linux-provider-data-plane.py --probe-official-source-only
+      - name: Install disposable-runner network test prerequisites
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq openvpn iproute2 iptables dnsutils curl
+          test -c /dev/net/tun
+          test -w /dev/net/tun
+      - name: Create isolated network namespace, test provider TUN and rollback
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo env             GITHUB_ACTIONS="$GITHUB_ACTIONS"             GITHUB_REPOSITORY="$GITHUB_REPOSITORY"             RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT"             RUNNER_TEMP="$RUNNER_TEMP"             python3 -B app/tests/hosted-linux-provider-data-plane.py --run-hosted-tunnel
+      - name: Upload bounded hosted-only test receipt
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: linux-provider-tun-qa-receipt
+          path: ${{ runner.temp }}/oig-linux-provider-dataplane.json
+          if-no-files-found: warn
+          retention-days: 7
