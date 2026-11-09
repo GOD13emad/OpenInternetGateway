@@ -143,7 +143,7 @@ def make_password_fd(password):
         raise
 
 
-def ensure_no_active_managed_gateway():
+def ensure_no_active_managed_gateway(allowed_qa_name=None):
     active = checked(["nmcli", "-t", "-f", "NAME,TYPE", "connection",
                       "show", "--active"])
     if active.returncode:
@@ -154,9 +154,10 @@ def ensure_no_active_managed_gateway():
         name, separator, connection_type = line.rpartition(":")
         if not separator or not name or not connection_type:
             raise TrialError("Cannot safely parse active connection inventory")
-        if name.startswith(managed):
+        if name.startswith(managed) and name != allowed_qa_name:
             raise TrialError("A regular OpenInternetGateway connection is still active")
-        if connection_type.lower() in {"vpn", "tun", "wireguard"}:
+        if (connection_type.lower() in {"vpn", "tun", "wireguard"}
+                and name != allowed_qa_name):
             raise TrialError(
                 "An independent VPN or tunnel is active; use a clean physical network for this trial. "
                 "No existing connection was changed")
@@ -225,6 +226,10 @@ def trial(profile, ca_sha, peer_cn, seconds, hold):
             trust_verified = scoped_trust.get("trustConstraintsPreserved") is True
             if not trust_verified:
                 raise TrialError("Temporary QA modification did not preserve server identity constraints")
+            # An external VPN can start after the initial preflight while the
+            # user is entering credentials or while NM imports the profile.
+            # Recheck immediately before activation; never tear down that VPN.
+            ensure_no_active_managed_gateway()
             fd = make_password_fd(password)
             password = ""  # best-effort reference drop (Python strings are immutable)
             try:
@@ -237,6 +242,9 @@ def trial(profile, ca_sha, peer_cn, seconds, hold):
                                   "connection", "show", "--active"])
                 if active.returncode or uuid not in active.stdout.decode(errors="replace").lower().splitlines():
                     raise TrialError("Temporary QA connection is not confirmed active")
+                # Permit only this exact temporary QA VPN; an independently
+                # activated VPN/tunnel triggers UUID-scoped rollback of ours.
+                ensure_no_active_managed_gateway(allowed_qa_name=name)
                 active_trust = operator_profile.verify_nm_import(
                     uuid, name, checked_profile, remote, protocol, ca_sha, peer_cn)
                 trust_verified = active_trust.get("trustConstraintsPreserved") is True

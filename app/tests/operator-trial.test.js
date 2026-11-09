@@ -52,6 +52,8 @@ test('opt-in QA trial passes provider password only in memfd, arms timer before 
         '    if os.environ.get("OIG_SECRET_STUB_ACTIVE_OIG")=="1":print("OIG-VPN-LIVE:vpn")',
         '    if os.environ.get("OIG_SECRET_STUB_ACTIVE_EXTERNAL_VPN")=="1":print("IPbaz:vpn")',
         '    if os.environ.get("OIG_SECRET_STUB_ACTIVE_EXTERNAL_TUN")=="1":print("tailscale0:tun")',
+        '    if s.get("externalVpn"):print("IPbaz:vpn")',
+        '    if s.get("active"):print(s.get("name", "OIG-Operator-QA-test")+":vpn")',
         '    done()',
         'if a[:5]==["--wait","5","-t","-f","UUID"] and a[5:]==["connection","show"]:',
         '    print(u if s.get("exists") else "aaaaaaaa-1234-4234-8234-123456789abc");done()',
@@ -77,6 +79,7 @@ test('opt-in QA trial passes provider password only in memfd, arms timer before 
         '    s["name"]=a[a.index("connection.id")+1]',
         '    s["username"]=a[a.index("vpn.user-name")+1]',
         '    s["scoped"]=True',
+        '    if os.environ.get("OIG_SECRET_STUB_EXTERNAL_VPN_AFTER_MODIFY")=="1":s["externalVpn"]=True',
         '    if os.environ.get("OIG_SECRET_STUB_FAIL_MODIFY_AFTER")=="1":done(14)',
         '    done()',
         'if a[:2]==["-g","connection.autoconnect,ipv4.never-default,ipv6.never-default,ipv4.ignore-auto-dns,ipv6.ignore-auto-dns,ipv4.ignore-auto-routes,ipv6.ignore-auto-routes,vpn.user-name"]:',
@@ -107,7 +110,9 @@ test('opt-in QA trial passes provider password only in memfd, arms timer before 
         '    assert secret=="vpn.secrets.password:fake-test-only-pass\\n"',
         '    s["memfdPass"]=True',
         '    if os.environ.get("OIG_SECRET_STUB_FAIL_UP")=="1":done(11)',
-        '    s["active"]=True;done()',
+        '    s["active"]=True',
+        '    if os.environ.get("OIG_SECRET_STUB_EXTERNAL_VPN_AFTER_UP")=="1":s["externalVpn"]=True',
+        '    done()',
         'if a[:3]==["--wait","5","connection"] and a[3:5]==["down","uuid"]:',
         '    if not s.get("active"):done(10)',
         '    s["active"]=False;done()',
@@ -175,6 +180,26 @@ test('opt-in QA trial passes provider password only in memfd, arms timer before 
       assert.equal(externalTun.status,2);
       assert.match(externalTun.stderr,/independent VPN or tunnel is active/);
       assert.doesNotMatch(fs.readFileSync(log,'utf8'),/connection import|UP/);
+      const externalAfterModify = run({OIG_SECRET_STUB_EXTERNAL_VPN_AFTER_MODIFY:'1'});
+      assert.equal(externalAfterModify.status,2);
+      assert.match(externalAfterModify.stderr,/independent VPN or tunnel is active/);
+      assert.equal(JSON.parse(fs.readFileSync(state,'utf8')).exists,false,
+        'A VPN started during import must block activation and still clean up the QA profile');
+      assert.equal(JSON.parse(fs.readFileSync(state,'utf8')).externalVpn,true,
+        'The external VPN must remain active and untouched');
+      assert.doesNotMatch(fs.readFileSync(log,'utf8'),/UP/);
+      const externalAfterUp = run({OIG_SECRET_STUB_EXTERNAL_VPN_AFTER_UP:'1'});
+      assert.equal(externalAfterUp.status,2);
+      assert.match(externalAfterUp.stderr,/independent VPN or tunnel is active/);
+      const externalAfterUpState = JSON.parse(fs.readFileSync(state,'utf8'));
+      assert.equal(externalAfterUpState.exists,false,
+        'The QA profile must be rolled back when an external VPN appears during activation');
+      assert.equal(externalAfterUpState.active,false,
+        'The QA VPN must be down after the race is detected');
+      assert.equal(externalAfterUpState.externalVpn,true,
+        'Rollback must leave the independently started VPN active');
+      assert.doesNotMatch(fs.readFileSync(log,'utf8'),/IPbaz/,
+        'Rollback must never issue a down/delete operation for the external VPN');
       const failedImport = run({OIG_SECRET_STUB_FAIL_IMPORT_AFTER:'1'});
       assert.equal(failedImport.status,2);
       assert.equal(JSON.parse(fs.readFileSync(state,'utf8')).exists,false,
