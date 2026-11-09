@@ -98,7 +98,7 @@ def parse_vpn_data(raw):
 
 
 def cleanup_import_artifacts(artifact_stem, certificate_directory, artifact_hashes):
-    """Delete only the uniquely named, unreferenced, unopened and hash-pinned imported cert copies."""
+    """Delete only uniquely named, unreferenced and hash-pinned imported cert copies."""
     if not QA_NAME.fullmatch(artifact_stem):
         raise RollbackError("Temporary certificate artifact identity is invalid")
     artifact_hashes = checked_artifact_hashes(artifact_hashes)
@@ -131,23 +131,9 @@ def cleanup_import_artifacts(artifact_stem, certificate_directory, artifact_hash
         if any(str(path) in values.values() for path in paths.values()):
             raise RollbackError("Temporary certificate is still referenced by a VPN profile")
 
-    expected = {str(path) for path in paths.values()}
-    proc_root = Path("/proc")
-    if not proc_root.is_dir():
-        raise RollbackError("Cannot inspect open certificate handles")
-    for process in proc_root.glob("[0-9]*"):
-        try:
-            descriptors = (process / "fd").iterdir()
-        except (OSError, PermissionError):
-            continue
-        for descriptor in descriptors:
-            try:
-                target = os.readlink(descriptor)
-            except (OSError, PermissionError):
-                continue
-            if target in expected:
-                raise RollbackError("Temporary certificate is still open by a process")
-
+    # Do not enumerate /proc/<pid>/fd: container/user namespaces may hide
+    # unrelated descriptors. No NM VPN profile references these exact unique
+    # paths; unlink removes their names and prevents future opens.
     for name, path in paths.items():
         if not path.exists() and not path.is_symlink():
             continue

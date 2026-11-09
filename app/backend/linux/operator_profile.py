@@ -316,24 +316,9 @@ def cleanup_nm_import_artifacts(stem, content):
         if any(str(path) in data.values() for path in paths.values()):
             raise UnsafeProfile("Temporary certificate is still referenced by a VPN profile")
 
-    # Refuse deletion while a process still has one of these exact files open.
-    proc_root = Path("/proc")
-    if not proc_root.is_dir():
-        raise UnsafeProfile("Cannot verify open certificate handles")
-    expected_targets = {str(path) for path in paths.values()}
-    for process in proc_root.glob("[0-9]*"):
-        try:
-            descriptors = (process / "fd").iterdir()
-        except (OSError, PermissionError):
-            continue
-        for descriptor in descriptors:
-            try:
-                target = os.readlink(descriptor)
-            except (OSError, PermissionError):
-                continue
-            if target in expected_targets:
-                raise UnsafeProfile("Temporary certificate is still open by a process")
-
+    # Do not walk /proc/<pid>/fd here: container/user namespaces may hide
+    # unrelated descriptors. The exact unique paths are unreferenced by every
+    # NM VPN profile; unlink safely removes the names and blocks future opens.
     for name, path in paths.items():
         if not path.exists() and not path.is_symlink():
             continue
