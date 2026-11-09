@@ -92,3 +92,11 @@ test('backend never retrieves free login on Windows or while a gateway task is a
   backend.gatewayActionCount = 1;
   await assert.rejects(backend.freeVpnBookCredentials(), /Wait for the active gateway task/);
 });
+
+test('hosted Windows first-connect scope gate explicitly allows both free-login source and regression', () => {
+  const workflow = fs.readFileSync(path.join(__dirname, '../../.github/workflows/hosted-first-connect-acceptance.yml'), 'utf8');
+  const allowed = workflow.slice(workflow.indexOf('$allowed=@('), workflow.indexOf('$actual=@('));
+  assert.ok(allowed.includes("'app/src/main/vpnbook-public-credentials.js'"));
+  assert.ok(allowed.includes("'app/tests/vpnbook-free-credentials.test.js'"));
+  assert.match(workflow, /UNEXPECTED_PRODUCT_SCOPE/);
+});
