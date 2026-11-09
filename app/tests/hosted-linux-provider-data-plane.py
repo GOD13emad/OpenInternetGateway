@@ -111,6 +111,57 @@ def get_host_snapshot():
         'resolv_sha256': hashlib.sha256(Path('/etc/resolv.conf').read_bytes()).hexdigest()
     }
 
+def canonical_effective_iptables(text):
+    """Ignore only newly materialized, empty ACCEPT-only builtin tables.
+
+    iptables-nft may retain an empty table after the last temporary rule is
+    deleted. Nonempty rules, custom chains and non-ACCEPT policies MUST still
+    match byte-for-byte after comment removal; no global flush is allowed.
+    """
+    defaults = {
+        'filter': {'INPUT', 'OUTPUT', 'FORWARD'},
+        'nat': {'PREROUTING', 'INPUT', 'OUTPUT', 'POSTROUTING'},
+        'mangle': {'PREROUTING', 'INPUT', 'FORWARD', 'OUTPUT', 'POSTROUTING'},
+        'raw': {'PREROUTING', 'OUTPUT'},
+        'security': {'INPUT', 'OUTPUT', 'FORWARD'},
+    }
+    tables = {}
+    table = None
+    contents = []
+    def process(name, rows):
+        if not rows:
+            return
+        has_rule = any(not x.startswith(':') for x in rows)
+        benign_chains = all(
+            re.fullmatch(r':([A-Za-z0-9_-]+) ACCEPT \[0:0\]', x)
+            and x.split()[0][1:] in defaults.get(name, set())
+            for x in rows
+        )
+        if not has_rule and benign_chains:
+            return
+        tables[name] = tuple(rows)
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith('#'):
+            continue
+        if line.startswith('*'):
+            if table is not None:
+                raise RuntimeError('Malformed firewall snapshot: nested table')
+            table = line[1:]
+            contents = []
+        elif line == 'COMMIT':
+            if table is None:
+                raise RuntimeError('Malformed firewall snapshot: unexpected COMMIT')
+            process(table, contents)
+            table, contents = None, []
+        elif table is not None:
+            contents.append(line)
+        else:
+            raise RuntimeError('Malformed firewall snapshot outside table')
+    if table is not None:
+        raise RuntimeError('Malformed firewall snapshot: unterminated table')
+    return tables
+
 def public_trace(ns, interface=None):
     cmd = ['ip','netns','exec',ns,'curl','-4','--noproxy','*','-fsS',
            '--connect-timeout','6','--max-time','18']
@@ -367,7 +418,19 @@ def main():
         finally:
             trial.cleanup()
     after = get_host_snapshot()
-    rec['host_runner_recovered'] = baseline == after and not rec.get('cleanup_errors')
+    rec['host_snapshot_surface_equal'] = {
+        name: baseline[name] == after[name] for name in baseline
+    }
+    rec['firewall_effective_equivalent'] = (
+        canonical_effective_iptables(baseline['iptables']) ==
+        canonical_effective_iptables(after['iptables'])
+    )
+    rec['host_runner_recovered'] = (
+        all(same for name, same in rec['host_snapshot_surface_equal'].items()
+            if name != 'iptables')
+        and rec['firewall_effective_equivalent']
+        and not rec.get('cleanup_errors')
+    )
     rec['completed_utc'] = dt.datetime.now(dt.timezone.utc).isoformat()
     rec['pass'] = bool(rec['server_identity_verified'] and rec['public_user_authenticated'] and
                        rec['data_plane_pass'] and rec['tunnel_route_verified_after_transfer'] and

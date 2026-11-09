@@ -15,7 +15,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 0
@@ -63,7 +63,7 @@ jobs:
           set -euo pipefail
           sudo env             GITHUB_ACTIONS="$GITHUB_ACTIONS"             GITHUB_REPOSITORY="$GITHUB_REPOSITORY"             RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT"             RUNNER_TEMP="$RUNNER_TEMP"             python3 -B app/tests/hosted-linux-provider-data-plane.py --run-hosted-tunnel
       - name: Upload bounded hosted-only test receipt
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         if: always()
         with:
           name: linux-provider-tun-qa-receipt

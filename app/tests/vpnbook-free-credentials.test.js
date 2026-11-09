@@ -98,5 +98,7 @@ test('hosted Windows first-connect scope gate explicitly allows both free-login 
   const allowed = workflow.slice(workflow.indexOf('$allowed=@('), workflow.indexOf('$actual=@('));
   assert.ok(allowed.includes("'app/src/main/vpnbook-public-credentials.js'"));
   assert.ok(allowed.includes("'app/tests/vpnbook-free-credentials.test.js'"));
+  assert.ok(allowed.includes("'.github/workflows/hosted-linux-provider-data-plane.yml'"));
+  assert.ok(allowed.includes("'app/tests/hosted-linux-provider-data-plane.py'"));
   assert.match(workflow, /UNEXPECTED_PRODUCT_SCOPE/);
 });
