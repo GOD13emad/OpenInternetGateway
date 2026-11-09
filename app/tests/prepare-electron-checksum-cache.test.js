@@ -81,7 +81,9 @@ test('Electron checksum seeding retries HTTP 504, verifies the manifest, and wri
   assert.equal(result.artifactSha256, 'd2f9319dc81d6786c684a80f63d728421761f55a27a3ae3bd373250f0f40fdca');
   assert.equal(result.manifestSha256, sha256(data));
   assert.equal(fs.readFileSync(result.cacheFile).equals(data), true);
-  assert.equal(fs.statSync(result.cacheFile).mode & 0o777, 0o600);
+  if (process.platform !== 'win32') {
+    assert.equal(fs.statSync(result.cacheFile).mode & 0o777, 0o600);
+  }
 });
 
 test('Electron checksum seeding refuses permanent HTTP errors and mismatched Electron versions', async t => {
