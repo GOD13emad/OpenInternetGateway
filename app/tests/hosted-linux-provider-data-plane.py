@@ -155,12 +155,30 @@ def canonical_effective_iptables(text):
             process(table, contents)
             table, contents = None, []
         elif table is not None:
+            # Packet/byte counters are traffic state, not effective firewall rules.
+            if line.startswith(':'):
+                line = re.sub(r'\[\d+:\d+\]$', '[0:0]', line)
             contents.append(line)
         else:
             raise RuntimeError('Malformed firewall snapshot outside table')
     if table is not None:
         raise RuntimeError('Malformed firewall snapshot: unterminated table')
     return tables
+
+def firewall_shape(tables):
+    # Only chain names/policies, counts and digest; no rules or host IPs.
+    return {
+        name: {
+            'chain_policies': [row.split()[0][1:] + ':' + row.split()[1]
+                               for row in rows if row.startswith(':')],
+            'rule_count': sum(row.startswith('-A ') for row in rows),
+            'other_line_count': sum(not row.startswith(':') and
+                                    not row.startswith('-A ') for row in rows),
+            'effective_sha256': hashlib.sha256(
+                ('\\n'.join(rows)).encode()).hexdigest(),
+        }
+        for name, rows in tables.items()
+    }
 
 def public_trace(ns, interface=None):
     cmd = ['ip','netns','exec',ns,'curl','-4','--noproxy','*','-fsS',
@@ -421,10 +439,11 @@ def main():
     rec['host_snapshot_surface_equal'] = {
         name: baseline[name] == after[name] for name in baseline
     }
-    rec['firewall_effective_equivalent'] = (
-        canonical_effective_iptables(baseline['iptables']) ==
-        canonical_effective_iptables(after['iptables'])
-    )
+    effective_before = canonical_effective_iptables(baseline['iptables'])
+    effective_after = canonical_effective_iptables(after['iptables'])
+    rec['firewall_effective_equivalent'] = effective_before == effective_after
+    rec['firewall_before_shape'] = firewall_shape(effective_before)
+    rec['firewall_after_shape'] = firewall_shape(effective_after)
     rec['host_runner_recovered'] = (
         all(same for name, same in rec['host_snapshot_surface_equal'].items()
             if name != 'iptables')
