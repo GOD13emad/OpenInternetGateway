@@ -59,16 +59,31 @@ $until=(Get-Date).AddSeconds($waitSeconds)
 $minimumCompletionAt=(Get-Date).AddSeconds(2)
 do{
  Start-Sleep -Seconds 1
+ $intent='off'
+ if(Test-Path -LiteralPath $desired){try{$intent=[string](Get-Content -LiteralPath $desired -Raw -Encoding UTF8|ConvertFrom-Json).desired}catch{}}
+ if($intent -ne 'on'){throw 'Connect cancelled: explicit Disconnect requested desired=off.'}
  $routes=@(Get-NetRoute -AddressFamily IPv4 -ErrorAction SilentlyContinue|Where-Object{$_.DestinationPrefix -in @('0.0.0.0/1','128.0.0.0/1')})
  $routePairValid=Test-OigFullRoutePair -Routes $routes
  $ipv6Safe=if($routePairValid){Test-OigIpv6EgressSafe -InterfaceIndex ([int]$routes[0].InterfaceIndex)}else{$false}
  $cf=@(curl.exe -4 --max-time 4 -s https://www.cloudflare.com/cdn-cgi/trace)
  $loc=[string]((($cf|Where-Object{$_ -like 'loc=*'}|Select-Object -First 1)-replace '^loc=',''));$loc=$loc.Trim()
  $svc=Get-Service OVPNConnectorService -ErrorAction SilentlyContinue
- $activeSha=''
- if(Test-Path -LiteralPath $current){try{$activeSha=([string](Get-Content -LiteralPath $current -Raw -Encoding UTF8|ConvertFrom-Json).sha256).Trim().ToLowerInvariant()}catch{}}
+ $intent='off'
+ if(Test-Path -LiteralPath $desired){try{$intent=[string](Get-Content -LiteralPath $desired -Raw -Encoding UTF8|ConvertFrom-Json).desired}catch{}}
+ if($intent -ne 'on'){throw 'Connect cancelled: explicit Disconnect requested desired=off.'}
+ $activeSha='';$activeCountry='';$activeRelay=''
+ if(Test-Path -LiteralPath $current){
+   try{
+     $profile=Get-Content -LiteralPath $current -Raw -Encoding UTF8|ConvertFrom-Json
+     $activeSha=([string]$profile.sha256).Trim().ToLowerInvariant()
+     $activeCountry=[string]$profile.country
+     if(-not $activeCountry){$activeCountry=[string]$profile.configuredCountry}
+     $activeRelay=([string]$profile.serverIP)+':'+([string]$profile.port)
+   }catch{}
+ }
+ $profileOk=($activeSha -match '^[0-9a-f]{64}$' -and $activeRelay -and $activeRelay -ne ':' -and $activeCountry -and $loc -eq $activeCountry)
  $exactOk=(-not $expectedSha -or ($activeSha -and $activeSha -eq $expectedSha))
- if($routePairValid -and $ipv6Safe -and $loc -and $loc -ne 'IR' -and $svc -and $svc.Status -eq 'Running' -and $exactOk){
+ if($routes.Count -ge 2 -and $routePairValid -and $ipv6Safe -and $loc -and $loc -ne 'IR' -and $svc -and $svc.Status -eq 'Running' -and $profileOk -and $exactOk){
    Remove-Item -LiteralPath $exact -Force -ErrorAction SilentlyContinue
    Write-Host $(if($expectedSha){'CONNECTED EXACT'}else{'CONNECTED'})
    exit 0
@@ -79,7 +94,7 @@ do{
  if($expectedSha -and (Get-Date) -ge $minimumCompletionAt){
    $task=Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
    if($task -and [string]$task.State -ne 'Running' -and -not(Test-Path -LiteralPath $exact)){
-     if($activeSha -ne $expectedSha -or -not $svc -or $svc.Status -ne 'Running' -or -not $routePairValid -or -not $ipv6Safe){
+     if($activeSha -ne $expectedSha -or -not $svc -or $svc.Status -ne 'Running' -or -not $routePairValid -or -not $ipv6Safe -or -not $profileOk){
        throw 'Selected relay failed validation. Gateway intent remains on so the previous preferred relay can be restored.'
      }
    }

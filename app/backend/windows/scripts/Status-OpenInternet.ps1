@@ -15,13 +15,13 @@ $task=Get-ScheduledTask -TaskName 'OpenInternetGateway-AutoRecovery' -ErrorActio
 $desired='off'
 $desiredFile=Join-Path $Root 'state\desired-state.json'
 if(Test-Path $desiredFile){try{$desired=[string](Get-Content -Raw $desiredFile|ConvertFrom-Json).desired}catch{}}
-$relay='';$protocol='';$engine='OVPNConnectorService';$profileIP='';$profileCountry=''
+$relay='';$protocol='';$engine='OVPNConnectorService';$profileIP='';$profileCountry='';$profileSha=''
 $stateFile=Join-Path $Root 'state\current-openvpn-profile.json'
-if(Test-Path $stateFile){try{$s=Get-Content -Raw $stateFile|ConvertFrom-Json;$relay=([string]$s.serverIP)+':'+([string]$s.port);$protocol=[string]$s.protocol;if($s.engine){$engine=[string]$s.engine};$profileIP=[string]$s.observedIP;if(-not $profileIP){$profileIP=[string]$s.serverIP};$profileCountry=[string]$s.country;if(-not $profileCountry){$profileCountry=[string]$s.configuredCountry}}catch{}}
+if(Test-Path $stateFile){try{$s=Get-Content -Raw $stateFile|ConvertFrom-Json;$relay=([string]$s.serverIP)+':'+([string]$s.port);$protocol=[string]$s.protocol;if($s.engine){$engine=[string]$s.engine};$profileIP=[string]$s.observedIP;if(-not $profileIP){$profileIP=[string]$s.serverIP};$profileSha=[string]$s.sha256;$profileCountry=[string]$s.country;if(-not $profileCountry){$profileCountry=[string]$s.configuredCountry}}catch{}}
 $svc=Get-Service OVPNConnectorService -ErrorAction SilentlyContinue
 $managedActive=($svc -and $svc.Status -eq 'Running')
 $probeDegraded=$false
-if(-not $loc -and $managedActive -and $routes.Count -ge 2 -and $routePairValid -and $ipv6Safe -and $poison -eq $false -and $profileCountry){
+if(-not $loc -and $managedActive -and $routes.Count -ge 2 -and $routePairValid -and $ipv6Safe -and $poison -eq $false -and $profileSha -match '^[a-fA-F0-9]{64}$' -and $relay -and $relay -ne ':' -and $profileCountry){
   $loc=$profileCountry
   if(-not $ip){$ip=$profileIP}
   $probeDegraded=$true
@@ -29,7 +29,7 @@ if(-not $loc -and $managedActive -and $routes.Count -ge 2 -and $routePairValid -
 $pool=$null
 try{$pool=& (Join-Path $PSScriptRoot 'Config-Factory.ps1') -Action Status|ConvertFrom-Json}catch{}
 [pscustomobject]@{
- Connected=($routes.Count -ge 2 -and $routePairValid -and $ipv6Safe -and $managedActive -and $loc -and $loc -ne 'IR' -and $poison -eq $false)
+ Connected=($desired -eq 'on' -and $routes.Count -ge 2 -and $routePairValid -and $ipv6Safe -and $managedActive -and $profileSha -match '^[a-fA-F0-9]{64}$' -and $relay -and $relay -ne ':' -and $profileCountry -and $loc -eq $profileCountry -and $loc -ne 'IR' -and $poison -eq $false)
  IP=$ip;Country=$loc;Dns=($dns -join ',');Poison=$poison;FullRoutes=$(if($routePairValid){2}else{0});Ipv6LeakRisk=[bool]($routePairValid -and -not $ipv6Safe)
  Relay=$relay;Protocol=$protocol;Engine=$engine;ManagedTunnelActive=[bool]$managedActive;HealthProbeDegraded=[bool]$probeDegraded;DesiredState=$desired
  AutoRecovery=$(if(-not $task){'NotInstalled'}elseif(-not [bool]$task.Settings.Enabled){'Disabled'}else{'Installed'})

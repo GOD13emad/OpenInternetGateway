@@ -539,7 +539,7 @@ class Backend {
     const elevate = [
       "$ErrorActionPreference='Stop'",
       "$msi='" + escapedMsi + "'",
-      "$msiArgs='/i \"' + $msi + '\" /passive /norestart'",
+      "$msiArgs='/i \"' + $msi + '\" /quiet /norestart'",
       "try {",
       "  $p=Start-Process -FilePath 'msiexec.exe' -Verb RunAs -Wait -PassThru -ArgumentList $msiArgs",
       "  exit $p.ExitCode",
@@ -557,7 +557,22 @@ class Backend {
 
   async _ensureWindowsRuntimePrerequisites() {
     const pwsh = this._requireWindowsPwsh();
+    const assertGuiClosed = async () => {
+      const interactive = await run(pwsh, [
+        '-NoProfile', '-NonInteractive', '-Command',
+        "$ErrorActionPreference='Stop';try{$p=Get-Process -Name 'OpenVPNConnect' -ErrorAction Stop;if($p){exit 17};exit 0}catch{if($_.FullyQualifiedErrorId -like 'NoProcessFoundForGivenName*'){exit 0};exit 18}"
+      ], { timeout: 10000, allowFailure: true });
+      if (interactive.code === 17) {
+        throw new Error('OpenVPN Connect is already running. Close the independent GUI before connecting through Open Internet Gateway. No OpenVPN process was closed.');
+      }
+      if (interactive.code !== 0) {
+        throw new Error('Cannot confirm OpenVPN Connect is closed; refusing a competing VPN operation.');
+      }
+    };
+    await assertGuiClosed();
     const openVpn = await this._ensureWindowsConnector();
+    // Recheck in case the vendor installer or another application opened the GUI.
+    await assertGuiClosed();
     return { powerShell7: { ready: true, path: pwsh }, openVpnConnect: openVpn };
   }
 
@@ -598,10 +613,10 @@ class Backend {
         "$desiredPath='" + path.join(this.backendRoot, 'state', 'desired-state.json').replace(/'/g,"''") + "'",
         "$desired='off';if(Test-Path $desiredPath){try{$desired=[string](Get-Content -Raw $desiredPath|ConvertFrom-Json).desired}catch{}}",
         "$state='" + statePath + "'",
-        "$relay='';$profileIP='';$profileCountry='';if(Test-Path $state){try{$s=Get-Content -Raw $state|ConvertFrom-Json;$relay=([string]$s.serverIP)+':'+([string]$s.port);$profileIP=[string]$s.observedIP;if(-not $profileIP){$profileIP=[string]$s.serverIP};$profileCountry=[string]$s.country;if(-not $profileCountry){$profileCountry=[string]$s.configuredCountry}}catch{}}",
+        "$relay='';$profileIP='';$profileCountry='';$profileSha='';if(Test-Path $state){try{$s=Get-Content -Raw $state|ConvertFrom-Json;$relay=([string]$s.serverIP)+':'+([string]$s.port);$profileIP=[string]$s.observedIP;if(-not $profileIP){$profileIP=[string]$s.serverIP};$profileSha=[string]$s.sha256;$profileCountry=[string]$s.country;if(-not $profileCountry){$profileCountry=[string]$s.configuredCountry}}catch{}}",
         "$managedActive=($svc -and $svc.Status -eq 'Running')",
-        "$probeDegraded=$false;if(-not $loc -and $managedActive -and $routes.Count -ge 2 -and $routePairValid -and $ipv6Safe -and $poison -eq $false -and $profileCountry){$loc=$profileCountry;if(-not $ip){$ip=$profileIP};$probeDegraded=$true}",
-        "[ordered]@{connected=($routes.Count -ge 2 -and $routePairValid -and $ipv6Safe -and $managedActive -and $loc -and $loc -ne 'IR' -and $poison -eq $false);ip=$ip.Trim();country=$loc.Trim();dns=$dns;poison=$poison;fullRoutes=$(if($routePairValid){2}else{0});ipv6LeakRisk=[bool]($routePairValid -and -not $ipv6Safe);relay=$relay;autoRecovery=[bool]$task;autoRecoveryState=$(if(-not $task){'Missing'}elseif(-not [bool]$task.Settings.Enabled){'Disabled'}else{[string]$task.State});interface=$(if($routePairValid){[string]($routes|Select-Object -First 1 -ExpandProperty InterfaceAlias -ErrorAction SilentlyContinue)}else{''});engine=$(if($svc){'HeadlessConnector'}else{'Missing'});connectorService=$(if($svc){[string]$svc.Status}else{'Missing'});managedTunnelActive=[bool]$managedActive;healthProbeDegraded=[bool]$probeDegraded;desiredState=$desired;failureStreak=$(if($guard){[int]$guard.failureStreak}else{0});rotations24h=$(if($guard){@($guard.rotations).Count}else{0})}|ConvertTo-Json -Compress"
+        "$probeDegraded=$false;if(-not $loc -and $managedActive -and $routePairValid -and $ipv6Safe -and $poison -eq $false -and $profileSha -match '^[a-fA-F0-9]{64}$' -and $relay -and $relay -ne ':' -and $profileCountry){$loc=$profileCountry;if(-not $ip){$ip=$profileIP};$probeDegraded=$true}",
+        "[ordered]@{connected=($desired -eq 'on' -and $routes.Count -ge 2 -and $routePairValid -and $ipv6Safe -and $managedActive -and $profileSha -match '^[a-fA-F0-9]{64}$' -and $relay -and $relay -ne ':' -and $profileCountry -and $loc -eq $profileCountry -and $loc -ne 'IR' -and $poison -eq $false);ip=$ip.Trim();country=$loc.Trim();dns=$dns;poison=$poison;fullRoutes=$(if($routePairValid){2}else{0});ipv6LeakRisk=[bool]($routePairValid -and -not $ipv6Safe);relay=$relay;autoRecovery=[bool]$task;autoRecoveryState=$(if(-not $task){'Missing'}elseif(-not [bool]$task.Settings.Enabled){'Disabled'}else{[string]$task.State});interface=$(if($routePairValid){[string]($routes|Select-Object -First 1 -ExpandProperty InterfaceAlias -ErrorAction SilentlyContinue)}else{''});engine=$(if($svc){'HeadlessConnector'}else{'Missing'});connectorService=$(if($svc){[string]$svc.Status}else{'Missing'});managedTunnelActive=[bool]$managedActive;healthProbeDegraded=[bool]$probeDegraded;desiredState=$desired;failureStreak=$(if($guard){[int]$guard.failureStreak}else{0});rotations24h=$(if($guard){@($guard.rotations).Count}else{0})}|ConvertTo-Json -Compress"
       ].join(';');
       const r = await run(pwsh, ['-NoProfile','-Command',script], { timeout: 12000 });
       return JSON.parse(r.stdout || '{}');

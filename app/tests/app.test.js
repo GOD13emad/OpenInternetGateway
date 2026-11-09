@@ -78,7 +78,8 @@ test('Windows backend is fully headless, self-healing, and independent from Open
   assert.match(factory,/successes\.json/i);
   assert.match(factory,/quarantine\.json/i);
   assert.match(auto,/OpenInternetGateway-AutoRecovery/i);
-  assert.doesNotMatch(production,/OpenVPNConnect(?:\.exe)?/i);
+  assert.match(headless,/Get-Process -Name 'OpenVPNConnect'/);
+  assert.doesNotMatch(production,/Start-Process[^\r\n]*OpenVPNConnect|OpenVPNConnect\.exe/i);
   assert.doesNotMatch(production,/--connect-shortcut/i);
   assert.ok(fs.existsSync(path.join(base,'Headless-Control.ps1')));
   assert.ok(fs.existsSync(path.join(base,'Bootstrap-HeadlessConnector.ps1')));
@@ -228,8 +229,12 @@ test('Windows status tolerates a transient geo probe failure only for a real man
   assert.match(winBlock,/\$managedActive=\(\$svc -and \$svc\.Status -eq 'Running'\)/);
   assert.match(winBlock,/\$probeDegraded=\$false/);
   assert.match(winBlock,/healthProbeDegraded=\[bool\]\$probeDegraded/);
-  assert.match(winStatus,/Connected=\(\$routes\.Count -ge 2 -and \$routePairValid -and \$ipv6Safe -and \$managedActive/);
-  assert.match(winBlock,/connected=\(\$routes\.Count -ge 2 -and \$routePairValid -and \$ipv6Safe -and \$managedActive/);
+  assert.match(winStatus,/Connected=\(\$desired -eq 'on' -and \$routes\.Count -ge 2 -and \$routePairValid -and \$ipv6Safe -and \$managedActive/);
+  assert.match(winStatus,/if\(-not \$loc -and \$managedActive[\s\S]*\$profileSha -match/);
+  assert.doesNotMatch(winStatus,/Connected=[^\r\n]*-not \$probeDegraded/);
+  assert.match(winBlock,/connected=\(\$desired -eq 'on' -and \$routes\.Count -ge 2 -and \$routePairValid -and \$ipv6Safe -and \$managedActive/);
+  assert.match(winBlock,/if\(-not \$loc -and \$managedActive[\s\S]*\$profileSha -match/);
+  assert.doesNotMatch(winBlock,/connected=[^\r\n]*-not \$probeDegraded/);
 });
 
 test('Linux failed exact relay does not turn desired gateway intent off',()=>{
@@ -1186,7 +1191,9 @@ test('Windows first-connect OpenVPN prerequisite is pinned, verified and install
   assert.match(ensure,/WINDOWS_OPENVPN_CONNECT\.sha256/);
   assert.match(ensure,/Start-Process -FilePath 'msiexec\.exe' -Verb RunAs -Wait -PassThru/);
   assert.match(ensure,/\$msi='" \+ escapedMsi \+ "'/);
-  assert.match(ensure,/\$msiArgs='\/i \\"' \+ \$msi \+ '\\" \/passive \/norestart'/);
+  assert.match(ensure,/\$msiArgs='\/i /);
+  assert.match(ensure,/\/quiet \/norestart/);
+  assert.doesNotMatch(ensure,/AUTOSTART=/i);
   assert.match(ensure,/ArgumentList \$msiArgs/);
   assert.match(ensure,/run\(pwsh, \['-NoProfile','-Command',elevate\]/);
   assert.match(ensure,/administrator approval was cancelled/);

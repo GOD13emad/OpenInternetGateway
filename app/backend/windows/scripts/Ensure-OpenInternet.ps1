@@ -2,7 +2,24 @@
 param()
 $ErrorActionPreference='Stop'
 $Root=Split-Path -Parent $PSScriptRoot
+. (Join-Path $PSScriptRoot 'Route-Pair.ps1')
 $evidence=Join-Path $Root 'evidence\ensure-last-error.json'
+function Test-OigOpenVpnGuiRunning {
+ try{return (@(Get-Process -Name 'OpenVPNConnect' -ErrorAction Stop).Count -gt 0)}
+ catch{if($_.FullyQualifiedErrorId -like 'NoProcessFoundForGivenName*'){return $false};throw 'Cannot confirm whether OpenVPN Connect GUI is running; refusing connector bootstrap.'}
+}
+function Assert-OigOpenVpnGuiClosed {
+ if(Test-OigOpenVpnGuiRunning){
+   $desiredFile=Join-Path $Root 'state\desired-state.json'
+   $intent='off'
+   if(Test-Path -LiteralPath $desiredFile){try{$intent=[string](Get-Content -LiteralPath $desiredFile -Raw|ConvertFrom-Json).desired}catch{}}
+   if($intent -eq 'on'){
+     [ordered]@{desired='off';at=(Get-Date).ToString('o')}|ConvertTo-Json|Set-Content -Encoding UTF8 $desiredFile
+     Remove-Item -LiteralPath (Join-Path $Root 'state\exact-profile.request') -Force -ErrorAction SilentlyContinue
+   }
+   throw 'OpenVPN Connect GUI is already running; headless connector bootstrap was refused. Close the independent app and click Connect again.'
+ }
+}
 function Test-Admin {
  $id=[Security.Principal.WindowsIdentity]::GetCurrent()
  $p=New-Object Security.Principal.WindowsPrincipal($id)
@@ -27,17 +44,36 @@ if(-not(Test-Admin)){
  $until=(Get-Date).AddSeconds(150)
  do{
    Start-Sleep -Seconds 1
-   $desired='on'
+   $desired='off'
    $desiredFile=Join-Path $Root 'state\desired-state.json'
    if(Test-Path $desiredFile){try{$desired=[string](Get-Content -Raw $desiredFile|ConvertFrom-Json).desired}catch{}}
    $routes=@(Get-NetRoute -AddressFamily IPv4 -ErrorAction SilentlyContinue|Where-Object{$_.DestinationPrefix -in @('0.0.0.0/1','128.0.0.0/1')})
+   $routePairValid=Test-OigFullRoutePair -Routes $routes
+   $ipv6Safe=if($routePairValid){Test-OigIpv6EgressSafe -InterfaceIndex ([int]$routes[0].InterfaceIndex)}else{$false}
    $svc=Get-Service OVPNConnectorService -ErrorAction SilentlyContinue
    $task=Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
-   if($desired -eq 'on' -and $svc -and $svc.Status -eq 'Running' -and $routes.Count -ge 2){
+   $statePath=Join-Path $Root 'state\current-openvpn-profile.json'
+   $activeSha='';$activeRelay='';$profileCountry=''
+   if(Test-Path -LiteralPath $statePath){
+     try{
+       $profile=Get-Content -LiteralPath $statePath -Raw|ConvertFrom-Json
+       $activeSha=([string]$profile.sha256).Trim().ToLowerInvariant()
+       $activeRelay=([string]$profile.serverIP)+':'+([string]$profile.port)
+       $profileCountry=[string]$profile.country
+       if(-not $profileCountry){$profileCountry=[string]$profile.configuredCountry}
+     }catch{}
+   }
+   $trace=@(curl.exe -4 --max-time 4 -s https://www.cloudflare.com/cdn-cgi/trace)
+   $observed=[string]((($trace|Where-Object{$_ -like 'loc=*'}|Select-Object -First 1)-replace '^loc=',''))
+   $dns=@(Resolve-DnsName dns.google -Type A -DnsOnly -ErrorAction SilentlyContinue|Where-Object IPAddress|Select-Object -ExpandProperty IPAddress)
+   $poison=if($dns.Count -eq 0){$null}else{@($dns|Where-Object{$_ -notin @('8.8.8.8','8.8.4.4')}).Count -gt 0}
+   if($desired -eq 'on' -and $svc -and $svc.Status -eq 'Running' -and $routePairValid -and $ipv6Safe -and
+      $activeSha -match '^[a-fA-F0-9]{64}$' -and $activeRelay -and $activeRelay -ne ':' -and
+      $profileCountry -and $observed.Trim() -eq $profileCountry -and $poison -eq $false){
      Write-Host 'ELEVATED ENSURE PASS'
      exit 0
    }
-   if($desired -ne 'on' -and $routes.Count -eq 0 -and $task -and [string]$task.State -ne 'Running'){
+   if($desired -ne 'on' -and $routes.Count -eq 0 -and (-not $svc -or $svc.Status -eq 'Stopped') -and $task -and [string]$task.State -ne 'Running'){
      Write-Host 'ELEVATED ENSURE PASS - DESIRED OFF'
      exit 0
    }
@@ -72,7 +108,10 @@ try{
    if([string]::IsNullOrWhiteSpace($sha)){Remove-Item $exactRequest -Force -ErrorAction SilentlyContinue;throw 'Exact profile request is invalid.'}
    $svc=Get-Service OVPNConnectorService -ErrorAction SilentlyContinue
    $ready=Test-Path (Join-Path $Root 'state\headless-bootstrap.ready')
-   if(-not $svc -or -not $ready){& (Join-Path $PSScriptRoot 'Bootstrap-HeadlessConnector.ps1')}
+   if(-not $svc -or -not $ready){
+     Assert-OigOpenVpnGuiClosed
+     & (Join-Path $PSScriptRoot 'Bootstrap-HeadlessConnector.ps1')
+   }
    Remove-Item $exactRequest -Force -ErrorAction SilentlyContinue
    & (Join-Path $PSScriptRoot 'Headless-Control.ps1') -Action Connect -ProfileSha $sha
    exit 0
@@ -80,8 +119,10 @@ try{
  $svc=Get-Service OVPNConnectorService -ErrorAction SilentlyContinue
  $ready=Test-Path (Join-Path $Root 'state\headless-bootstrap.ready')
  if(-not $svc -or -not $ready){
+   Assert-OigOpenVpnGuiClosed
    & (Join-Path $PSScriptRoot 'Bootstrap-HeadlessConnector.ps1')
-   exit 0
+   # Continue into Ensure immediately; the periodic recovery interval is too
+   # long for the foreground first-Connect operation.
  }
  & (Join-Path $PSScriptRoot 'Headless-Control.ps1') -Action Ensure
 }catch{
