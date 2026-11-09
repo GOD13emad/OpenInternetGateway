@@ -6,6 +6,7 @@ anonymous memfd and never appears in argv, env, logs, Git or on-disk files.
 The independent systemd timer is confirmed BEFORE any connection activation.
 """
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -74,11 +75,10 @@ def config_is_scoped(uuid, username):
     ]
 
 
-def import_qa(profile, ca_sha, peer_cn, folder):
+def import_qa(profile, ca_sha, peer_cn, folder, name):
     checked_profile, _, _ = operator_profile.load_and_check(profile, ca_sha, peer_cn)
     baseline = inventory()
-    fresh_uuid = None
-    ovpn = folder / "provider.ovpn"
+    ovpn = folder / (name + ".ovpn")
     ovpn.write_bytes(checked_profile)
     ovpn.chmod(0o600)
     result = None
@@ -94,15 +94,38 @@ def import_qa(profile, ca_sha, peer_cn, folder):
     returned_ids = set(x.lower() for x in re.findall(
         r"\b[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}\b",
         result.stdout.decode(errors="replace"))) if result else set()
+    fresh_uuid = None
     if len(added) == 1 and (not returned_ids or returned_ids == added):
         fresh_uuid = next(iter(added))
     elif len(returned_ids) == 1 and returned_ids <= added:
         fresh_uuid = next(iter(returned_ids))
     if fresh_uuid is None:
+        # This only removes our uniquely named cert copies if no NM profile
+        # references them; an ambiguous profile is never deleted.
+        try:
+            operator_profile.cleanup_nm_import_artifacts(name, checked_profile)
+        except operator_profile.UnsafeProfile as exc:
+            raise TrialError("Import identity ambiguous; certificate cleanup is not verified") from exc
         raise TrialError("Import identity ambiguous; no existing profile modified")
     initial_name = checked(["nmcli", "-g", "connection.id", "connection", "show",
                             "uuid", fresh_uuid])
     imported_name = initial_name.stdout.decode(errors="replace").strip() if initial_name.returncode == 0 else ""
+    if imported_name != name:
+        kind = checked(["nmcli", "-g", "connection.type", "connection", "show",
+                        "uuid", fresh_uuid])
+        active = checked(["nmcli", "-t", "-f", "UUID", "connection", "show", "--active"])
+        if (kind.returncode == 0 and kind.stdout.decode(errors="replace").strip() == "vpn"
+                and active.returncode == 0
+                and fresh_uuid not in active.stdout.decode(errors="replace").lower().splitlines()):
+            deleted = checked(["nmcli", "--wait", "5", "connection", "delete",
+                               "uuid", fresh_uuid])
+            if deleted.returncode == 0 and fresh_uuid not in inventory():
+                try:
+                    operator_profile.cleanup_nm_import_artifacts(name, checked_profile)
+                except operator_profile.UnsafeProfile as exc:
+                    raise TrialError("Imported profile identity changed; certificate cleanup is not verified") from exc
+                raise TrialError("NetworkManager changed the unique temporary profile identity; inactive import was removed")
+        raise TrialError("NetworkManager changed the temporary profile identity; refusing to activate or delete an unrelated connection")
     return fresh_uuid, result is not None and result.returncode == 0, imported_name
 
 
@@ -125,43 +148,65 @@ def ensure_no_active_managed_gateway():
                       "show", "--active"])
     if active.returncode:
         raise TrialError("Cannot verify active connections before a provider trial")
-    # A saved desired-state=off is not sufficient evidence that an older
-    # managed OpenVPN connection has actually gone down.
-    managed = {"OIG-VPN-LIVE", "OIG-VPN-PREFLIGHT", "OIG-JP-UDP-LIVE",
-               "OIG-Console-Gateway"}
+    managed = ("OIG-VPN-LIVE", "OIG-VPN-PREFLIGHT",
+               "OIG-JP-UDP-LIVE", "OIG-Console-Gateway")
     for line in active.stdout.decode(errors="replace").splitlines():
-        # NM escapes colons in connection names; matching the entire
-        # predictable project-owned prefix avoids third-party interfaces.
-        if line.startswith(("OIG-VPN-LIVE:", "OIG-VPN-PREFLIGHT:",
-                            "OIG-JP-UDP-LIVE:", "OIG-Console-Gateway:")):
+        name, separator, connection_type = line.rpartition(":")
+        if not separator or not name or not connection_type:
+            raise TrialError("Cannot safely parse active connection inventory")
+        if name.startswith(managed):
             raise TrialError("A regular OpenInternetGateway connection is still active")
+        if connection_type.lower() in {"vpn", "tun", "wireguard"}:
+            raise TrialError(
+                "An independent VPN or tunnel is active; use a clean physical network for this trial. "
+                "No existing connection was changed")
 
 
 def trial(profile, ca_sha, peer_cn, seconds, hold):
     if not 30 <= seconds <= 180 or not 0 <= hold <= 15:
         raise TrialError("Unsupported bounded QA timer or hold interval")
-    # The only invocation that can activate a VPN requires fresh stdin
-    # credentials and a profile with independently trusted CA/name constraints.
-    username, password = read_login()
+    # Check the live network before reading any provider secret from stdin.
     ensure_no_active_managed_gateway()
-    # Validate before even registering the temporary NetworkManager profile.
-    operator_profile.load_and_check(profile, ca_sha, peer_cn)
+    username, password = read_login()
+    checked_profile, remote, protocol = operator_profile.load_and_check(profile, ca_sha, peer_cn)
+    identity_blocks = operator_profile._inline_identity_blocks(checked_profile)
+    artifact_hashes = {
+        name: hashlib.sha256(identity_blocks[name]).hexdigest()
+        for name in ("ca", "cert", "key")
+    }
+    certificate_directory = str(operator_profile._nm_certificate_directory())
     before = inventory()
     uuid = None
-    name = None
+    name = "OIG-Operator-QA-" + secrets.token_hex(6)
     imported_name = None
     armed = False
     removed = False
+    artifacts_removed = False
+    trust_verified = False
     outcome = "unverified"
     # Keep imported inline PEM source available until nmcli has fully exited.
     with tempfile.TemporaryDirectory(prefix="oig-trial-import-") as temp:
         folder = Path(temp)
         os.chmod(folder, 0o700)
         try:
-            uuid, imported, imported_name = import_qa(profile, ca_sha, peer_cn, folder)
+            uuid, imported, imported_name = import_qa(
+                profile, ca_sha, peer_cn, folder, name)
+            if imported_name != name:
+                raise TrialError("NetworkManager importer did not preserve the unique QA profile identity")
+            # Arm the independent timer immediately after import, before trust
+            # inspection, profile modification or any connection activation.
+            timer = operator_rollback.arm(
+                uuid, name, seconds, name, certificate_directory, artifact_hashes)
+            armed = timer["timerArmed"]
+            if not armed:
+                raise TrialError("Independent QA cleanup timer is not active")
             if not imported:
-                raise TrialError("NetworkManager importer failed after temporary profile creation")
-            name = "OIG-Operator-QA-" + secrets.token_hex(6)
+                raise TrialError("NetworkManager importer returned failure after the temporary profile was reconciled")
+            trust = operator_profile.verify_nm_import(
+                uuid, name, checked_profile, remote, protocol, ca_sha, peer_cn)
+            trust_verified = trust.get("trustConstraintsPreserved") is True
+            if not trust_verified:
+                raise TrialError("NetworkManager did not preserve the pinned server identity constraints")
             changed = checked(["nmcli", "--wait", "5", "connection", "modify",
                                "--temporary", "uuid", uuid,
                                "connection.id", name,
@@ -175,10 +220,11 @@ def trial(profile, ca_sha, peer_cn, seconds, hold):
                                "ipv6.ignore-auto-routes", "yes"])
             if changed.returncode or not config_is_scoped(uuid, username):
                 raise TrialError("Cannot verify scope of temporary QA connection")
-            timer = operator_rollback.arm(uuid, name, seconds)
-            armed = timer["timerArmed"]
-            if not armed:
-                raise TrialError("Independent QA cleanup timer is not active")
+            scoped_trust = operator_profile.verify_nm_import(
+                uuid, name, checked_profile, remote, protocol, ca_sha, peer_cn)
+            trust_verified = scoped_trust.get("trustConstraintsPreserved") is True
+            if not trust_verified:
+                raise TrialError("Temporary QA modification did not preserve server identity constraints")
             fd = make_password_fd(password)
             password = ""  # best-effort reference drop (Python strings are immutable)
             try:
@@ -191,7 +237,16 @@ def trial(profile, ca_sha, peer_cn, seconds, hold):
                                   "connection", "show", "--active"])
                 if active.returncode or uuid not in active.stdout.decode(errors="replace").lower().splitlines():
                     raise TrialError("Temporary QA connection is not confirmed active")
-                outcome = "transport-active-unverified"
+                active_trust = operator_profile.verify_nm_import(
+                    uuid, name, checked_profile, remote, protocol, ca_sha, peer_cn)
+                trust_verified = active_trust.get("trustConstraintsPreserved") is True
+                if not trust_verified:
+                    raise TrialError("Active QA connection no longer matches the pinned server identity")
+                # NM activation can succeed only after OpenVPN has accepted the
+                # server chain, server EKU/role, exact X509 name and user auth.
+                # The imported trust settings and private cert copies were checked
+                # immediately before activation.
+                outcome = "tls-authenticated-transport-active"
                 if hold:
                     time.sleep(hold)
             finally:
@@ -202,37 +257,39 @@ def trial(profile, ca_sha, peer_cn, seconds, hold):
                     current = checked(["nmcli", "-g", "connection.id",
                                        "connection", "show", "uuid", uuid])
                     current_name = current.stdout.decode(errors="replace").strip() if current.returncode == 0 else None
-                    if name and current_name == name:
-                        removed = operator_rollback.cleanup(uuid, name)["profileRemoved"]
-                    elif current_name == imported_name and uuid not in before:
-                        # Still at the importer's original name: never invoke
-                        # 'connection down' on this never-activated profile.
-                        kind = checked(["nmcli", "-g", "connection.type",
-                                        "connection", "show", "uuid", uuid])
-                        active = checked(["nmcli", "-t", "-f", "UUID",
-                                          "connection", "show", "--active"])
-                        if kind.returncode or kind.stdout.decode().strip() != "vpn" or (
-                            active.returncode or uuid in active.stdout.decode().lower().splitlines()
-                        ):
-                            raise TrialError("Unlabelled temporary VPN identity not safely removable")
-                        gone = checked(["nmcli", "--wait", "5", "connection", "delete", "uuid", uuid])
-                        removed = gone.returncode == 0 and uuid not in inventory()
+                    if current_name == name:
+                        cleaned = operator_rollback.cleanup(
+                            uuid, name, name, certificate_directory, artifact_hashes)
+                        removed = cleaned.get("profileRemoved") is True
+                        artifacts_removed = cleaned.get("certificateArtifactsRemoved") is True
                     elif current_name is None and uuid not in inventory():
-                        removed = True
+                        artifacts_removed = operator_rollback.cleanup_import_artifacts(
+                            name, certificate_directory, artifact_hashes)
+                        removed = artifacts_removed
                     else:
                         raise TrialError("Temporary VPN identity changed unexpectedly")
-                    if not removed:
-                        raise TrialError("Temporary import cleanup could not be verified")
-                    if name and armed:
+                    if not removed or not artifacts_removed:
+                        raise TrialError("Temporary profile or certificate cleanup could not be verified")
+                    if armed:
                         checked(["systemctl", "--user", "stop",
                                  "oig-operator-qa-" + name[-12:] + ".timer"])
                 except (operator_rollback.RollbackError, TrialError) as exc:
                     raise TrialError("Cleanup unverified; independent timer retained if armed") from exc
-    if not removed or uuid in inventory() or uuid in before:
-        raise TrialError("QA connection remains or inventory was not isolated")
+            else:
+                try:
+                    artifacts_removed = operator_rollback.cleanup_import_artifacts(
+                        name, certificate_directory, artifact_hashes)
+                except operator_rollback.RollbackError as exc:
+                    raise TrialError("Temporary certificate cleanup is not verified") from exc
+    if (not removed or not artifacts_removed or uuid in inventory() or uuid in before
+            or not trust_verified):
+        raise TrialError("QA connection, trust verification or cleanup was not confirmed")
     return {"ok": True, "trialTransport": outcome, "tempProfileRemoved": True,
+            "certificateArtifactsRemoved": True,
             "independentTimerArmedBeforeActivation": armed,
-            "liveTlsVerified": False, "identityVerifiedByApp": False,
+            "trustConstraintsPreserved": True,
+            "peerCN": peer_cn, "caDerSha256": ca_sha.lower(),
+            "liveTlsVerified": True, "identityVerifiedByApp": True,
             "fullDeviceTunnelVerified": False, "readyForAutomaticConnection": False}
 
 

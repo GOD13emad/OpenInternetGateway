@@ -31,7 +31,7 @@ test('opt-in QA trial passes provider password only in memfd, arms timer before 
       const log = path.join(root,'events.log');
       const shim = [
         '#!/usr/bin/env python3',
-        'import os,sys,json,pathlib',
+        'import os,sys,json,pathlib,re',
         'a=sys.argv[1:]; tool=pathlib.Path(sys.argv[0]).name',
         'p=pathlib.Path(os.environ["OIG_SECRET_STUB_STATE"])',
         's=json.loads(p.read_text())',
@@ -42,12 +42,16 @@ test('opt-in QA trial passes provider password only in memfd, arms timer before 
         '    p.write_text(json.dumps(s));sys.exit(code)',
         'if tool=="systemd-run":',
         '    if os.environ.get("OIG_SECRET_STUB_FAIL_ARM")=="1":done(7)',
+        '    s["timerEnv"]=[x for x in a if x.startswith("--setenv=") ]',
+        '    s["rollbackHelper"]=a[11];s["rollbackArgs"]=a[12:]',
         '    s["armed"]=True;done()',
         'if tool=="systemctl":',
         '    if "is-active" in a and s.get("armed"):print("active")',
         '    done(0 if s.get("armed") else 5)',
         'if a==["-t","-f","NAME,TYPE","connection","show","--active"]:',
         '    if os.environ.get("OIG_SECRET_STUB_ACTIVE_OIG")=="1":print("OIG-VPN-LIVE:vpn")',
+        '    if os.environ.get("OIG_SECRET_STUB_ACTIVE_EXTERNAL_VPN")=="1":print("IPbaz:vpn")',
+        '    if os.environ.get("OIG_SECRET_STUB_ACTIVE_EXTERNAL_TUN")=="1":print("tailscale0:tun")',
         '    done()',
         'if a[:5]==["--wait","5","-t","-f","UUID"] and a[5:]==["connection","show"]:',
         '    print(u if s.get("exists") else "aaaaaaaa-1234-4234-8234-123456789abc");done()',
@@ -56,8 +60,14 @@ test('opt-in QA trial passes provider password only in memfd, arms timer before 
         '    done()',
         'if a[:4]==["--wait","5","connection","import"]:',
         '    assert a[4:8]==["--temporary","type","openvpn","file"]',
-        '    assert pathlib.Path(a[8]).exists()',
-        '    s["exists"]=True;s["name"]="synthetic-import"',
+        '    source=pathlib.Path(a[8]);assert source.exists();stem=source.stem;content=source.read_text()',
+        '    certdir=pathlib.Path(os.environ["XDG_DATA_HOME"])/"networkmanagement/certificates/nm-openvpn";certdir.mkdir(parents=True,exist_ok=True)',
+        '    files={}',
+        '    for name in ("ca","cert","key"):',
+        '        match=re.search(r"<"+name+r">\\s*(.*?)\\s*</"+name+r">",content,re.S);assert match,name',
+        '        target=certdir/(stem+"-"+name+".pem");target.write_text(match.group(1).strip()+"\\n");target.chmod(0o600);files[name]=str(target)',
+        '    s["exists"]=True;s["name"]=stem;s["certs"]=files',
+        '    s["vpnData"]="auth=SHA256, ca="+files["ca"]+", cert="+files["cert"]+", key="+files["key"]+", proto-tcp=yes, remote=uk205.vpnbook.com:443, remote-cert-tls=server, verify-x509-name=name:server.vpnbook.com"',
         '    if os.environ.get("OIG_SECRET_STUB_FAIL_IMPORT_AFTER")=="1":done(12)',
         '    print("Connection imported ("+u+")");done()',
         'if a[:5]==["--wait","5","connection","modify","--temporary"]:',
@@ -78,8 +88,14 @@ test('opt-in QA trial passes provider password only in memfd, arms timer before 
         'if a[:2]==["-g","connection.id"]:',
         '    if s.get("exists"):print(s["name"]);done()',
         '    done(10)',
+        'if a[:4]==["--wait","5","-g","connection.type"]:',
+        '    print("vpn" if s.get("exists") else "ethernet");done()',
+        'if a[:4]==["--wait","5","-g","vpn.data"]:',
+        '    print(s.get("vpnData","") if s.get("exists") else "");done()',
         'if a[:2]==["-g","connection.type"]:',
         '    print("vpn");done()',
+        'if a[:2]==["-g","vpn.data"]:',
+        '    print(s.get("vpnData",""));done()',
         'if a[:3]==["--wait","5","-t"] and a[3:]==["-f","UUID","connection","show","--active"]:',
         '    if s.get("active"):print(u)',
         '    done()',
@@ -122,11 +138,19 @@ test('opt-in QA trial passes provider password only in memfd, arms timer before 
       const parsed = JSON.parse(good.stdout);
       assert.equal(parsed.tempProfileRemoved,true);
       assert.equal(parsed.independentTimerArmedBeforeActivation,true);
-      assert.equal(parsed.identityVerifiedByApp,false);
+      assert.equal(parsed.identityVerifiedByApp,true);
+      assert.equal(parsed.liveTlsVerified,true);
+      assert.equal(parsed.trustConstraintsPreserved,true);
+      assert.equal(parsed.certificateArtifactsRemoved,true);
+      assert.equal(parsed.peerCN,'server.vpnbook.com');
+      assert.equal(parsed.fullDeviceTunnelVerified,false);
       const current = JSON.parse(fs.readFileSync(state,'utf8'));
       assert.equal(current.exists,false);
       assert.equal(current.memfdPass,true);
+      const certdir = path.join(base.XDG_DATA_HOME,'networkmanagement','certificates','nm-openvpn');
+      assert.deepEqual(fs.readdirSync(certdir),[]);
       const events = fs.readFileSync(log,'utf8');
+      assert.ok(events.indexOf('systemd-run') < events.indexOf('connection modify'));
       assert.ok(events.indexOf('systemd-run') < events.indexOf('UP'));
       for (const secret of ['fake-test-only-pass','vpn.secrets.password:']) {
         assert.doesNotMatch(good.stdout+good.stderr+events,new RegExp(secret));
@@ -142,6 +166,14 @@ test('opt-in QA trial passes provider password only in memfd, arms timer before 
       const concurrent = run({OIG_SECRET_STUB_ACTIVE_OIG:'1'});
       assert.equal(concurrent.status,2);
       assert.match(concurrent.stderr,/still active/);
+      assert.doesNotMatch(fs.readFileSync(log,'utf8'),/connection import|UP/);
+      const externalVpn = run({OIG_SECRET_STUB_ACTIVE_EXTERNAL_VPN:'1'});
+      assert.equal(externalVpn.status,2);
+      assert.match(externalVpn.stderr,/independent VPN or tunnel is active/);
+      assert.doesNotMatch(fs.readFileSync(log,'utf8'),/connection import|UP/);
+      const externalTun = run({OIG_SECRET_STUB_ACTIVE_EXTERNAL_TUN:'1'});
+      assert.equal(externalTun.status,2);
+      assert.match(externalTun.stderr,/independent VPN or tunnel is active/);
       assert.doesNotMatch(fs.readFileSync(log,'utf8'),/connection import|UP/);
       const failedImport = run({OIG_SECRET_STUB_FAIL_IMPORT_AFTER:'1'});
       assert.equal(failedImport.status,2);
@@ -179,11 +211,11 @@ test('opt-in QA trial passes provider password only in memfd, arms timer before 
       ],{encoding:'utf8',timeout:5000});
       assert.equal(staged.status,0,staged.stderr);
       const previousEnv = Object.fromEntries(
-        ['PATH','OIG_SECRET_STUB_STATE','OIG_SECRET_STUB_LOG'].map(k=>[k,process.env[k]])
+        ['PATH','OIG_SECRET_STUB_STATE','OIG_SECRET_STUB_LOG','XDG_DATA_HOME'].map(k=>[k,process.env[k]])
       );
       try {
         for (const [k,val] of Object.entries(base)) {
-          if (['PATH','OIG_SECRET_STUB_STATE','OIG_SECRET_STUB_LOG'].includes(k)) process.env[k]=val;
+          if (['PATH','OIG_SECRET_STUB_STATE','OIG_SECRET_STUB_LOG','XDG_DATA_HOME'].includes(k)) process.env[k]=val;
         }
         fs.writeFileSync(state,JSON.stringify({exists:false,active:false,armed:false}));
         fs.writeFileSync(log,'');
@@ -191,8 +223,12 @@ test('opt-in QA trial passes provider password only in memfd, arms timer before 
         assert.equal(result.ok,true);
         assert.equal(result.tempProfileRemoved,true);
         assert.equal(result.fullDeviceTunnelVerified,false);
-        assert.equal(result.identityVerifiedByApp,false);
+        assert.equal(result.identityVerifiedByApp,true);
+        assert.equal(result.liveTlsVerified,true);
+        assert.equal(result.trustConstraintsPreserved,true);
+        assert.equal(result.certificateArtifactsRemoved,true);
         assert.equal(JSON.parse(fs.readFileSync(state,'utf8')).exists,false);
+        assert.deepEqual(fs.readdirSync(certdir),[]);
         assert.doesNotMatch(JSON.stringify(result),/fake-test-only-pass/);
         fs.writeFileSync(path.join(root,'state','desired-state'),'on\n');
         await assert.rejects(backend.operatorConnectionTrial('vpnbook','fake-test-only-pass'),
@@ -243,6 +279,86 @@ test('opt-in QA trial passes provider password only in memfd, arms timer before 
         await assert.rejects(backend.operatorConnectionTrial('vpnbook','fake-test-only-pass'),
           /only on Linux/);
         backend.platform='linux';
+
+        // Simulate the app process disappearing after the independent timer
+        // was armed. Execute the durable copied helper exactly as systemd-run
+        // would, and verify it removes the active UUID and its three PEM copies.
+        const rollbackScript = path.join(__dirname,'../backend/linux/operator_rollback.py');
+        const timerName = 'OIG-Operator-QA-a1b2c3d4e5f6';
+        const timerCertDir = path.join(base.XDG_DATA_HOME,'networkmanagement','certificates','nm-openvpn');
+        fs.mkdirSync(timerCertDir,{recursive:true,mode:0o700});
+        const pem = { ca, cert: ca, key: fs.readFileSync(key,'utf8').trim() };
+        const files = {};
+        for (const name of ['ca','cert','key']) {
+          const target = path.join(timerCertDir,timerName+'-'+name+'.pem');
+          fs.writeFileSync(target,pem[name],{mode:0o600});
+          fs.chmodSync(target,0o600);
+          files[name]=target;
+        }
+        fs.writeFileSync(state,JSON.stringify({
+          exists:true,active:false,armed:false,name:timerName,
+          vpnData:'ca='+files.ca+', cert='+files.cert+', key='+files.key+
+            ', remote=uk205.vpnbook.com:443, remote-cert-tls=server, verify-x509-name=name:server.vpnbook.com'
+        }));
+        const artifactHashes = Object.fromEntries(
+          Object.entries(pem).map(([name,value])=>[
+            name,crypto.createHash('sha256').update(value).digest('hex')
+          ])
+        );
+        const armed = spawnSync('python3',[
+          '-B',rollbackScript,'arm','--uuid',uuid,'--name',timerName,
+          '--artifact-stem',timerName,'--certificate-directory',timerCertDir,
+          '--ca-sha256',artifactHashes.ca,'--cert-sha256',artifactHashes.cert,
+          '--key-sha256',artifactHashes.key,'--seconds','45'
+        ],{env:base,encoding:'utf8',timeout:5000});
+        assert.equal(armed.status,0,armed.stderr);
+        const armedState=JSON.parse(fs.readFileSync(state,'utf8'));
+        assert.equal(armedState.armed,true);
+        assert.ok(fs.existsSync(armedState.rollbackHelper));
+        assert.equal(fs.statSync(armedState.rollbackHelper).mode & 0o777,0o600);
+        assert.equal(armedState.rollbackArgs[0],'cleanup');
+        const afterActivation = JSON.parse(fs.readFileSync(state,'utf8'));
+        afterActivation.active = true;
+        fs.writeFileSync(state,JSON.stringify(afterActivation));
+        assert.equal(armedState.timerEnv.length,1);
+        assert.match(armedState.timerEnv[0],/^--setenv=XDG_DATA_HOME=/);
+        const timerEnv={...base};
+        delete timerEnv.XDG_DATA_HOME;
+        timerEnv.XDG_DATA_HOME=armedState.timerEnv[0].slice('--setenv=XDG_DATA_HOME='.length);
+        const timerRun=spawnSync('python3',[
+          '-B',armedState.rollbackHelper,...armedState.rollbackArgs
+        ],{env:timerEnv,encoding:'utf8',timeout:8000});
+        assert.equal(timerRun.status,0,timerRun.stderr);
+        const timerResult=JSON.parse(timerRun.stdout);
+        assert.equal(timerResult.profileRemoved,true);
+        assert.equal(timerResult.certificateArtifactsRemoved,true);
+        const timerFinal=JSON.parse(fs.readFileSync(state,'utf8'));
+        assert.equal(timerFinal.exists,false);
+        assert.equal(timerFinal.active,false);
+        assert.deepEqual(fs.readdirSync(certdir),[]);
+
+        // A file with the expected name but different content is not ours to
+        // delete, even when the timer runs after the profile has disappeared.
+        const tampered = path.join(timerCertDir,timerName+'-ca.pem');
+        fs.writeFileSync(tampered,'-----BEGIN CERTIFICATE-----\\nnot-the-pinned-ca\\n',{mode:0o600});
+        const refused = spawnSync('python3',[
+          '-B',armedState.rollbackHelper,...armedState.rollbackArgs
+        ],{env:timerEnv,encoding:'utf8',timeout:8000});
+        assert.equal(refused.status,2);
+        assert.match(refused.stderr,/SHA-256 pin/);
+        assert.equal(fs.existsSync(tampered),true);
+        fs.unlinkSync(tampered);
+
+        const wrongDir = path.join(root,'other','networkmanagement','certificates','nm-openvpn');
+        const wrongArgs = [...armedState.rollbackArgs];
+        const certificateDirIndex = wrongArgs.indexOf('--certificate-directory');
+        assert.ok(certificateDirIndex >= 0);
+        wrongArgs[certificateDirIndex+1] = wrongDir;
+        const wrongPath = spawnSync('python3',[
+          '-B',armedState.rollbackHelper,...wrongArgs
+        ],{env:timerEnv,encoding:'utf8',timeout:8000});
+        assert.equal(wrongPath.status,2);
+        assert.match(wrongPath.stderr,/configured XDG NetworkManager path/);
       } finally {
         for (const [key,val] of Object.entries(previousEnv)) {
           if (val===undefined) delete process.env[key];

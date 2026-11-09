@@ -39,6 +39,9 @@ test('operator QA rollback is name/UUID scoped, independent and never activates 
       '    elif args==["-g","connection.id","connection","show","uuid",uuid]:',
       '        if s.get("exists"):print(s.get("name"))',
       '        else:sys.exit(10)',
+      '    elif args==["-g","connection.type","connection","show","uuid",uuid]:',
+      '        if s.get("exists"):print("vpn")',
+      '        else:sys.exit(10)',
       '    elif args==["-t","-f","UUID","connection","show","--active"]:',
       '        if s.get("exists") and s.get("active"):print(uuid)',
       '    elif args==["connection","down","uuid",uuid]:',
@@ -63,9 +66,21 @@ test('operator QA rollback is name/UUID scoped, independent and never activates 
         XDG_DATA_HOME: path.join(root, 'xdg-data')
       };
       function invoke(action, extra = [], id = uuid, label = name) {
+        const certificateDirectory = path.join(env.XDG_DATA_HOME,
+          'networkmanagement','certificates','nm-openvpn');
+        const hashes = ['--ca-sha256','a'.repeat(64),'--cert-sha256','b'.repeat(64),
+          '--key-sha256','c'.repeat(64)];
         return spawnSync('python3', [script, action, '--uuid', id,
-          '--name', label, ...extra], {encoding: 'utf8', timeout: 6000, env});
+          '--name', label, '--artifact-stem', label,
+          '--certificate-directory', certificateDirectory, ...hashes, ...extra],
+          {encoding: 'utf8', timeout: 6000, env});
       }
+      state({exists:true,active:true,name,scheduled:false});
+      const activeArm = invoke('arm', ['--seconds','30']);
+      assert.equal(activeArm.status,2);
+      assert.equal(JSON.parse(fs.readFileSync(statePath,'utf8')).active,true);
+      assert.equal(JSON.parse(fs.readFileSync(statePath,'utf8')).scheduled,false,
+        'An already-active connection must never receive a trial rollback timer');
       state({exists:true,active:false,name,scheduled:false});
       const armed = invoke('arm', ['--seconds','30']);
       assert.equal(armed.status, 0, armed.stderr);

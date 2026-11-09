@@ -191,7 +191,7 @@ test('offline operator-pinned VPNBook profile staging is private, repeatable and
       const fakeLog = path.join(root, 'stub-commands');
       fs.mkdirSync(fakeDir);
       fs.writeFileSync(path.join(fakeDir, 'nmcli'), `#!/usr/bin/env python3
-import os,sys,pathlib
+import os,sys,pathlib,re,json
 args=sys.argv[1:]
 state=pathlib.Path(os.environ["OIG_NATIVE_STUB_STATE"])
 with open(os.environ["OIG_NATIVE_STUB_LOG"],"a") as log:
@@ -199,19 +199,43 @@ with open(os.environ["OIG_NATIVE_STUB_LOG"],"a") as log:
 assert args[:2]==["--wait","5"],args
 a=args[2:]
 u="a1234567-1234-4234-8234-123456789abc"
+dummy="bbbbbbbb-1234-4234-8234-123456789abc"
+def read_state():
+    return json.loads(state.read_text()) if state.exists() else {}
 if a==["-t","-f","UUID","connection","show"]:
-    print(u if state.exists() else "bbbbbbbb-1234-4234-8234-123456789abc")
+    print(u if read_state().get("exists") else dummy)
 elif a[:3]==["connection","import","--temporary"] and a[3:6]==["type","openvpn","file"]:
-    assert pathlib.Path(a[6]).is_file()
-    state.write_text(u)
+    source=pathlib.Path(a[6]); assert source.is_file()
+    stem=source.stem
+    content=source.read_text()
+    certdir=pathlib.Path(os.environ["XDG_DATA_HOME"])/"networkmanagement/certificates/nm-openvpn"
+    certdir.mkdir(parents=True,exist_ok=True)
+    files={}
+    for name in ("ca","cert","key"):
+        match=re.search(r"<"+name+r">\\s*(.*?)\\s*</"+name+r">",content,re.S)
+        assert match,name
+        target=certdir/(stem+"-"+name+".pem")
+        target.write_text(match.group(1).strip()+"\\n")
+        target.chmod(0o600)
+        files[name]=str(target)
+    vpn_data=("auth=SHA256, ca="+files["ca"]+", cert="+files["cert"]+
+              ", key="+files["key"]+", proto-tcp=yes, remote=uk205.vpnbook.com:443"+
+              ", remote-cert-tls=server, verify-x509-name=name:server.vpnbook.com")
+    state.write_text(json.dumps({"exists":True,"name":stem,"vpnData":vpn_data}))
     if os.environ.get("OIG_NATIVE_STUB_IMPORT_FAIL_AFTER")=="1":
         sys.exit(8)
     if os.environ.get("OIG_NATIVE_STUB_NO_UUID")=="1":
         print("Imported connection successfully.")
     else:
-        print("Connection 'validated' ("+u+") successfully added.")
+        print("Connection '"+stem+"' ("+u+") successfully added.")
+elif a==["-g","connection.id","connection","show","uuid",u]:
+    print(read_state().get("name",""))
 elif a==["-g","connection.type","connection","show","uuid",u]:
     print("vpn")
+elif a==["-g","connection.type","connection","show","uuid",dummy]:
+    print("ethernet")
+elif a==["-g","vpn.data","connection","show","uuid",u]:
+    print(read_state().get("vpnData",""))
 elif a==["connection","delete","uuid",u]:
     if os.environ.get("OIG_NATIVE_STUB_DELETE_FAIL")=="1":
         sys.exit(7)
@@ -221,6 +245,7 @@ else:
 `, { mode: 0o700 });
       const fakeEnv = { ...process.env, PATH: fakeDir + path.delimiter + process.env.PATH,
         OIG_NATIVE_STUB_STATE: fakeState, OIG_NATIVE_STUB_LOG: fakeLog,
+        XDG_DATA_HOME: path.join(root, 'xdg-data'),
         PYTHONDONTWRITEBYTECODE: '1' };
       const checkNative = (env) => spawnSync('python3', [
         script, 'native-check', '--profile', profile,
@@ -229,11 +254,15 @@ else:
       const native = checkNative(fakeEnv);
       assert.equal(native.status, 0, native.stderr);
       assert.equal(JSON.parse(native.stdout).nativeImportCompatible, true);
+      assert.equal(JSON.parse(native.stdout).trustConstraintsPreserved, true);
       assert.equal(JSON.parse(native.stdout).temporaryProfileRemoved, true);
+      assert.equal(JSON.parse(native.stdout).certificateArtifactsRemoved, true);
       assert.equal(JSON.parse(native.stdout).connectionActivated, false);
       assert.equal(fs.existsSync(fakeState), false);
+      assert.deepEqual(fs.readdirSync(path.join(fakeEnv.XDG_DATA_HOME,
+        'networkmanagement/certificates/nm-openvpn')), []);
       assert.doesNotMatch(fs.readFileSync(fakeLog, 'utf8'), /connection up|nmcli .*show-secrets/);
-      const envKeys = ['PATH', 'OIG_NATIVE_STUB_STATE', 'OIG_NATIVE_STUB_LOG'];
+      const envKeys = ['PATH', 'OIG_NATIVE_STUB_STATE', 'OIG_NATIVE_STUB_LOG', 'XDG_DATA_HOME'];
       const priorEnv = Object.fromEntries(envKeys.map(k => [k, process.env[k]]));
       try {
         for (const k of envKeys) process.env[k] = fakeEnv[k];
@@ -245,9 +274,13 @@ else:
         const nativeBridge = await pendingNative;
         assert.equal(backend.operatorProfileTaskBusy, false);
         assert.equal(nativeBridge.nativeImportCompatible, true);
+        assert.equal(nativeBridge.trustConstraintsPreserved, true);
         assert.equal(nativeBridge.temporaryProfileRemoved, true);
+        assert.equal(nativeBridge.certificateArtifactsRemoved, true);
         assert.equal(nativeBridge.readyForAutomaticConnection, false);
         assert.equal(fs.existsSync(fakeState), false);
+        assert.deepEqual(fs.readdirSync(path.join(fakeEnv.XDG_DATA_HOME,
+          'networkmanagement/certificates/nm-openvpn')), []);
       } finally {
         for (const k of envKeys) {
           if (priorEnv[k] === undefined) delete process.env[k];

@@ -638,12 +638,16 @@ async function runOperatorTransportTrial() {
     const result = await window.gateway.operatorTrial(user, password);
     password = '';
     if (!result?.ok || !result?.tempProfileRemoved ||
-        result?.identityVerifiedByApp !== false) {
-      throw new Error('Trial did not verify the temporary connection cleanup.');
+        !result?.certificateArtifactsRemoved ||
+        result?.trustConstraintsPreserved !== true ||
+        result?.liveTlsVerified !== true ||
+        result?.identityVerifiedByApp !== true ||
+        result?.fullDeviceTunnelVerified !== false) {
+      throw new Error('Trial did not verify TLS peer identity and complete temporary cleanup.');
     }
     setText('operatorTrialResult',
-      'Temporary VPN transport trial completed and removed. Server identity, full-device routing and throughput remain unverified.');
-    showToast('Temporary VPN trial was removed. This is not a validated full-device VPN connection.');
+      'TLS peer identity verified against the owner-pinned CA and exact server CN. Temporary transport trial and certificate cleanup completed. Full-device routing, DNS and throughput remain unverified.');
+    showToast('VPNBook TLS peer identity and scoped transport verified; full-device VPN remains unverified.');
   } catch (error) {
     password = '';
     setText('operatorTrialResult',

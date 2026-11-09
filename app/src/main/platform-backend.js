@@ -325,13 +325,16 @@ class Backend {
       ], { cwd: this.backendRoot, timeout: 20000 });
       const response = JSON.parse(result.stdout || '{}');
       if (response.ok !== true || response.nativeImportCompatible !== true ||
+          response.trustConstraintsPreserved !== true ||
           response.temporaryProfileRemoved !== true ||
+          response.certificateArtifactsRemoved !== true ||
           response.connectionActivated !== false ||
           response.readyForAutomaticConnection !== false) {
-        throw new Error('Temporary NetworkManager import did not finish with verified cleanup.');
+        throw new Error('Temporary NetworkManager import did not preserve peer trust or finish cleanup.');
       }
       return {
-        nativeImportCompatible: true, temporaryProfileRemoved: true,
+        nativeImportCompatible: true, trustConstraintsPreserved: true,
+        temporaryProfileRemoved: true, certificateArtifactsRemoved: true,
         connectionActivated: false, readyForAutomaticConnection: false,
         liveTlsVerified: false
       };
@@ -385,15 +388,23 @@ class Backend {
       });
       const data = JSON.parse(result.stdout || '{}');
       if (data.ok !== true || data.tempProfileRemoved !== true ||
+          data.certificateArtifactsRemoved !== true ||
           data.independentTimerArmedBeforeActivation !== true ||
-          data.readyForAutomaticConnection !== false ||
-          data.identityVerifiedByApp !== false) {
-        throw new Error('Trial cleanup or trust status was not confirmed.');
+          data.trustConstraintsPreserved !== true ||
+          data.identityVerifiedByApp !== true || data.liveTlsVerified !== true ||
+          data.peerCN !== meta.expectedPeerCN ||
+          data.caDerSha256 !== meta.caDerSha256 ||
+          data.trialTransport !== 'tls-authenticated-transport-active' ||
+          data.fullDeviceTunnelVerified !== false ||
+          data.readyForAutomaticConnection !== false) {
+        throw new Error('Trial TLS identity, scoped transport or complete cleanup was not confirmed.');
       }
       return {
         ok: true, provider: 'VPNBook', transportAttempted: true,
         trialTransport: data.trialTransport, tempProfileRemoved: true,
-        identityVerifiedByApp: false, liveTlsVerified: false,
+        certificateArtifactsRemoved: true, trustConstraintsPreserved: true,
+        peerCN: data.peerCN, caDerSha256: data.caDerSha256,
+        identityVerifiedByApp: true, liveTlsVerified: true,
         fullDeviceTunnelVerified: false, readyForAutomaticConnection: false
       };
     } finally {

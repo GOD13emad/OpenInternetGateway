@@ -267,7 +267,7 @@
             </div>
             <label class="measurement-note" style="display:block;margin-top:14px">
               <input type="checkbox" id="operatorTrialConsent">
-              I understand this starts a temporary VPN trial on Linux, keeps default Internet routing unchanged, and automatically removes the test connection.
+              I authorize one temporary Linux OpenVPN trial. It verifies the server certificate against the pinned CA and exact CN, ignores pushed routes/DNS and never installs a default route, then removes the temporary connection and copied certificate files. It is blocked while any other VPN/tunnel is active; existing connections are never disconnected. It does not validate full-device routing or throughput.
             </label>
             <div class="button-row">
               <button class="btn ghost" id="operatorTrialButton" disabled>Trial transport briefly (auto disconnect)</button>
