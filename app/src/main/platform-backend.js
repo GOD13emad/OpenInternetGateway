@@ -343,6 +343,18 @@ class Backend {
     }
   }
 
+  // Read-only HTTPS lookup of publicly posted shared VPNBook credentials.
+  // Does not connect to a VPN or store the password.
+  async freeVpnBookCredentials() {
+    if (this.platform !== 'linux') throw new Error('Free operator credentials are Linux QA-only.');
+    if (this.operatorTrialBusy || this.operatorProfileTaskBusy ||
+        this.operatorUpdateBusy || this.gatewayActionCount > 0) {
+      throw new Error('Wait for the active gateway task before fetching credentials.');
+    }
+    const { fetchPublicLogin } = require('./vpnbook-public-credentials');
+    return fetchPublicLogin();
+  }
+
   async operatorConnectionTrial(username, password) {
     if (this.platform !== 'linux' || !this.backendRoot) {
       throw new Error('Isolated provider trial is available only on Linux.');

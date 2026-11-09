@@ -1,5 +1,5 @@
 const $ = (id) => document.getElementById(id);
-const state = { status: null, busy: false, busyAction: '', platform: null, page: 'overview', profiles: [], countries: [], countryFilter: '', sortKey: 'rank', sortDir: 'asc', updateInfo: null, directBenchmark: null };
+const state = { status: null, busy: false, freeCredentialsBusy: false, busyAction: '', platform: null, page: 'overview', profiles: [], countries: [], countryFilter: '', sortKey: 'rank', sortDir: 'asc', updateInfo: null, directBenchmark: null };
 
 function setText(id, value) { const el = $(id); if (el) el.textContent = value ?? '—'; }
 function safeArray(v) { return Array.isArray(v) ? v : v ? [v] : []; }
@@ -587,7 +587,7 @@ async function loadOperatorProfileStatus() {
     setText('operatorStageStatus', label);
     state.operatorStaged = !!info?.staged;
     $('operatorNativeCheckButton').disabled = !info?.staged;
-    $('operatorTrialButton').disabled = !info?.staged || !$('operatorTrialConsent').checked;
+    $('operatorTrialButton').disabled = !info?.staged || !$('operatorTrialConsent').checked || state.freeCredentialsBusy;
   } catch {
     setText('operatorStageStatus', 'Offline operator-profile status unavailable; no connection was attempted.');
   }
@@ -619,8 +619,39 @@ async function checkOperatorNativeCompatibility() {
   }
 }
 
+async function loadFreeVpnBookCredentials() {
+  if (state.busy || state.freeCredentialsBusy || state.platform?.platform !== 'linux') return;
+  const button = $('operatorFreeCredentialsButton');
+  state.freeCredentialsBusy = true;
+  button.disabled = true;
+  $('operatorTrialButton').disabled = true;
+  setText('operatorCredentialsStatus', 'Reading current free login from the official HTTPS page; no VPN connection.');
+  try {
+    const login = await window.gateway.freeVpnBookCredentials();
+    if (login?.username !== 'vpnbook' || !/^[A-Za-z0-9]{4,32}$/.test(login?.password || '') ||
+        !/^\d{4}-\d{2}-\d{2}$/.test(login?.lastUpdated || '')) {
+      throw new Error('Official free VPNBook login could not be verified.');
+    }
+    $('operatorUsername').value = login.username;
+    $('operatorPassword').value = login.password; // temporary; trial clears before IPC
+    setText('operatorCredentialsStatus',
+      'Free shared login refreshed (updated ' + login.lastUpdated +
+      '). In memory only. VPN NOT connected; separate trial consent still required.');
+  } catch (error) {
+    $('operatorUsername').value = '';
+    $('operatorPassword').value = '';
+    setText('operatorCredentialsStatus',
+      'Could not verify current free login. Check the official VPNBook OpenVPN page; no trial started.');
+    showToast(userErrorMessage(error, 'Unable to fetch current free login.'), true);
+  } finally {
+    state.freeCredentialsBusy = false;
+    button.disabled = false;
+    $('operatorTrialButton').disabled = !state.operatorStaged || !$('operatorTrialConsent').checked;
+  }
+}
+
 async function runOperatorTransportTrial() {
-  if (state.busy || state.platform?.platform !== 'linux' ||
+  if (state.busy || state.freeCredentialsBusy || state.platform?.platform !== 'linux' ||
       !state.operatorStaged || !$('operatorTrialConsent').checked) return;
   const user = String($('operatorUsername').value || '').trim();
   let password = $('operatorPassword').value;
@@ -718,8 +749,9 @@ async function init() {
   $('openLogs').addEventListener('click', () => window.gateway.openLogs());
   $('operatorStageButton').addEventListener('click', stageOperatorProfileFromPicker);
   $('operatorNativeCheckButton').addEventListener('click', checkOperatorNativeCompatibility);
+  $('operatorFreeCredentialsButton').addEventListener('click', loadFreeVpnBookCredentials);
   $('operatorTrialConsent').addEventListener('change', () => {
-    $('operatorTrialButton').disabled = !state.operatorStaged || !$('operatorTrialConsent').checked;
+    $('operatorTrialButton').disabled = !state.operatorStaged || !$('operatorTrialConsent').checked || state.freeCredentialsBusy;
   });
   $('operatorTrialButton').addEventListener('click', runOperatorTransportTrial);
   $('checkUpdates').addEventListener('click', () => loadUpdates(true));

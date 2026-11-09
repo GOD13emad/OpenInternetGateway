@@ -265,6 +265,10 @@
               <label for="operatorPassword">Provider password (temporary)</label>
               <input id="operatorPassword" type="password" maxlength="256" autocomplete="off" spellcheck="false" placeholder="Not stored or saved">
             </div>
+            <div class="button-row">
+              <button class="btn ghost" id="operatorFreeCredentialsButton">Get free VPNBook login (HTTPS only)</button>
+            </div>
+            <p class="measurement-note" id="operatorCredentialsStatus">VPNBook's shared login changes periodically. Fetching only fills temporary fields; it never connects or stores the password.</p>
             <label class="measurement-note" style="display:block;margin-top:14px">
               <input type="checkbox" id="operatorTrialConsent">
               I authorize one temporary Linux OpenVPN trial. It verifies the server certificate against the pinned CA and exact CN, ignores pushed routes/DNS and never installs a default route, then removes the temporary connection and copied certificate files. It is blocked while any other VPN/tunnel is active; existing connections are never disconnected. It does not validate full-device routing or throughput.

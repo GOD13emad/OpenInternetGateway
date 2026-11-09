@@ -139,6 +139,10 @@ function registerIpc() {
   ipcMain.handle('gateway:platform', () => backend.platformInfo());
   ipcMain.handle('gateway:operatorProfileStatus', () => backend.operatorProfileStatus());
   ipcMain.handle('gateway:operatorNativeCheck', () => backend.checkOperatorNativeCompatibility());
+  ipcMain.handle('gateway:freeVpnBookCredentials', () => {
+    if (process.platform !== 'linux') throw new Error('Free VPNBook login is Linux QA-only.');
+    return backend.freeVpnBookCredentials();
+  });
   ipcMain.handle('gateway:operatorTrial', (_event, input = {}) => {
     if (process.platform !== 'linux') throw new Error('Operator VPN trial is Linux-only.');
     return backend.operatorConnectionTrial(input.username, input.password);
