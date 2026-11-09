@@ -59,3 +59,51 @@ function Test-OigVpnProfile {
  if($ip.AddressFamily -ne [Net.Sockets.AddressFamily]::InterNetwork){return $false}
  return ($ip.ToString() -eq $ExpectedIP -and [int]$parts[2] -eq $ExpectedPort)
 }
+
+# A previously successful public relay may not silently rotate its embedded
+# CA at the SAME IP:port. This is continuity/TOFU, NOT independent identity
+# authentication. The first profile's CA still comes from an external directory.
+function Get-OigVpnProfileCaSha256 {
+ param([string]$Text)
+ if([string]::IsNullOrWhiteSpace($Text) -or $Text.Length -gt 131072){return ''}
+ # Match the existing profile policy's newline normalization: real VPN Gate
+ # public profiles are CRLF and can include blank lines before </ca>.
+ $normalized=$Text.Replace([string]::Concat([char]13,[char]10),[string][char]10).Replace([string][char]13,[string][char]10)
+ $matches=[regex]::Matches($normalized,'(?ms)^[ \t]*<ca>[ \t]*\n(.*?)^[ \t]*</ca>[ \t]*$')
+ if($matches.Count -ne 1){return ''}
+ $pem=$matches[0].Groups[1].Value.Trim()
+ if(-not [regex]::IsMatch($pem,'\A-----BEGIN CERTIFICATE-----\r?\n[A-Za-z0-9+/=\r\n]+-----END CERTIFICATE-----\z')){return ''}
+ try{
+   $payload=($pem -replace '-----BEGIN CERTIFICATE-----','' -replace '-----END CERTIFICATE-----','' -replace '\s','')
+   $der=[Convert]::FromBase64String($payload)
+   $cert=[Security.Cryptography.X509Certificates.X509Certificate2]::new($der)
+   try{
+     if($cert.RawData.Length -ne $der.Length){return ''}
+     return [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($cert.RawData)).ToLowerInvariant()
+   }finally{$cert.Dispose()}
+ }catch{return ''}
+}
+
+function Test-OigKnownRelayCaContinuity {
+ param(
+   [Parameter(Mandatory)][string]$IP,
+   [Parameter(Mandatory)][int]$Port,
+   [Parameter(Mandatory)][string]$ProfileSha256,
+   [Parameter(Mandatory)][string]$CaSha256,
+   [Parameter(Mandatory)][hashtable]$KnownSuccesses
+ )
+ if($IP -notmatch '^[0-9.]+$' -or $Port -lt 1 -or $Port -gt 65535){return $false}
+ if($ProfileSha256 -notmatch '^[a-fA-F0-9]{64}$' -or $CaSha256 -notmatch '^[a-fA-F0-9]{64}$'){return $false}
+ foreach($key in @($KnownSuccesses.Keys)){
+   $item=$KnownSuccesses[$key]
+   if($null -eq $item){continue}
+   if(([string]$item.ip) -ne $IP -or ([string]$item.port) -ne ([string]$Port)){continue}
+   $oldPin=([string]$item.caSha256).ToLowerInvariant()
+   if($oldPin -match '^[a-f0-9]{64}$' -and $oldPin -eq $CaSha256.ToLowerInvariant()){continue}
+   # Legacy success rows predate CA pins. The exact same profile digest can
+   # reconnect, but a *changed* profile at that endpoint must be denied.
+   if($oldPin -eq '' -and ([string]$key).ToLowerInvariant() -eq $ProfileSha256.ToLowerInvariant()){continue}
+   return $false
+ }
+ return $true
+}

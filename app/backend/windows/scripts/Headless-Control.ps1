@@ -132,7 +132,8 @@ function Record-Failure($c,[string]$Reason){
  if($count -ge 3){$quar[$key]=[ordered]@{at=(Get-Date).ToString('o');reason=$Reason;failures=$count;host=[string]$c.Host;ip=[string]$c.IP;port=[int]$c.Port;sha256=[string]$c.SHA256}}
  Write-Map $fail $failureFile;Write-Map $quar $quarantineFile
 }
-function Record-Success($c,$h){
+function Record-Success($c,$h,[string]$CaSha256){
+ if($CaSha256 -notmatch '^[a-f0-9]{64}$'){throw 'Cannot record successful relay without a parsed CA fingerprint.'}
  $success=Read-Map $successFile;$fail=Read-Map $failureFile;$quar=Read-Map $quarantineFile
  $key=Config-Key $c
  $prior=@{}
@@ -141,7 +142,7 @@ function Record-Success($c,$h){
  $first=$stamp;$count=1
  try{if($prior.first){$first=[string]$prior.first}elseif($prior.at){$first=[string]$prior.at}}catch{}
  try{$count=[int]$prior.count+1}catch{$count=1}
- $success[$key]=[ordered]@{at=$stamp;first=$first;count=$count;host=[string]$c.Host;ip=[string]$c.IP;port=[int]$c.Port;sha256=[string]$c.SHA256;observedIP=[string]$h.IP;country=[string]$h.Country;engine='OVPNConnectorService'}
+ $success[$key]=[ordered]@{at=$stamp;first=$first;count=$count;host=[string]$c.Host;ip=[string]$c.IP;port=[int]$c.Port;sha256=[string]$c.SHA256;caSha256=$CaSha256;observedIP=[string]$h.IP;country=[string]$h.Country;engine='OVPNConnectorService'}
  if($fail.ContainsKey($key)){$fail.Remove($key)}
  if($quar.ContainsKey($key)){$quar.Remove($key)}
  Write-Map $success $successFile;Write-Map $fail $failureFile;Write-Map $quar $quarantineFile
@@ -358,8 +359,15 @@ function Try-Candidate($c){
  if(-not(Test-Path $profile)){Record-Failure $c 'PROFILE_MISSING';return $null}
  $sha=(Get-FileHash -Algorithm SHA256 $profile).Hash.ToLowerInvariant()
  if($c.SHA256 -and $sha -ne ([string]$c.SHA256).ToLowerInvariant()){Record-Failure $c 'HASH_MISMATCH';return $null}
- try{$policyOK=Test-OigVpnProfile -Text ([IO.File]::ReadAllText($profile)) -ExpectedIP ([string]$c.IP) -ExpectedPort ([int]$c.Port) -ExpectedProtocol ([string]$c.Protocol)}catch{$policyOK=$false}
- if(-not $policyOK){Record-Failure $c 'PROFILE_POLICY_DENIED';return $null}
+ $caSha256=''
+ try{
+   $profileText=[IO.File]::ReadAllText($profile)
+   $policyOK=Test-OigVpnProfile -Text $profileText -ExpectedIP ([string]$c.IP) -ExpectedPort ([int]$c.Port) -ExpectedProtocol ([string]$c.Protocol)
+   if($policyOK){$caSha256=[string](Get-OigVpnProfileCaSha256 -Text $profileText)}
+ }catch{$policyOK=$false}
+ if(-not $policyOK -or $caSha256 -notmatch '^[a-f0-9]{64}$'){Record-Failure $c 'PROFILE_POLICY_OR_CA_INVALID';return $null}
+ $continuity=Test-OigKnownRelayCaContinuity -IP ([string]$c.IP) -Port ([int]$c.Port) -ProfileSha256 $sha -CaSha256 $caSha256 -KnownSuccesses (Read-Map $successFile)
+ if(-not $continuity){Record-Failure $c 'PREVIOUSLY_SEEN_ENDPOINT_CA_CHANGED';return $null}
  # The interactive GUI and service daemon are mutually exclusive. Never kill
  # or reconfigure an independent OpenVPN Connect session.
  Assert-OpenVpnGuiClosed
@@ -392,7 +400,7 @@ function Try-Candidate($c){
  if(-not $h.Healthy){$fallback=Add-PhysicalShadows;Write-ShadowEvidence ([ordered]@{at=(Get-Date).ToString('o');result='POST_TAKEOVER_HEALTH_FAIL';candidate=[string]$c.SHA256;health=$h;fallback=$fallback;native=$native});Record-Failure $c 'LIVE_FAIL';Stop-Connector;return $null}
  if(-not(Test-DesiredOn)){Stop-Connector;return $null}
  Write-ShadowEvidence ([ordered]@{at=(Get-Date).ToString('o');result='PASS';candidate=[string]$c.SHA256;health=$h;native=$native;dataPlane=$dataPlane})
- Record-Success $c $h
+ Record-Success $c $h $caSha256
  Schedule-ManualServiceMode
  $state=[ordered]@{at=(Get-Date).ToString('o');engine='OVPNConnectorService';service=$service;host=$c.Host;serverIP=$c.IP;port=$c.Port;protocol=$c.Protocol;configuredCountry=[string]$c.Country;countryName=[string]$c.CountryName;profile=$profile;serviceProfile=$serviceProfile;sha256=$sha;observedIP=$h.IP;country=$h.Country;dns=$h.DNS}
  $state|ConvertTo-Json -Depth 7|Set-Content -Encoding UTF8 $stateFile
