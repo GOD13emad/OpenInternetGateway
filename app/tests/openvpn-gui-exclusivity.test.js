@@ -6,6 +6,8 @@ const root=path.join(__dirname,'..');
 const backend=fs.readFileSync(path.join(root,'src/main/platform-backend.js'),'utf8').replace(/\r\n/g,'\n');
 const ensure=fs.readFileSync(path.join(root,'backend/windows/scripts/Ensure-OpenInternet.ps1'),'utf8').replace(/\r\n/g,'\n');
 const daemon=fs.readFileSync(path.join(root,'backend/windows/scripts/Headless-Control.ps1'),'utf8').replace(/\r\n/g,'\n');
+const hostedHarness=fs.readFileSync(path.join(root,'tests/hosted-first-connect.cjs'),'utf8').replace(/\r\n/g,'\n');
+const hostedWrapper=fs.readFileSync(path.join(root,'tests/hosted-first-connect.ps1'),'utf8').replace(/\r\n/g,'\n');
 
 test('first-time OpenVPN MSI suppresses the package-verified post-install GUI launch',()=>{
   const install=backend.slice(backend.indexOf('async _ensureWindowsConnector()'),backend.indexOf('async _ensureWindowsRuntimePrerequisites()'));
@@ -61,6 +63,21 @@ test('elevated action checks GUI before Config Factory, service install, and rou
   assert.match(daemon,/NoProcessFoundForGivenName/);
   assert.match(daemon,/Save-Desired 'off'/);
   assert.doesNotMatch(daemon,/Stop-Process|taskkill/);
+});
+
+test('hosted first-connect requires real VPN-source-bound download/upload and records identity trust state',()=>{
+  assert.match(hostedHarness,/schema:'oig-hosted-first-connect-v2'/);
+  assert.match(hostedHarness,/await b\.benchmarkActive\(\)/);
+  assert.match(hostedHarness,/throughputPath==='vpn-source-ip-bound'/);
+  assert.match(hostedHarness,/tunnelRouteVerifiedAfterTransfer===true/);
+  assert.match(hostedHarness,/downloadMbps/);
+  assert.match(hostedHarness,/uploadMbps/);
+  assert.match(hostedHarness,/serverIdentityVerified/);
+  assert.match(hostedHarness,/FIRST_CONNECT_DATA_PLANE_VALIDATION/);
+  assert.match(hostedWrapper,/report\.schema -ne 'oig-hosted-first-connect-v2'/);
+  assert.match(hostedWrapper,/report\.checks\.throughput/);
+  assert.match(hostedWrapper,/report\.serverIdentityVerified -isnot \[bool\]/);
+  assert.match(hostedWrapper,/HOSTED_FIRST_CONNECT_DATA_PLANE_PASS/);
 });
 
 test('candidate rechecks GUI immediately before stopping/configuring the service',()=>{

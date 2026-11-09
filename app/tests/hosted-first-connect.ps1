@@ -72,6 +72,11 @@ try{
   if(Test-OpenVpnConnectGuiRunning){throw 'OPENVPN_GUI_STARTED_DURING_CONNECT'}
   if(-not(Test-Path -LiteralPath $Receipt)){throw 'ACCEPTANCE_RECEIPT_MISSING'}
   $report=Get-Content -LiteralPath $Receipt -Raw | ConvertFrom-Json
+  if($report.schema -ne 'oig-hosted-first-connect-v2'){throw 'UNSUPPORTED_ACCEPTANCE_RECEIPT_SCHEMA'}
+  if($report.checks.throughput -ne $true -or $report.throughput.ok -ne $true){throw 'TUNNEL_THROUGHPUT_NOT_VERIFIED'}
+  if($report.throughput.benchmark.throughputPath -ne 'vpn-source-ip-bound' -or $report.throughput.benchmark.tunnelRouteVerifiedAfterTransfer -ne $true){throw 'TUNNEL_THROUGHPUT_NOT_BOUND_TO_VPN_SOURCE'}
+  if([double]$report.throughput.benchmark.downloadMbps -le 0 -or [double]$report.throughput.benchmark.uploadMbps -le 0){throw 'TUNNEL_THROUGHPUT_METRICS_MISSING'}
+  if($report.serverIdentityVerified -isnot [bool]){throw 'SERVER_IDENTITY_STATUS_NOT_RECORDED'}
   if($report.pass -ne $true){throw 'ACCEPTANCE_CRITERIA_NOT_MET'}
   $verified=$true
 } finally {
@@ -93,4 +98,4 @@ try{
   if(-not $safe){$verified=$false;Write-Output 'HOSTED_ROLLBACK_UNCERTAIN_WATCHDOG_RETAINED'}
 }
 if(-not $verified){throw 'FIRST_CONNECT_NOT_VERIFIED'}
-Write-Output 'HOSTED_FIRST_CONNECT_FULL_ACCEPTANCE_PASS'
+Write-Output 'HOSTED_FIRST_CONNECT_DATA_PLANE_PASS'

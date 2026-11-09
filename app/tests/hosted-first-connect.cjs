@@ -15,7 +15,7 @@ m._compile(asar.extractFile(archive,hits[0].replace(/^[\\/]+/,'')).toString('utf
 const Backend=m.exports;
 const appPackage=JSON.parse(asar.extractFile(archive,'package.json').toString('utf8'));
 const sanitize=value=>String(value??'').replace(/(password|token|secret|key)\s*[=:]\s*\S+/gi,'$1=[redacted]').replace(/[A-Za-z0-9+/]{64,}={0,2}/g,'[redacted]').slice(0,400);
-const report={schema:'oig-hosted-first-connect-v1',scope:'actual-packaged-backend-no-GUI',source:process.env.GITHUB_SHA,connectPass:false,rollbackPass:false,connectError:'',disconnectError:'',baseline:null,connected:null,after:null};
+const report={schema:'oig-hosted-first-connect-v2',scope:'actual-packaged-backend-no-GUI',source:process.env.GITHUB_SHA,connectPass:false,rollbackPass:false,connectError:'',disconnectError:'',baseline:null,connected:null,throughput:null,serverIdentityVerified:null,serverIdentityStatus:'unreported',after:null};
 const b=new Backend({version:appPackage.version,resourcesPath:res,appPath:archive,userData:path.join(os.tmpdir(),'oig-test-userdata'),emit:()=>{}});
 (async()=>{
   try{
@@ -23,12 +23,21 @@ const b=new Backend({version:appPackage.version,resourcesPath:res,appPath:archiv
     assert.equal(report.baseline.connected,false,'NOT_A_CLEAN_BASELINE');
     console.log('FIRST_CONNECT_START');
     await b.action('connect');await new Promise(r=>setTimeout(r,3000));
-    report.connected=await b.status();const a=report.connected,z=report.baseline;
-    report.checks={connected:a.connected===true,desiredOn:a.desiredState==='on',headless:a.engine==='HeadlessConnector',ipChanged:!!z.ip&&!!a.ip&&z.ip!==a.ip,foreign:!!a.country&&a.country!=='IR',routes:Number(a.fullRoutes)>=2,ipv6Safe:a.ipv6LeakRisk===false,dnsClean:a.poison===false,relay:!!a.relay,autoRecovery:a.autoRecovery===true};
+    const initial=await b.status();report.connected=initial;
+    assert.equal(initial.connected,true,'CONNECT_STATUS_NOT_CONNECTED');
+    const measured=await b.benchmarkActive();
+    report.throughput={ok:measured?.ok===true,benchmark:measured?.benchmark||null};
+    report.connected=await b.status();const a=report.connected,z=report.baseline,bm=report.throughput.benchmark||{};
+    report.serverIdentityVerified=typeof a.serverIdentityVerified==='boolean'?a.serverIdentityVerified:null;
+    report.serverIdentityStatus=report.serverIdentityVerified===true?'verified':report.serverIdentityVerified===false?'not-independently-verified':'unreported';
+    report.checks={connected:a.connected===true,desiredOn:a.desiredState==='on',headless:a.engine==='HeadlessConnector',ipChanged:!!z.ip&&!!a.ip&&z.ip!==a.ip,foreign:!!a.country&&a.country!=='IR',routes:Number(a.fullRoutes)>=2,ipv6Safe:a.ipv6LeakRisk===false,dnsClean:a.poison===false,relay:!!a.relay,autoRecovery:a.autoRecovery===true,throughput:report.throughput.ok&&bm.throughputPath==='vpn-source-ip-bound'&&bm.tunnelRouteVerifiedAfterTransfer===true&&Number(bm.downloadMbps)>0&&Number(bm.uploadMbps)>0&&Number(bm.downloadBytes)===2000000&&Number(bm.uploadBytes)===512000,identityReported:typeof report.serverIdentityVerified==='boolean'};
     report.connectPass=Object.values(report.checks).every(Boolean);
-    console.log('FIRST_CONNECT_VALIDATION='+String(report.connectPass));
+    console.log('FIRST_CONNECT_THROUGHPUT='+JSON.stringify({downloadMbps:bm.downloadMbps??null,uploadMbps:bm.uploadMbps??null,throughputPath:bm.throughputPath??'',tunnelRouteVerifiedAfterTransfer:bm.tunnelRouteVerifiedAfterTransfer===true}));
+    console.log('FIRST_CONNECT_SERVER_IDENTITY_VERIFIED='+String(report.serverIdentityVerified));
+    console.log('FIRST_CONNECT_DATA_PLANE_VALIDATION='+String(report.connectPass));
   }catch(e){
     report.connectError=sanitize(e?.message||e);
+    try{report.connected=await b.status();report.serverIdentityVerified=typeof report.connected.serverIdentityVerified==='boolean'?report.connected.serverIdentityVerified:null;report.serverIdentityStatus=report.serverIdentityVerified===true?'verified':report.serverIdentityVerified===false?'not-independently-verified':'unreported'}catch{}
     console.error('FIRST_CONNECT_ERROR='+report.connectError);
     const snap=(relative,fields)=>{
       try{
