@@ -1619,18 +1619,28 @@ try {
         updatePwsh = path.join(helperRuntime, 'pwsh.exe');
         if (!fs.existsSync(updatePwsh)) throw new Error('Copied Windows update PowerShell runtime is incomplete.');
       }
-      const pwshArgs = [
-        '-NoProfile','-WindowStyle','Hidden','-ExecutionPolicy','Bypass','-File',helper,
+      // On Windows, detached:true with windowsHide can return exit 0 while
+      // PowerShell never executes its -File command. An attached, hidden
+      // bootstrap starts the *real* helper with native Start-Process, which
+      // survives the Electron parent quitting without taking desktop focus.
+      const bootstrap = path.join(this.backendRoot, 'scripts', 'Start-UpdateBootstrap.ps1');
+      if (!fs.existsSync(bootstrap)) throw new Error('Verified Windows update bootstrap script is missing.');
+      fs.mkdirSync(path.dirname(resultFile), { recursive: true });
+      const bootstrapArgs = [
+        '-NoProfile','-NonInteractive','-WindowStyle','Hidden','-ExecutionPolicy','Bypass','-File',bootstrap,
+        '-Runner',updatePwsh,
+        '-Helper',helper,
         '-Installer',downloaded.path,
         '-ExpectedSha',expectedSha,
         '-Version',version,
         '-WaitPid',String(appPid),
         '-Target',target,
         '-Fallback',String(currentExecutable || ''),
-        '-ResultFile',resultFile
+        '-ResultFile',resultFile,
+        '-LaunchLog',launchLog
       ];
-      const child = spawn(updatePwsh, pwshArgs, {
-        detached: true,
+      const child = spawn(updatePwsh, bootstrapArgs, {
+        detached: false,
         windowsHide: true,
         stdio: ['ignore', 'ignore', 'ignore']
       });
@@ -1639,8 +1649,9 @@ try {
         child.once('error', reject);
       });
       child.unref();
-      const startedDeadline = Date.now() + 5000;
+      const startedDeadline = Date.now() + 12000;
       while (!fs.existsSync(startedFile) && Date.now() < startedDeadline) {
+        if (fs.existsSync(launchLog)) throw new Error('Windows native update bootstrap refused to start.');
         await new Promise(resolve => setTimeout(resolve, 50));
       }
       if (!fs.existsSync(startedFile)) {

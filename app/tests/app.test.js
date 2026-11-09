@@ -598,7 +598,7 @@ test('GitHub updater checks latest release and verifies published SHA-256',()=>{
   assert.ok(backend.includes("Programs', 'open-internet-gateway', 'Open Internet Gateway.exe'"));
   assert.match(backend,/pwsh-helper/);
   assert.match(backend,/copyDir\(bundledPwshRoot, helperRuntime\)/);
-  assert.match(backend,/spawn\(updatePwsh, pwshArgs/);
+  assert.match(backend,/spawn\(updatePwsh, bootstrapArgs/);
   assert.match(backend,/resultFile \+ '\.started'/);
   assert.match(backend,/Windows update helper failed to start/);
   assert.doesNotMatch(backend,/spawn\('pwsh\.exe'/);
@@ -1214,7 +1214,7 @@ test('Windows update helper uses an isolated copy of bundled PowerShell instead 
   assert.match(block,/const bundledPwshRoot = path\.join\(this\.resourcesPath \|\| '', 'pwsh'\)/);
   assert.match(block,/copyDir\(bundledPwshRoot, helperRuntime\)/);
   assert.match(block,/updatePwsh = path\.join\(helperRuntime, 'pwsh\.exe'\)/);
-  assert.match(block,/spawn\(updatePwsh, pwshArgs/);
+  assert.match(block,/spawn\(updatePwsh, bootstrapArgs/);
   assert.doesNotMatch(block,/where\.exe pwsh\.exe|process\.env\.ComSpec|apply-update\.cmd/);
 });
 
@@ -1515,4 +1515,78 @@ test('Windows direct ISP requires the winning physical route before claiming phy
     assert.deepEqual(calls.slice(-3),['203.0.113.19','203.0.113.20','203.0.113.21']);
     assert.equal(JSON.parse(fs.readFileSync(tempJson,'utf8')).effectiveRouteVerified,true);
   }finally{fs.rmSync(temp,{recursive:true,force:true})}
+});
+
+
+test('Windows updater uses hidden native Start-Process bootstrap and preserves fail-closed checksum',()=>{
+  const backend=fs.readFileSync(path.join(root,'src/main/platform-backend.js'),'utf8');
+  const bootstrap=fs.readFileSync(path.join(root,'backend/windows/scripts/Start-UpdateBootstrap.ps1'),'utf8');
+  const begin=backend.indexOf('async launchDownloadedUpdate');
+  const end=backend.indexOf("if (this.platform === 'linux')",begin);
+  const windows=backend.slice(begin,end);
+  assert.match(windows,/spawn\(updatePwsh, bootstrapArgs/);
+  assert.match(windows,/detached: false/);
+  assert.match(windows,/Start-UpdateBootstrap\.ps1/);
+  assert.match(windows,/Windows native update bootstrap refused to start/);
+  assert.match(bootstrap,/WINDOWS_UPDATE_BOOTSTRAP_FAILED/);
+  assert.match(windows,/resultFile \+ '\.started'/);
+  assert.match(bootstrap,/Start-Process -FilePath \$Runner -ArgumentList \$arguments -WindowStyle Hidden/);
+  assert.match(bootstrap,/Quote-UpdateArg/);
+  assert.doesNotMatch(bootstrap,/RunAs|sudo|Start-Process.+-Verb/);
+});
+
+test('native Windows update handoff rejects an invalid synthetic installer before launch',
+  { skip: process.platform !== 'win32' }, async()=>{
+  const Backend=require('../src/main/platform-backend');
+  const os=require('node:os');
+  const temp=fs.mkdtempSync(path.join(os.tmpdir(),'oig-native-update-negative-'));
+  const parent=path.join(temp,'QA Folder With Spaces');
+  const backendRoot=path.join(parent,'backend');
+  const version='9.9.9';
+  const updateDir=path.join(backendRoot,'updates','v'+version);
+  const scripts=path.join(backendRoot,'scripts');
+  const scratchLocal=path.join(parent,'Local');
+  const oldLocal=process.env.LOCALAPPDATA;
+  fs.mkdirSync(scripts,{recursive:true});
+  fs.mkdirSync(updateDir,{recursive:true});
+  fs.mkdirSync(scratchLocal,{recursive:true});
+  fs.copyFileSync(path.join(root,'backend/windows/scripts/Start-UpdateBootstrap.ps1'),
+    path.join(scripts,'Start-UpdateBootstrap.ps1'));
+  const fake=path.join(updateDir,'OpenInternetGateway-Setup-'+version+'.exe');
+  fs.writeFileSync(fake,'NOT_A_REAL_INSTALLER_INVALID_SHA_ONLY\n');
+  const fallback=path.join(parent,'nonexistent-previous-app.exe');
+  const expectedSha='f'.repeat(64);
+  const installed=path.join(scratchLocal,'Programs','open-internet-gateway','Open Internet Gateway.exe');
+  const pwsh=path.join(process.env.ProgramFiles||'C:\\Program Files','PowerShell','7','pwsh.exe');
+  assert.ok(fs.existsSync(pwsh),'Windows PowerShell 7 required for native handoff test');
+  const b=new Backend({version:'2.5.20',resourcesPath:parent,appPath:parent,userData:parent});
+  b.platform='win32';
+  b.backendRoot=backendRoot;
+  b._requireWindowsPwsh=()=>pwsh;
+  process.env.LOCALAPPDATA=scratchLocal;
+  try{
+    const handoff=await b.launchDownloadedUpdate({
+      path:fake,sha256:expectedSha,info:{latestVersion:version}
+    },{appPid:2147000000,currentExecutable:fallback});
+    assert.equal(handoff.applying,true);
+    assert.equal(handoff.installScope,'current-user');
+    const until=Date.now()+15000;
+    let result=null;
+    while(Date.now()<until){
+      if(fs.existsSync(handoff.resultFile)){
+        try{result=JSON.parse(fs.readFileSync(handoff.resultFile,'utf8'));break;}catch{}
+      }
+      await new Promise(resolve=>setTimeout(resolve,120));
+    }
+    assert.ok(result,'Native helper must finish its rejected-hash check');
+    assert.equal(result.ok,false);
+    assert.match(result.error,/Verified installer hash changed before apply/);
+    assert.ok(fs.existsSync(handoff.resultFile+'.started'));
+    assert.equal(fs.existsSync(installed),false);
+    assert.equal(fs.existsSync(fallback),false);
+  }finally{
+    if(oldLocal===undefined)delete process.env.LOCALAPPDATA;
+    else process.env.LOCALAPPDATA=oldLocal;
+    fs.rmSync(temp,{recursive:true,force:true});
+  }
 });
