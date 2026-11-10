@@ -397,7 +397,19 @@ function Try-Candidate($c){
  Write-ShadowEvidence ([ordered]@{at=(Get-Date).ToString('o');result='DATAPLANE_READY';candidate=[string]$c.SHA256;native=$native;dataPlane=$dataPlane;shadow=$shadow})
  Remove-PhysicalShadows
  $h=Wait-Health $true 14 ([string]$c.Country)
- if(-not $h.Healthy){$fallback=Add-PhysicalShadows;Write-ShadowEvidence ([ordered]@{at=(Get-Date).ToString('o');result='POST_TAKEOVER_HEALTH_FAIL';candidate=[string]$c.SHA256;health=$h;fallback=$fallback;native=$native});Record-Failure $c 'LIVE_FAIL';Stop-Connector;return $null}
+ if(-not $h.Healthy){
+   # Native /1 routes are still live after handover. Never create a
+   # competing physical /1 pair in this state: stop the owned connector,
+   # which already removes its routes, then let the next candidate retry.
+   # The independent hosted watchdog remains armed until final cleanup.
+   try{
+     Write-ShadowEvidence ([ordered]@{at=(Get-Date).ToString('o');result='POST_TAKEOVER_HEALTH_FAIL';candidate=[string]$c.SHA256;health=$h;native=$native;recovery='stop-owned-connector'})
+     Record-Failure $c 'LIVE_FAIL'
+   }finally{
+     Stop-Connector
+   }
+   return $null
+ }
  if(-not(Test-DesiredOn)){Stop-Connector;return $null}
  Write-ShadowEvidence ([ordered]@{at=(Get-Date).ToString('o');result='PASS';candidate=[string]$c.SHA256;health=$h;native=$native;dataPlane=$dataPlane})
  Record-Success $c $h $caSha256

@@ -112,4 +112,41 @@ Expect $false 2 'IPv6 default but no verified selected route'
 $script:v6Mode='owned'
 Expect $true 2 'IPv6 egress selected on managed OpenVPN adapter'
 $script:v6Mode='none'
-Write-Output 'PASS: Windows headless health refuses effective foreign IPv4/IPv6 routes, stopped connector and untrusted DNS (16 offline cases)'
+# Execute only the actual post-takeover unhealthy AST block under mocks:
+# there is no connector, route, firewall, DNS, service or process mutation.
+$actual=Join-Path $script:root 'Headless-Control.ps1'
+$branchTokens=$null;$branchErrors=$null
+$headlessAst=[Management.Automation.Language.Parser]::ParseFile($actual,[ref]$branchTokens,[ref]$branchErrors)
+if($branchErrors.Count){throw 'Post-takeover native branch cannot be parsed'}
+$branches=@($headlessAst.FindAll({
+  param($node)
+  $node -is [Management.Automation.Language.IfStatementAst] -and
+  $node.Extent.Text.TrimStart().StartsWith('if(-not $h.Healthy){')
+},$true))
+if($branches.Count -ne 1){throw ('Expected one post-takeover branch, found '+$branches.Count)}
+$script:events=@();$script:evidenceFails=$false;$script:lastHealthReceipt=$null
+function Write-ShadowEvidence($Data){
+  $script:events+=,'evidence'
+  $script:lastHealthReceipt=$Data
+  if($script:evidenceFails){throw 'SYNTHETIC_EVIDENCE_WRITE_FAILURE'}
+}
+function Record-Failure($Candidate,[string]$Reason){$script:events+=,'record-failure'}
+function Stop-Connector {$script:events+=,'stop-connector'}
+$h=[pscustomobject]@{Healthy=$false;FullRoutes=0;Poison=$null}
+$c=[pscustomobject]@{SHA256=('a'*64)}
+$native=[pscustomobject]@{Ready=$true;NativeRoutes=2}
+$branch=[scriptblock]::Create($branches[0].Extent.Text)
+& $branch | Out-Null
+if(($script:events -join ',') -cne 'evidence,record-failure,stop-connector'){throw 'Owned-connector cleanup ordering failed'}
+if($script:lastHealthReceipt.result -ne 'POST_TAKEOVER_HEALTH_FAIL' -or
+   $script:lastHealthReceipt.recovery -ne 'stop-owned-connector'){
+  throw 'Health failure diagnosis or recovery policy was not preserved'
+}
+$script:events=@();$script:evidenceFails=$true;$threw=$false
+try{& $branch | Out-Null}catch{
+  if($_.Exception.Message -like '*SYNTHETIC_EVIDENCE_WRITE_FAILURE*'){$threw=$true}else{throw}
+}
+if(-not $threw -or ($script:events -join ',') -cne 'evidence,stop-connector'){
+  throw 'Connector cleanup must run even when diagnostic evidence cannot be written'
+}
+Write-Output 'PASS: Windows headless health refuses effective foreign IPv4/IPv6 routes, stopped connector and untrusted DNS; unhealthy handover always stops owned connector (18 offline cases)'

@@ -1668,3 +1668,16 @@ test('native Windows update handoff rejects an invalid synthetic installer befor
     fs.rmSync(temp,{recursive:true,force:true});
   }
 });
+
+test('Windows failed post-takeover health stops the owned connector without adding competing shadow routes',()=>{
+  const headless=fs.readFileSync(path.join(root,'backend/windows/scripts/Headless-Control.ps1'),'utf8').replace(/\r\n/g,'\n');
+  const start=headless.indexOf('if(-not $h.Healthy){');
+  const end=headless.indexOf('if(-not(Test-DesiredOn))',start);
+  assert.ok(start>0 && end>start,'Must identify the exact post-takeover unhealthy branch');
+  const unhealthy=headless.slice(start,end);
+  assert.doesNotMatch(unhealthy,/Add-PhysicalShadows|New-NetRoute|Remove-NetRoute/,
+    'Failed health must not add a second /1 pair while native routes still exist');
+  assert.match(unhealthy,/POST_TAKEOVER_HEALTH_FAIL/);
+  assert.match(unhealthy,/recovery='stop-owned-connector'/);
+  assert.match(unhealthy,/try\s*\{[\s\S]*Write-ShadowEvidence[\s\S]*Record-Failure[\s\S]*\}\s*finally\s*\{\s*Stop-Connector\s*\}/);
+});
