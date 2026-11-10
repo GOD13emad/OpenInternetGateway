@@ -56,7 +56,13 @@ if [[ "${OIG_QA_X11_CHILD:-0}" == 1 ]]; then
     tail -35 "$work/app.log" >&2 || :
     exit 76
   fi
-  kill -0 "$mainpid" 2>/dev/null || { echo WM_CLOSE_KILLED_PROCESS >&2; exit 77; }
+  mainState="$(ps -o stat= -p "$mainpid" 2>/dev/null | tr -d ' ' || : )"
+  echo "MAIN_PROCESS_STATE_AFTER_CLOSE=${mainState:-not-found} PID=$mainpid"
+  if [[ -z "$mainState" || "$mainState" == *Z* ]]; then
+    echo WM_CLOSE_TERMINATED_OR_ZOMBIFIED_BACKGROUND_PROCESS >&2
+    tail -35 "$work/app.log" >&2 || :
+    exit 77
+  fi
   [[ "$(cat "$OIG_HOME/state/desired-state")" == off ]] || exit 78
 
   timeout 25s "$exe" >"$work/reopen.log" 2>&1 || { echo SECOND_INSTANCE_FAILED >&2; tail -20 "$work/reopen.log" >&2; exit 79; }
@@ -66,14 +72,27 @@ if [[ "${OIG_QA_X11_CHILD:-0}" == 1 ]]; then
     [[ -z "$reopenedWindow" ]] || break
     sleep .2
   done
-  [[ -n "$reopenedWindow" ]] || { echo SECOND_INSTANCE_WINDOW_NOT_SHOWN >&2; tail -25 "$work/reopen.log" >&2; exit 80; }
+  if [[ -z "$reopenedWindow" ]]; then
+    echo SECOND_INSTANCE_WINDOW_NOT_SHOWN >&2
+    echo "MAIN_STATE_AFTER_REOPEN=$(ps -o stat= -p "$mainpid" 2>/dev/null || :)"
+    echo 'ALL_X11_WINDOWS:' >&2
+    xdotool search --name 'Open Internet Gateway' 2>&1 | tail -20 >&2 || :
+    echo 'MAIN_APP_LOG:' >&2
+    tail -45 "$work/app.log" >&2 || :
+    echo 'SECOND_INSTANCE_LOG:' >&2
+    tail -40 "$work/reopen.log" >&2 || :
+    echo 'ELECTRON_PROCESSES:' >&2
+    ps -eo pid,ppid,stat,etime,args | grep -E 'open-internet-gateway|chrome-sandbox' | tail -20 >&2 || :
+    exit 80
+  fi
   xwininfo -id "$reopenedWindow" | grep -q 'Map State: IsViewable' || exit 80
   echo "DASHBOARD_REOPENED_X11_ID=$reopenedWindow"
 
   timeout 25s "$exe" --quit >"$work/quit.log" 2>&1 || { echo QUIT_INTENT_FAILED >&2; tail -20 "$work/quit.log" >&2; exit 81; }
   stopped=false
   for _ in $(seq 1 100); do
-    if ! kill -0 "$mainpid" 2>/dev/null; then stopped=true; break; fi
+    stat="$(ps -o stat= -p "$mainpid" 2>/dev/null | tr -d ' ' || :)"
+    if [[ -z "$stat" || "$stat" == *Z* ]]; then stopped=true; break; fi
     sleep .2
   done
   [[ "$stopped" == true ]] || { echo QUIT_LEFT_PROCESS_ALIVE >&2; tail -30 "$work/app.log" >&2; exit 82; }
