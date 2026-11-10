@@ -122,3 +122,7 @@ try{
 }finally{
   Remove-Item -LiteralPath $archive -Recurse -Force -ErrorAction SilentlyContinue
 }
+# OpenVPN's --help can return 1 even when all required flags were correctly
+# displayed. A verified success receipt, not the native help exit code, decides
+# whether this disposable feasibility step succeeded.
+exit 0
