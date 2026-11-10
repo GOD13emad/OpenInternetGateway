@@ -38,6 +38,11 @@ test('vendored official Electron checksum bytes match immutable upstream digest 
   }
 });
 
+test('the upstream manifest is checked out byte-exact on Windows without CRLF conversion', () => {
+  const attributes = fs.readFileSync(path.join(__dirname, '..', '..', '.gitattributes'), 'utf8');
+  assert.match(attributes, /^app\/tools\/electron-SHASUMS256-44\.10\.2\.txt -text$/m);
+});
+
 test('offline checksum seeding uses the immutable vendored manifest and fails closed on changed or missing bytes', async t => {
   const root = tempRoot(t);
   const opts = { platform: 'linux', arch: 'x64', cacheRoot: root, offline: true };

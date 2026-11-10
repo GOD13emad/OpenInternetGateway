@@ -39,25 +39,20 @@ if [[ "${OIG_QA_X11_CHILD:-0}" == 1 ]]; then
   [[ -n "$window" ]] || { echo NO_VISIBLE_DASHBOARD >&2; tail -25 "$work/app.log" >&2; exit 74; }
   xwininfo -id "$window" | grep -q 'Map State: IsViewable' || exit 75
   xdotool windowclose "$window"
+  # Black-box UX contract: no dashboard remains visible and the background
+  # process stays alive. X11 is allowed to destroy/recreate its native XID.
   hidden=false
-  state=''
+  visibleMatches=''
   for _ in $(seq 1 80); do
-    state="$(xwininfo -id "$window" 2>/dev/null | grep 'Map State:' || :)"
-    # X11 reports IsUnviewable when a mapped child has an unmapped parent.
-    if [[ "$state" == *IsUnMapped* || "$state" == *IsUnviewable* ]]; then
-      hidden=true
-      break
-    fi
+    visibleMatches="$(xdotool search --onlyvisible --name '^Open Internet Gateway$' 2>/dev/null || :)"
+    if [[ -z "$visibleMatches" ]]; then hidden=true; break; fi
     sleep .2
   done
-  echo "POST_WM_CLOSE_X11_MAP_STATE=${state:-not-found}"
+  echo "AFTER_CLOSE_VISIBLE_WINDOW_IDS=${visibleMatches:-none}"
   if [[ "$hidden" != true ]]; then
-    echo WM_CLOSE_FAILED_TO_HIDE >&2
-    xwininfo -id "$window" 2>&1 | tail -23 >&2 || :
+    echo WM_CLOSE_LEFT_DASHBOARD_VISIBLE >&2
+    xwininfo -id "$window" 2>&1 | tail -24 >&2 || :
     xprop -id "$window" _NET_WM_STATE WM_STATE 2>&1 | tail -8 >&2 || :
-    echo 'VISIBLE_MATCHING_WINDOWS:' >&2
-    xdotool search --onlyvisible --name '^Open Internet Gateway$' 2>&1 | tail -10 >&2 || :
-    echo 'APP_LOG_TAIL:' >&2
     tail -35 "$work/app.log" >&2 || :
     exit 76
   fi
@@ -65,12 +60,15 @@ if [[ "${OIG_QA_X11_CHILD:-0}" == 1 ]]; then
   [[ "$(cat "$OIG_HOME/state/desired-state")" == off ]] || exit 78
 
   timeout 25s "$exe" >"$work/reopen.log" 2>&1 || { echo SECOND_INSTANCE_FAILED >&2; tail -20 "$work/reopen.log" >&2; exit 79; }
-  reopened=false
+  reopenedWindow=''
   for _ in $(seq 1 80); do
-    if xwininfo -id "$window" 2>/dev/null | grep -q 'Map State: IsViewable'; then reopened=true; break; fi
+    reopenedWindow="$(xdotool search --onlyvisible --name '^Open Internet Gateway$' 2>/dev/null | head -1 || :)"
+    [[ -z "$reopenedWindow" ]] || break
     sleep .2
   done
-  [[ "$reopened" == true ]] || { echo SECOND_INSTANCE_WINDOW_NOT_SHOWN >&2; exit 80; }
+  [[ -n "$reopenedWindow" ]] || { echo SECOND_INSTANCE_WINDOW_NOT_SHOWN >&2; tail -25 "$work/reopen.log" >&2; exit 80; }
+  xwininfo -id "$reopenedWindow" | grep -q 'Map State: IsViewable' || exit 80
+  echo "DASHBOARD_REOPENED_X11_ID=$reopenedWindow"
 
   timeout 25s "$exe" --quit >"$work/quit.log" 2>&1 || { echo QUIT_INTENT_FAILED >&2; tail -20 "$work/quit.log" >&2; exit 81; }
   stopped=false
@@ -82,10 +80,10 @@ if [[ "${OIG_QA_X11_CHILD:-0}" == 1 ]]; then
   set +e; wait "$mainpid"; rc=$?; set -e
   mainpid=''
   [[ "$rc" == 0 && "$(cat "$OIG_HOME/state/desired-state")" == off ]] || exit 83
-  python3 - "$window" <<'PY'
+  python3 - "$window" "$reopenedWindow" <<'PY'
 import datetime,hashlib,json,os,pathlib,sys
 p=pathlib.Path(os.environ['RUNNER_TEMP'])/'oig-linux-window-lifecycle-receipt.json'
-d={'head':os.environ['GITHUB_SHA'],'scope':'Disposable GitHub Ubuntu runner, exact built DEB extracted into scratch, root:root 4755 Chromium sandbox, Xvfb/Openbox/tint2; no owner GUI or VPN','windowId':sys.argv[1],'nativeCloseHidWindow':True,'mainRemainedRunning':True,'secondInstanceReopenedSameWindow':True,'quitExitedZero':True,'desiredOff':True,'sandboxEnabled':True,'pass':True,'utc':datetime.datetime.now(datetime.timezone.utc).isoformat()}
+d={'head':os.environ['GITHUB_SHA'],'scope':'Disposable GitHub Ubuntu runner, exact built DEB extracted into scratch, root:root 4755 Chromium sandbox, Xvfb/Openbox/tint2; no owner GUI or VPN','windowIdBeforeClose':sys.argv[1],'windowIdAfterReopen':sys.argv[2],'nativeCloseRemovedVisibleDashboard':True,'mainRemainedRunning':True,'secondInstanceReopenedDashboard':True,'quitExitedZero':True,'desiredOff':True,'sandboxEnabled':True,'pass':True,'utc':datetime.datetime.now(datetime.timezone.utc).isoformat()}
 p.write_text(json.dumps(d,sort_keys=True,indent=2)+'\n')
 print('LINUX_HOSTED_PACKAGED_WINDOW_LIFECYCLE_PASS=true')
 print('RECEIPT_SHA256='+hashlib.sha256(p.read_bytes()).hexdigest())
