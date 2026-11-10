@@ -1457,16 +1457,14 @@ class Backend {
 
   _selectUpdateAsset(assets, version) {
     const list = Array.isArray(assets) ? assets : [];
+    // Bind the downloaded binary to the exact release tag. SHA-256 proves
+    // the asset's bytes, but not that an older asset is the advertised version.
     if (this.platform === 'win32') {
-      return list.find(a => a.name === 'OpenInternetGateway-Setup-' + version + '.exe')
-        || list.find(a => /^OpenInternetGateway-Setup-.*\.exe$/i.test(a.name || ''));
+      return list.find(a => a.name === 'OpenInternetGateway-Setup-' + version + '.exe');
     }
     if (this.platform === 'linux') {
-      // Automatic Linux updates must remain user-space and never invoke apt/dpkg/sudo.
-      // Prefer the AppImage release asset; the DEB remains available for manual/system installs.
-      return list.find(a => a.name === 'OpenInternetGateway-' + version + '-x86_64.AppImage')
-        || list.find(a => /^OpenInternetGateway-.*-x86_64\.AppImage$/i.test(a.name || ''))
-        || list.find(a => /\.AppImage$/i.test(a.name || ''));
+      // Automatic Linux updates remain user-space AppImages; no DEB/apt/sudo.
+      return list.find(a => a.name === 'OpenInternetGateway-' + version + '-x86_64.AppImage');
     }
     return null;
   }

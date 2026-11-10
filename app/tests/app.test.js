@@ -834,6 +834,51 @@ test('automatic updater prefers user-space assets and avoids elevation paths',()
   fs.rmSync(tmp,{recursive:true,force:true});
 });
 
+test('release updater fails closed when a latest tag contains only wrong-version assets',async()=>{
+  const Backend=require(path.join(root,'src/main/platform-backend.js'));
+  const backend=new Backend({version:'2.5.19',resourcesPath:root,appPath:root,userData:root,emit:()=>{}});
+  const stale=[
+    {name:'OpenInternetGateway-Setup-2.5.19.exe',digest:'sha256:'+'a'.repeat(64)},
+    {name:'OpenInternetGateway-2.5.19-x86_64.AppImage',digest:'sha256:'+'a'.repeat(64)},
+    {name:'OpenInternetGateway-2.5.20-amd64.deb',digest:'sha256:'+'a'.repeat(64)},
+    {name:'OpenInternetGateway-2.5.18-arm64.AppImage',digest:'sha256:'+'a'.repeat(64)}
+  ];
+  backend.platform='win32';
+  assert.equal(backend._selectUpdateAsset(stale,'2.5.20'),undefined,
+    'an older signed installer must not stand in for the latest release');
+  backend.platform='linux';
+  assert.equal(backend._selectUpdateAsset(stale,'2.5.20'),undefined,
+    'an older AppImage or a DEB must not stand in for the latest release');
+  const exact=[
+    ...stale,
+    {name:'OpenInternetGateway-Setup-2.5.20.exe',digest:'sha256:'+'b'.repeat(64)},
+    {name:'OpenInternetGateway-2.5.20-x86_64.AppImage',digest:'sha256:'+'c'.repeat(64)}
+  ];
+  backend.platform='win32';
+  assert.equal(backend._selectUpdateAsset(exact,'2.5.20')?.name,
+    'OpenInternetGateway-Setup-2.5.20.exe');
+  backend.platform='linux';
+  assert.equal(backend._selectUpdateAsset(exact,'2.5.20')?.name,
+    'OpenInternetGateway-2.5.20-x86_64.AppImage');
+
+  // Exercise the public Update flow too: reject before any download/apply.
+  const tmp=fs.mkdtempSync(path.join(require('node:os').tmpdir(),'oig-update-wrong-release-'));
+  backend.backendRoot=tmp;
+  backend._githubJson=async()=>({tag_name:'v2.5.20',assets:stale});
+  backend._curlText=async()=>{throw new Error('No checksum request expected');};
+  backend._downloadWithSha256=async()=>{throw new Error('No download expected');};
+  try{
+    for(const platform of ['win32','linux']){
+      backend.platform=platform;
+      const info=await backend.updateInfo(true);
+      assert.equal(info.asset,null);
+      await assert.rejects(backend.downloadUpdate(),/No compatible update asset was published/);
+    }
+  }finally{
+    fs.rmSync(tmp,{recursive:true,force:true});
+  }
+});
+
 test('Linux OpenVPN quality engine uses multi-source refresh and safe public-profile filtering',()=>{
   const factory=fs.readFileSync(path.join(root,'backend/linux/config_factory.py'),'utf8');
   assert.match(factory,/https:\/\/www\.vpngate\.net/);
