@@ -54,6 +54,7 @@ app/tools/*
 !app/tools/afterAllArtifactBuild.js
 !app/tools/prepareWindowsPwsh.js
 !app/tools/prepareElectronChecksumCache.js
+!app/tools/electron-SHASUMS256-44.10.2.txt
 !app/tools/qaWindowsInstalledTray.ps1
 !app/tools/qaWindowsHostedUpdateApply.ps1
 !app/tools/qaLinuxHostedWindowLifecycle.sh

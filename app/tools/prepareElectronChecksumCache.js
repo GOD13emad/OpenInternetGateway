@@ -6,6 +6,9 @@ const crypto = require('node:crypto');
 const VERSION = '44.10.2';
 const RELEASE_ASSET_URL = 'https://api.github.com/repos/electron/electron/releases/assets/706723361';
 const RELEASE_ASSET_SHA256 = '75346aa3e2499b9ababcefc9d2acae5b2fcf8c036966b3f7045ce2be89d62cf3';
+// Immutable official upstream checksum bytes are vendored for reliable CI.
+// Their entire file is verified against RELEASE_ASSET_SHA256 before use.
+const BUNDLED_MANIFEST_FILE = path.join(__dirname, 'electron-SHASUMS256-' + VERSION + '.txt');
 const TRANSIENT_HTTP_STATUS_CODES = new Set([408, 425, 429, 500, 502, 503, 504]);
 const TRANSIENT_NETWORK_ERROR_CODES = new Set([
   'ECONNRESET', 'ETIMEDOUT', 'EAI_AGAIN', 'ECONNREFUSED',
@@ -96,6 +99,21 @@ async function fetchManifestWithRetry(options = {}) {
   throw new Error('Electron SHASUMS256 download attempts exhausted');
 }
 
+async function loadPinnedManifest(options = {}) {
+  if (options.buffer !== undefined) return options.buffer;
+  // Explicit fake fetch injection retains deterministic retry/failure tests.
+  if (options.fetchImpl) return fetchManifestWithRetry(options);
+  const localFile = options.manifestFile || BUNDLED_MANIFEST_FILE;
+  try {
+    return fs.readFileSync(localFile);
+  } catch (error) {
+    // A checked-out repository always includes the official pinned manifest.
+    // Only legacy/manual distributions without that file may fetch remotely.
+    if (error?.code !== 'ENOENT' || options.offline || options.manifestFile) throw error;
+    return fetchManifestWithRetry(options);
+  }
+}
+
 async function seedElectronChecksumCache(options = {}) {
   const version = options.version || VERSION;
   const packageJson = options.packageJson || require('../package.json');
@@ -109,7 +127,7 @@ async function seedElectronChecksumCache(options = {}) {
   const arch = options.arch || process.arch;
   const artifactName = options.artifactName || electronArtifactName(version, platform, arch);
   const expectedSha256 = options.expectedAssetSha256 || RELEASE_ASSET_SHA256;
-  const buffer = options.buffer || await fetchManifestWithRetry(options);
+  const buffer = await loadPinnedManifest(options);
   const artifactSha256 = validateChecksumManifest(buffer, expectedSha256, artifactName);
   const cacheRoot = options.cacheRoot || electronCacheRoot(
     platform, options.env || process.env, options.home || os.homedir()
@@ -152,6 +170,7 @@ module.exports = {
   VERSION,
   RELEASE_ASSET_URL,
   RELEASE_ASSET_SHA256,
+  BUNDLED_MANIFEST_FILE,
   sha256,
   isTransientDownloadError,
   electronArtifactName,
