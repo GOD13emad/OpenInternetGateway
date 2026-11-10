@@ -44,6 +44,19 @@ jobs:
       - name: Seed verified Electron checksums
         run: node tools/prepareElectronChecksumCache.js
       - run: npm test
+      - name: Probe GPG-pinned Community OpenVPN Windows CLI (offline, QA branch only)
+        if: github.event_name == 'pull_request' && github.head_ref == 'qa/v2.5.20-operator-safety-20261019'
+        shell: pwsh
+        timeout-minutes: 5
+        run: |
+          $ErrorActionPreference='Stop'
+          & ./tests/windows-community-engine-offline-feasibility.ps1
+      - uses: actions/upload-artifact@v7
+        if: always() && github.event_name == 'pull_request' && github.head_ref == 'qa/v2.5.20-operator-safety-20261019'
+        with:
+          name: windows-community-engine-feasibility-receipt
+          path: ${{ runner.temp }}/oig-community-engine-feasibility.json
+          if-no-files-found: warn
       - run: npm run dist:win
       - name: Smoke-test silent NSIS install on disposable runner
         shell: pwsh
