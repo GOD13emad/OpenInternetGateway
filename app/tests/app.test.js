@@ -1192,8 +1192,8 @@ test('Windows shadow takeover preserves native profile bytes and fails closed un
   const dataAt=block.indexOf('Wait-NativeDataPlane');
   const removeAt=block.indexOf('Remove-PhysicalShadows');
   assert.ok(addAt >= 0 && addAt < startAt && startAt < nativeAt && nativeAt < dataAt && dataAt < removeAt);
-  assert.match(block,/DATAPLANE_READY_FAIL.*Stop-Connector/);
-  assert.match(block,/NATIVE_READY_FAIL.*Stop-Connector/);
+  assert.match(block,/DATAPLANE_READY_FAIL/);
+  assert.match(block,/NATIVE_READY_FAIL/);
   assert.match(block,/POST_TAKEOVER_HEALTH_FAIL/);
   const stop=headless.slice(headless.indexOf('function Stop-Connector'),headless.indexOf('function Stop-ServiceForConfig'));
   assert.match(stop,/Get-ShadowState/);
@@ -1679,5 +1679,20 @@ test('Windows failed post-takeover health stops the owned connector without addi
     'Failed health must not add a second /1 pair while native routes still exist');
   assert.match(unhealthy,/POST_TAKEOVER_HEALTH_FAIL/);
   assert.match(unhealthy,/recovery='stop-owned-connector'/);
-  assert.match(unhealthy,/try\s*\{[\s\S]*Write-ShadowEvidence[\s\S]*Record-Failure[\s\S]*\}\s*finally\s*\{\s*Stop-Connector\s*\}/);
+  assert.match(unhealthy,/Write-ShadowEvidence[\s\S]*Record-Failure[\s\S]*return \$null/);
+  const txn=headless.slice(headless.indexOf(' $handoverCommitted=$false'),headless.indexOf('\n}\n\n$mutex=',start));
+  assert.match(txn,/try\s*\{[\s\S]*POST_TAKEOVER_HEALTH_FAIL[\s\S]*\}\s*finally\s*\{\s*if\(-not \$handoverCommitted\)\{Stop-Connector\}/);
+});
+
+test('Windows routes are journaled before the first /1 mutation and all abnormal handovers clean up',()=>{
+  const headless=fs.readFileSync(path.join(root,'backend/windows/scripts/Headless-Control.ps1'),'utf8').replace(/\r\n/g,'\n');
+  const add=headless.slice(headless.indexOf('function Add-PhysicalShadows'),headless.indexOf('function Get-ShadowState'));
+  const journal=add.indexOf('$state|ConvertTo-Json');
+  const route=add.indexOf('New-NetRoute -DestinationPrefix');
+  assert.ok(journal>0 && journal<route,'Durable owned-route journal must precede any /1 route mutation');
+  assert.match(add,/status='cleanup-armed'/);
+  assert.match(add,/catch\s*\{[\s\S]*Remove-PhysicalShadows[\s\S]*throw/);
+  const candidate=headless.slice(headless.indexOf('function Try-Candidate'),headless.indexOf('\n$mutex='));
+  assert.match(candidate,/\$handoverCommitted=\$false\s*try\s*\{\s*\$shadow=Add-PhysicalShadows/);
+  assert.match(candidate,/\$handoverCommitted=\$true\s*return \$h\s*\}\s*finally\s*\{\s*if\(-not \$handoverCommitted\)\{Stop-Connector\}/);
 });

@@ -13,6 +13,7 @@ test('connector start rejection produces a bounded sanitized diagnostic before c
   assert.match(handler,/startError\.Length -gt 400/);
   assert.match(handler,/password\|token\|secret\|key/);
   assert.match(handler,/Record-Failure \$c 'START_FAIL'/);
-  assert.match(handler,/Stop-Connector;return \$null/);
+  assert.match(handler,/Record-Failure \$c 'START_FAIL';return \$null/);
+  assert.match(source,/\$handoverCommitted=\$false\s*try\s*\{[\s\S]*START_REJECTED[\s\S]*\}\s*finally\s*\{\s*if\(-not \$handoverCommitted\)\{Stop-Connector\}/);
   assert.ok(handler.indexOf("Write-ShadowEvidence")<handler.indexOf("Record-Failure"));
 });
