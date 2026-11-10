@@ -7,6 +7,7 @@ separate gates. No credential material is read, stored or printed here.
 """
 import argparse
 import json
+import json
 import os
 import re
 import stat
@@ -61,14 +62,43 @@ def active_tunnels():
             raise PreflightError("Ambiguous active-connection inventory")
         if kind.strip().lower() in types:
             return True
-    # Catch routed tunnel interfaces outside NetworkManager. Do not trust
-    # a clean nmcli inventory alone (manual OpenVPN or other controllers).
-    rc, stdout, _ = read_command(["ip", "-4", "route", "show", "table", "main"])
+    # A manual tunnel may exist without any IPv4 route or NetworkManager
+    # profile. Inspect kernel link *types*, then both address-family routes.
+    # Unknown/malformed inventories fail closed instead of reporting isolation.
+    rc, stdout, _ = read_command(["ip", "-j", "-d", "link", "show"])
     if rc:
-        raise PreflightError("Cannot inspect kernel IPv4 routes")
-    for route in stdout.splitlines():
-        if re.search(r"\bdev\s+(?:tun|tap|wg|tailscale|vpn)[A-Za-z0-9_.:-]*\b", route):
+        raise PreflightError("Cannot inspect kernel link inventory")
+    try:
+        interfaces = json.loads(stdout)
+    except (ValueError, TypeError) as exc:
+        raise PreflightError("Kernel link inventory is malformed") from exc
+    if not isinstance(interfaces, list) or not interfaces:
+        raise PreflightError("Kernel link inventory is incomplete")
+    tunnel_kinds = {
+        "tun", "tap", "wireguard", "gre", "gretap", "ip6gre",
+        "ip6gretap", "ipip", "sit", "vti", "vti6", "vxlan",
+        "geneve", "erspan", "ip6erspan", "l2tpeth", "macvtap",
+    }
+    for interface in interfaces:
+        if not isinstance(interface, dict) or not isinstance(interface.get("ifname"), str):
+            raise PreflightError("Kernel link inventory is ambiguous")
+        detail = interface.get("linkinfo") or {}
+        if not isinstance(detail, dict):
+            raise PreflightError("Kernel link metadata is ambiguous")
+        kind = detail.get("info_kind", "")
+        if not isinstance(kind, str):
+            raise PreflightError("Kernel link kind is ambiguous")
+        name = interface["ifname"]
+        if kind.lower() in tunnel_kinds or re.fullmatch(
+                r"(?:tun|tap|wg|tailscale|vpn)[A-Za-z0-9_.:-]*", name):
             return True
+    for family in ("-4", "-6"):
+        rc, stdout, _ = read_command(["ip", family, "route", "show", "table", "main"])
+        if rc:
+            raise PreflightError("Cannot inspect kernel route inventory")
+        for route in stdout.splitlines():
+            if re.search(r"\bdev\s+(?:tun|tap|wg|tailscale|vpn)[A-Za-z0-9_.:-]*\b", route):
+                return True
     return False
 
 

@@ -48,7 +48,7 @@ test('Linux full-device preflight is read-only, pinned and fail-closed across re
     const desired=path.join(root,'state','desired-state');
     fs.writeFileSync(desired,'off\n',{mode:0o600});
 
-    // Exactly three read-only command shapes are supported by this fixture.
+    // Only the explicitly scoped read-only network observations are supported.
     const fake = [
       '#!/usr/bin/env python3',
       'import os,sys,pathlib',
@@ -61,9 +61,18 @@ test('Linux full-device preflight is read-only, pinned and fail-closed across re
       '  if case=="external-vpn":print("IPbaz:vpn")',
       '  if case=="external-tun":print("tailscale0:tun")',
       '  sys.exit(0)',
+      'if tool=="ip" and a==["-j","-d","link","show"]:',
+      '  if case=="unknown-link":sys.exit(3)',
+      '  if case=="malformed-link":print("not-json");sys.exit(0)',
+      '  if case=="manual-link-tun":print(\'[{"ifname":"customdev0","linkinfo":{"info_kind":"tun"},"operstate":"UNKNOWN"}]\');sys.exit(0)',
+      '  print(\'[{"ifname":"enp1s0","operstate":"UP","link_type":"ether"}]\')',
+      '  sys.exit(0)',
       'if tool=="ip" and a==["-4","route","show","table","main"]:',
       '  print("default via 192.0.2.1 dev enp1s0")',
       '  if case=="manual-tun-route":print("0.0.0.0/1 dev tun1")',
+      '  sys.exit(0)',
+      'if tool=="ip" and a==["-6","route","show","table","main"]:',
+      '  if case=="manual-ipv6-tun-route":print("fd00::/64 dev tun77")',
       '  sys.exit(0)',
       'if tool=="ip" and a[:3]==["-6","route","get"] and len(a)==4:',
       '  if case=="ipv6-route":print(a[3]+" via fe80::1 dev enp1s0 src 2001:db8::2");sys.exit(0)',
@@ -108,6 +117,10 @@ test('Linux full-device preflight is read-only, pinned and fail-closed across re
       'external-vpn':'INDEPENDENT_TUNNEL_ACTIVE',
       'external-tun':'INDEPENDENT_TUNNEL_ACTIVE',
       'manual-tun-route':'INDEPENDENT_TUNNEL_ACTIVE',
+      'manual-link-tun':'INDEPENDENT_TUNNEL_ACTIVE',
+      'manual-ipv6-tun-route':'INDEPENDENT_TUNNEL_ACTIVE',
+      'unknown-link':'ACTIVE_TUNNEL_INVENTORY_UNKNOWN',
+      'malformed-link':'ACTIVE_TUNNEL_INVENTORY_UNKNOWN',
       'unknown-nm':'ACTIVE_TUNNEL_INVENTORY_UNKNOWN',
       'ipv6-route':'PUBLIC_IPV6_ROUTE_PRESENT',
       'ipv6-error':'IPV6_ROUTE_STATUS_UNKNOWN'
