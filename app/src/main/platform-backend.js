@@ -292,7 +292,10 @@ class Backend {
         !['udp', 'tcp'].includes(protocol)) {
       throw new Error('Independently authenticated CA, CN, endpoint and protocol are required.');
     }
-    if (typeof profilePath !== 'string' || !path.isAbsolute(profilePath) ||
+    // Windows UNC/device paths can trigger network or device access even in
+    // an "offline" inspection. Accept only conventional local drive paths.
+    if (typeof profilePath !== 'string' || !/^[A-Za-z]:\\/.test(profilePath) ||
+        !path.win32.isAbsolute(profilePath) ||
         !/\.ovpn$/i.test(profilePath) || profilePath.includes('\0')) {
       throw new Error('Select a local .ovpn through the native chooser.');
     }
@@ -305,14 +308,18 @@ class Backend {
     }
     this.operatorProfileTaskBusy = true;
     try {
-      // Hold the descriptor and read at most 128KiB, so a path replacement
-      // cannot make an unbounded or unexpected profile enter the checker.
+      // Hold the descriptor and read at most 128KiB. Windows lacks Node's
+      // O_NOFOLLOW flag: verify same on-disk object as the earlier lstat.
+      const sameFile = (a, b) => a.isFile() && b.isFile() &&
+        a.dev === b.dev && a.ino === b.ino &&
+        a.size === b.size && a.mtimeMs === b.mtimeMs;
       const fd = fs.openSync(profilePath, 'r');
       let bytes;
       try {
         const stat = fs.fstatSync(fd);
-        if (!stat.isFile() || stat.size < 1 || stat.size > 131072) {
-          throw new Error('Profile size or type changed before inspection.');
+        if (!sameFile(inspected, stat) ||
+            stat.size < 1 || stat.size > 131072) {
+          throw new Error('Profile file identity or size changed before inspection.');
         }
         const chunk = Buffer.alloc(stat.size);
         let n = 0;
@@ -322,14 +329,22 @@ class Backend {
           n += got;
         }
         const trailing = Buffer.alloc(1);
-        if (n !== chunk.length || fs.readSync(fd, trailing, 0, 1, null) !== 0) {
+        if (n !== chunk.length || fs.readSync(fd, trailing, 0, 1, null) !== 0 ||
+            !sameFile(stat, fs.fstatSync(fd)) ||
+            !sameFile(stat, fs.lstatSync(profilePath))) {
           throw new Error('The selected profile changed during inspection.');
         }
         bytes = chunk;
       } finally { fs.closeSync(fd); }
+      // Never normalize malformed UTF-8 to replacement characters before
+      // validating the pinned certificate and key.
+      const profileText = bytes.toString('utf8');
+      if (!Buffer.from(profileText, 'utf8').equals(bytes)) {
+        throw new Error('Profile is not valid UTF-8.');
+      }
       const profileSha256 = crypto.createHash('sha256').update(bytes).digest('hex');
       const payload = JSON.stringify({
-        text: bytes.toString('utf8'), caSha256: ca, peerCN: cn, host, port, protocol
+        text: profileText, caSha256: ca, peerCN: cn, host, port, protocol
       });
       // Only this constant script enters PowerShell argv. The profile (with
       // private key) passes on stdin, never argv, environment or diagnostic log.

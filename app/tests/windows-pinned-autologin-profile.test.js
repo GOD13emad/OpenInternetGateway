@@ -83,6 +83,7 @@ test('Windows Electron backend privately inspects a synthetic pinned AUTLOGIN .o
   const b=new Backend({version:'offline-QA',resourcesPath:temp,appPath:root,userData:temp});
   b.backendRoot=path.join(root,'backend','windows');
   const previous=fs.readdirSync(temp).sort();
+  const originalBytes=fs.readFileSync(profile);
   const result=await b.inspectWindowsPinnedAutologinProfile(profile,pins);
   assert.equal(result.inspectedOffline,true);
   assert.equal(result.valid,true);
@@ -103,6 +104,42 @@ test('Windows Electron backend privately inspects a synthetic pinned AUTLOGIN .o
   await assert.rejects(b.inspectWindowsPinnedAutologinProfile(profile,{...pins,port:0}),/Independently authenticated/);
   fs.writeFileSync(profile,'x'.repeat(131073));
   await assert.rejects(b.inspectWindowsPinnedAutologinProfile(profile,pins),/bounded regular file/);
+  // No network/device paths should reach lstat/open at all.
+  await assert.rejects(b.inspectWindowsPinnedAutologinProfile(
+    '\\\\remote.example.test\\share\\profile.ovpn',pins),/Select a local/);
+  await assert.rejects(b.inspectWindowsPinnedAutologinProfile(
+    '\\\\?\\C:\\Temp\\profile.ovpn',pins),/Select a local/);
+  // Reject invalid UTF-8 bytes instead of silently replacing them.
+  fs.writeFileSync(profile,Buffer.concat([
+    Buffer.from('client\n'),Buffer.from([0xff]),originalBytes.subarray(7)
+  ]));
+  await assert.rejects(b.inspectWindowsPinnedAutologinProfile(profile,pins),/valid UTF-8/);
+  fs.writeFileSync(profile,originalBytes);
+  // Deterministically replace the chosen file after lstat but just before
+  // open: this must fail by file identity, without running PowerShell.
+  const savedOpen=fs.openSync;
+  const backup=profile+'.previous';
+  let swapped=false;
+  fs.openSync=function(file,...args){
+    if(!swapped && file===profile){
+      swapped=true;
+      fs.renameSync(profile,backup);
+      fs.writeFileSync(profile,originalBytes);
+    }
+    return savedOpen.call(fs,file,...args);
+  };
+  try{
+    await assert.rejects(b.inspectWindowsPinnedAutologinProfile(profile,pins),
+      /file identity or size changed before inspection/);
+  }finally{
+    fs.openSync=savedOpen;
+    if(swapped){
+      fs.unlinkSync(profile);
+      fs.renameSync(backup,profile);
+    }
+  }
+  assert.equal(swapped,true);
+  assert.equal(b.operatorProfileTaskBusy,false);
   assert.deepEqual(fs.readdirSync(temp).sort(),previous);
  }finally{fs.rmSync(temp,{recursive:true,force:true});}
 });
