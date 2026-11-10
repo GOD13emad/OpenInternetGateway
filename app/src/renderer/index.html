@@ -258,7 +258,9 @@
             <div class="button-row">
               <button class="btn secondary" id="operatorStageButton">Select and validate .ovpn</button>
               <button class="btn ghost" id="operatorNativeCheckButton" disabled>Check NetworkManager import (no connection)</button>
+              <button class="btn ghost" id="operatorFullDevicePreflightButton" disabled>Check full-device feasibility (read-only)</button>
             </div>
+            <p class="measurement-note" id="operatorFullDevicePreflightStatus">Read-only full-device feasibility has not been checked. This does not start or enable any tunnel.</p>
             <div class="operator-import-fields" id="operatorTrialFields">
               <label for="operatorUsername">Provider username (temporary)</label>
               <input id="operatorUsername" type="text" maxlength="96" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="Provider login username">

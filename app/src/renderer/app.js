@@ -587,9 +587,11 @@ async function loadOperatorProfileStatus() {
     setText('operatorStageStatus', label);
     state.operatorStaged = !!info?.staged;
     $('operatorNativeCheckButton').disabled = !info?.staged;
+    $('operatorFullDevicePreflightButton').disabled = !info?.staged;
     $('operatorTrialButton').disabled = !info?.staged || !$('operatorTrialConsent').checked || state.freeCredentialsBusy;
   } catch {
     setText('operatorStageStatus', 'Offline operator-profile status unavailable; no connection was attempted.');
+    $('operatorFullDevicePreflightButton').disabled = true;
   }
 }
 
@@ -616,6 +618,42 @@ async function checkOperatorNativeCompatibility() {
     } catch {
       button.disabled = true;
     }
+  }
+}
+
+async function checkOperatorFullDevicePreflight() {
+  if (state.busy || state.platform?.platform !== 'linux') return;
+  const button = $('operatorFullDevicePreflightButton');
+  button.disabled = true;
+  try {
+    const result = await window.gateway.operatorFullDevicePreflight();
+    if (result?.ok !== true || result?.activationRequested !== false ||
+        result?.fullDevicePathEnabled !== false ||
+        result?.fullDeviceTunnelVerified !== false ||
+        result?.independentRollbackArmed !== false ||
+        !Array.isArray(result?.blockers)) {
+      throw new Error('Full-device readiness observation was incomplete.');
+    }
+    const messages = {
+      DESIRED_STATE_NOT_VERIFIED_OFF: 'OIG desired state is not verified OFF',
+      INDEPENDENT_TUNNEL_ACTIVE: 'another VPN/tunnel is active',
+      ACTIVE_TUNNEL_INVENTORY_UNKNOWN: 'active tunnel inventory is unavailable',
+      PUBLIC_IPV6_ROUTE_PRESENT: 'public IPv6 may bypass the intended tunnel',
+      IPV6_ROUTE_STATUS_UNKNOWN: 'IPv6 route status is unverified'
+    };
+    const reasons = result.blockers.map(reason => messages[reason] || 'unknown safety observation');
+    const observation = reasons.length
+      ? 'Blocked: ' + reasons.join('; ') + '.'
+      : 'No conflicting tunnel or representative public IPv6 route observed.';
+    setText('operatorFullDevicePreflightStatus', observation +
+      ' Read-only check: full-device activation and independent active-tunnel rollback are NOT enabled or verified.');
+    showToast('Full-device feasibility checked without connecting a VPN.');
+  } catch (error) {
+    setText('operatorFullDevicePreflightStatus',
+      'Full-device preflight unavailable. No VPN connection was attempted.');
+    showToast(userErrorMessage(error, 'Read-only full-device preflight rejected.'), true);
+  } finally {
+    button.disabled = !state.operatorStaged;
   }
 }
 
@@ -749,6 +787,7 @@ async function init() {
   $('openLogs').addEventListener('click', () => window.gateway.openLogs());
   $('operatorStageButton').addEventListener('click', stageOperatorProfileFromPicker);
   $('operatorNativeCheckButton').addEventListener('click', checkOperatorNativeCompatibility);
+  $('operatorFullDevicePreflightButton').addEventListener('click', checkOperatorFullDevicePreflight);
   $('operatorFreeCredentialsButton').addEventListener('click', loadFreeVpnBookCredentials);
   $('operatorTrialConsent').addEventListener('change', () => {
     $('operatorTrialButton').disabled = !state.operatorStaged || !$('operatorTrialConsent').checked || state.freeCredentialsBusy;

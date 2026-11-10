@@ -9,6 +9,7 @@ contextBridge.exposeInMainWorld('gateway', {
   platform: () => ipcRenderer.invoke('gateway:platform'),
   operatorProfileStatus: () => ipcRenderer.invoke('gateway:operatorProfileStatus'),
   operatorNativeCheck: () => ipcRenderer.invoke('gateway:operatorNativeCheck'),
+  operatorFullDevicePreflight: () => ipcRenderer.invoke('gateway:operatorFullDevicePreflight'),
   freeVpnBookCredentials: () => ipcRenderer.invoke('gateway:freeVpnBookCredentials'),
   operatorTrial: (username, password) => ipcRenderer.invoke('gateway:operatorTrial', { username, password }),
   stageOperatorProfile: (caSha256, peerCN) => ipcRenderer.invoke('gateway:stageOperatorProfile', { caSha256, peerCN }),

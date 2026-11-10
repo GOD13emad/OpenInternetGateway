@@ -362,6 +362,49 @@ class Backend {
     return fetchPublicLogin();
   }
 
+  // Pure, read-only feasibility observation. This is NOT a full-device
+  // trial action; the separate live-route and rollback gate is not enabled.
+  async checkOperatorFullDevicePreflight() {
+    if (this.platform !== 'linux' || !this.backendRoot) {
+      throw new Error('Full-device preflight is Linux-only.');
+    }
+    if (this.operatorTrialBusy || this.operatorProfileTaskBusy ||
+        this.operatorUpdateBusy || this.gatewayActionCount > 0) {
+      throw new Error('Wait for current gateway tasks before a read-only preflight.');
+    }
+    if (this.operatorProfileStatus().staged !== true) {
+      throw new Error('A pinned offline provider profile must be staged first.');
+    }
+    const dir = path.join(this.backendRoot, 'common', 'operator-profiles');
+    const meta = this._readJson(path.join(dir, 'current.json'), {}) || {};
+    const helper = path.join(this.backendRoot, 'linux', 'operator_full_device.py');
+    if (!fs.existsSync(helper)) {
+      throw new Error('Read-only full-device preflight helper is unavailable.');
+    }
+    this.operatorProfileTaskBusy = true;
+    try {
+      const result = await run('python3', [
+        '-B', helper, 'preflight', '--profile', path.join(dir, meta.profile),
+        '--ca-sha256', meta.caDerSha256, '--peer-cn', meta.expectedPeerCN,
+        '--desired-state', path.join(this.backendRoot, 'state', 'desired-state')
+      ], { cwd: this.backendRoot, timeout: 26000 });
+      const data = JSON.parse(result.stdout || '{}');
+      if (data.ok !== true || !Array.isArray(data.blockers) ||
+          data.mode !== 'read-only-full-device-preflight' ||
+          data.pinnedProviderProfileChecked !== true ||
+          data.activationRequested !== false ||
+          data.independentRollbackArmed !== false ||
+          data.fullDevicePathEnabled !== false ||
+          data.fullDeviceTunnelVerified !== false ||
+          data.readyForAutomaticConnection !== false) {
+        throw new Error('Full-device feasibility observation was not fail-closed.');
+      }
+      return data;
+    } finally {
+      this.operatorProfileTaskBusy = false;
+    }
+  }
+
   async operatorConnectionTrial(username, password) {
     if (this.platform !== 'linux' || !this.backendRoot) {
       throw new Error('Isolated provider trial is available only on Linux.');
