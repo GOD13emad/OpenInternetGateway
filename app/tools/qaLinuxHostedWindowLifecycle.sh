@@ -112,10 +112,19 @@ if [[ "${OIG_QA_X11_CHILD:-0}" == 1 ]]; then
   set +e; wait "$mainpid"; rc=$?; set -e
   mainpid=''
   [[ "$rc" == 0 && "$(cat "$OIG_HOME/state/desired-state")" == off ]] || exit 83
+  # The hosted runner has no NetworkManager daemon or live OIG VPN. Verify
+  # that the real packaged quit invoked only read-only empty-NM queries.
+  [[ -s "$work/nmcli-readonly.log" ]] || { echo NM_FIXTURE_WAS_NOT_EXERCISED >&2; exit 84; }
+  grep -q 'UUID,NAME connection show' "$work/nmcli-readonly.log" || exit 84
+  if grep -Eq 'connection (down|delete|up|add|modify|import)' "$work/nmcli-readonly.log"; then
+    echo UNEXPECTED_NM_MUTATION_ATTEMPT >&2
+    exit 84
+  fi
+  echo 'NATIVE_QUIT_NO_ACTIVE_VPN_WITH_READONLY_EMPTY_NM_PASS=true'
   python3 - "$window" "$reopenedWindow" <<'PY'
 import datetime,hashlib,json,os,pathlib,sys
 p=pathlib.Path(os.environ['RUNNER_TEMP'])/'oig-linux-window-lifecycle-receipt.json'
-d={'head':os.environ['GITHUB_SHA'],'scope':'Disposable GitHub Ubuntu runner, exact built DEB extracted into scratch, root:root 4755 Chromium sandbox, Xvfb/Openbox/tint2; no owner GUI or VPN','windowIdBeforeClose':sys.argv[1],'windowIdAfterReopen':sys.argv[2],'nativeCloseRemovedVisibleDashboard':True,'mainRemainedRunning':True,'secondInstanceReopenedDashboard':True,'quitExitedZero':True,'desiredOff':True,'sandboxEnabled':True,'pass':True,'utc':datetime.datetime.now(datetime.timezone.utc).isoformat()}
+d={'head':os.environ['GITHUB_SHA'],'scope':'Disposable hosted Ubuntu, real packaged DEB with 4755 Chromium sandbox, Xvfb/Openbox/tint2, private read-only empty-NetworkManager fixture; actual connected VPN rollback tested separately, no owner GUI/VPN','windowIdBeforeClose':sys.argv[1],'windowIdAfterReopen':sys.argv[2],'nativeCloseRemovedVisibleDashboard':True,'mainRemainedRunning':True,'secondInstanceReopenedDashboard':True,'quitExitedZero':True,'desiredOff':True,'emptyNmFixtureReadOnly':True,'actualVpnDisconnectExercised':False,'sandboxEnabled':True,'pass':True,'utc':datetime.datetime.now(datetime.timezone.utc).isoformat()}
 p.write_text(json.dumps(d,sort_keys=True,indent=2)+'\n')
 print('LINUX_HOSTED_PACKAGED_WINDOW_LIFECYCLE_PASS=true')
 print('RECEIPT_SHA256='+hashlib.sha256(p.read_bytes()).hexdigest())
@@ -126,7 +135,7 @@ fi
 [[ $# -eq 1 && -f "$1" && "$1" == *.deb ]] || exit 84
 work="$(mktemp -d "${RUNNER_TEMP:?}/oig-linux-x11-${GITHUB_RUN_ID}-XXXXXXXX")"
 umask 077
-mkdir -p "$work/image" "$work/home/.config" "$work/home/.cache" "$work/home/.local/share/OpenInternetGateway/state" "$work/home/.local/state" "$work/runtime"
+mkdir -p "$work/bin" "$work/image" "$work/home/.config" "$work/home/.cache" "$work/home/.local/share/OpenInternetGateway/state" "$work/home/.local/state" "$work/runtime"
 chmod 700 "$work/home" "$work/runtime"
 printf 'off\n' >"$work/home/.local/share/OpenInternetGateway/state/desired-state"
 dpkg-deb -x "$1" "$work/image"
@@ -137,6 +146,21 @@ helper="$work/image/opt/open-internet-gateway/chrome-sandbox"
 sudo chown root:root "$helper"
 sudo chmod 4755 "$helper"
 [[ "$(stat -Lc '%u:%g:%a' "$helper")" == 0:0:4755 ]] || exit 86
+# The separately-tested provider data plane needs a real NetworkManager;
+# this window-lifecycle test only covers Quit while no OIG VPN was ever started.
+# Route every nmcli invocation to a private fail-closed empty-NM fixture.
+cat >"$work/bin/nmcli" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+: "${OIG_QA_X11_ROOT:?}"
+printf '%s\n' "$*" >>"$OIG_QA_X11_ROOT/nmcli-readonly.log"
+case " $* " in
+  *" connection show "*|*" device show "*|*" device status "*) exit 0 ;;
+  *) echo CI_NMCLI_MUTATION_FORBIDDEN >&2; exit 93 ;;
+esac
+SH
+chmod 700 "$work/bin/nmcli"
+export PATH="$work/bin:$PATH"
 export OIG_QA_X11_ROOT="$work" OIG_QA_X11_EXE="$exe"
 export HOME="$work/home" XDG_RUNTIME_DIR="$work/runtime"
 export XDG_CONFIG_HOME="$work/home/.config" XDG_CACHE_HOME="$work/home/.cache"
