@@ -19,6 +19,23 @@ const launchIntent = quitRequestedAtLaunch ? 'quit' : 'show';
 const gotSingleInstanceLock = app.requestSingleInstanceLock({ intent: launchIntent });
 if (!gotSingleInstanceLock) app.quit();
 
+// Only enabled for explicit disposable GitHub-hosted window-lifecycle QA.
+// Never log personal state or network details in production.
+function traceQaWindow(event) {
+  if (process.env.OIG_QA_WINDOW_TRACE !== '1' ||
+      process.env.RUNNER_ENVIRONMENT !== 'github-hosted') return;
+  const state = {
+    pid: process.pid,
+    live: isLiveWindow(),
+    visible: isLiveWindow() ? mainWindow.isVisible() : null,
+    quitting: !!app.isQuitting,
+    quitInProgress,
+    allowQuit
+  };
+  console.info('OIG_QA_WINDOW_EVENT ' + event + ' ' + JSON.stringify(state));
+}
+traceQaWindow('first-lock-' + (gotSingleInstanceLock ? 'yes' : 'no'));
+
 function asset(name) {
   return path.join(__dirname, '..', '..', 'assets', name);
 }
@@ -49,6 +66,7 @@ function createWindow({ showWhenReady = !startInBackground } = {}) {
   win.loadFile(path.join(__dirname, '..', 'renderer', 'index.html'));
   win.once('ready-to-show', () => {
     if (showWhenReady && !app.isQuitting && isLiveWindow(win)) win.show();
+    traceQaWindow('ready-to-show');
     if (process.env.OIG_CAPTURE_PATH && isLiveWindow(win)) {
       setTimeout(async () => {
         try {
@@ -68,9 +86,11 @@ function createWindow({ showWhenReady = !startInBackground } = {}) {
     }
   });
   win.on('close', event => {
+    traceQaWindow('close-before');
     if (app.isQuitting) return;
     event.preventDefault();
     if (isLiveWindow(win)) win.hide();
+    traceQaWindow('close-after-hide');
   });
   win.on('closed', () => {
     if (mainWindow === win) mainWindow = null;
@@ -79,7 +99,11 @@ function createWindow({ showWhenReady = !startInBackground } = {}) {
 }
 
 function showDashboard() {
-  if (quitInProgress || allowQuit || app.isQuitting) return false;
+  traceQaWindow('show-requested');
+  if (quitInProgress || allowQuit || app.isQuitting) {
+    traceQaWindow('show-suppressed');
+    return false;
+  }
   if (!isLiveWindow(mainWindow)) {
     createWindow({ showWhenReady: true });
     return true;
@@ -87,6 +111,7 @@ function showDashboard() {
   if (mainWindow.isMinimized()) mainWindow.restore();
   mainWindow.show();
   mainWindow.focus();
+  traceQaWindow('show-after');
   return true;
 }
 
@@ -288,6 +313,7 @@ function requestProcessExitPreservingTunnel() {
 if (gotSingleInstanceLock) {
 app.on('second-instance', (_event, argv, _workingDirectory, additionalData) => {
     const intent = additionalData?.intent || (argv.includes('--quit') ? 'quit' : 'show');
+    traceQaWindow('second-instance-' + intent);
     if (intent === 'quit') { requestQuit(); return; }
     showDashboard();
   });

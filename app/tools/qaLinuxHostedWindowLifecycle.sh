@@ -28,6 +28,7 @@ if [[ "${OIG_QA_X11_CHILD:-0}" == 1 ]]; then
   done
   xprop -root _NET_SUPPORTING_WM_CHECK | grep -q 'window id' || exit 72
 
+  export OIG_QA_WINDOW_TRACE=1
   "$exe" >"$work/app.log" 2>&1 & mainpid=$!
   window=''
   for _ in $(seq 1 160); do
