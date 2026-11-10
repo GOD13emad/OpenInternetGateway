@@ -119,6 +119,24 @@ jobs:
             throw 'NSIS silent uninstall left executable behind'
           }
           Write-Host 'NSIS silent uninstall PASS (disposable runner)'
+      - name: Verify native Windows update apply and relaunch on disposable runner
+        shell: pwsh
+        timeout-minutes: 7
+        working-directory: app
+        run: |
+          $ErrorActionPreference='Stop'
+          $version=(Get-Content ./package.json -Raw|ConvertFrom-Json).version
+          $setup=Join-Path (Get-Location) ('dist/OpenInternetGateway-Setup-'+$version+'.exe')
+          if(!(Test-Path -LiteralPath $setup -PathType Leaf)){throw 'Updater QA setup missing'}
+          $hash=(Get-FileHash -LiteralPath $setup -Algorithm SHA256).Hash.ToLowerInvariant()
+          & ./tools/qaWindowsHostedUpdateApply.ps1 -Installer $setup -ExpectedSha256 $hash -Version $version
+          if($LASTEXITCODE -ne 0){throw 'NATIVE_WINDOWS_UPDATE_APPLY_NOT_ACCEPTED'}
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: windows-native-update-apply-receipt
+          path: ${{ runner.temp }}/oig-hosted-update-apply-receipt.json
+          if-no-files-found: warn
       - uses: actions/upload-artifact@v7
         with:
           name: windows-installer
