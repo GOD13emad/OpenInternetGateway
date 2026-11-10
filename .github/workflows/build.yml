@@ -119,9 +119,11 @@ jobs:
             throw 'NSIS silent uninstall left executable behind'
           }
           Write-Host 'NSIS silent uninstall PASS (disposable runner)'
-      - name: Verify native Windows update apply and relaunch on disposable runner
+      - name: Verify published-stable to QA in-place Windows updater on disposable runner
         shell: pwsh
-        timeout-minutes: 7
+        timeout-minutes: 12
+        env:
+          GH_TOKEN: ${{ github.token }}
         working-directory: app
         run: |
           $ErrorActionPreference='Stop'

@@ -1,4 +1,4 @@
-# Real updater apply acceptance on a disposable GitHub-hosted Windows runner ONLY.
+# Real IN-PLACE v2.5.19 -> v2.5.20 updater acceptance on a disposable GitHub-hosted Windows runner ONLY.
 param(
   [Parameter(Mandatory=$true)][string]$Installer,
   [Parameter(Mandatory=$true)][string]$ExpectedSha256,
@@ -15,8 +15,29 @@ if($actual -ne $ExpectedSha256.ToLowerInvariant()){throw 'Installer SHA-256 mism
 $scratch=Join-Path $env:RUNNER_TEMP ('oig-hosted-update-apply-'+$env:GITHUB_RUN_ID)
 $receipt=Join-Path $env:RUNNER_TEMP 'oig-hosted-update-apply-receipt.json'
 $target=Join-Path $env:LOCALAPPDATA 'Programs\open-internet-gateway\Open Internet Gateway.exe'
+$priorVersion='2.5.19'
+$priorSha256='761637b5d49f37858973300ec2e9b1bb2b32c684ebabe86f1e8718b4480685db'
 if((Test-Path -LiteralPath $scratch) -or (Test-Path -LiteralPath $receipt)){throw 'Preexisting updater scratch or receipt.'}
 if(Test-Path -LiteralPath $target){throw 'Existing installed app; no overwrite permitted.'}
+# Use the immutable, already published public stable installer as a real prior-version
+# fixture. This must never run on an owner workstation; guard above is mandatory.
+if([string]::IsNullOrWhiteSpace($env:GH_TOKEN)){throw 'Hosted GitHub release token is missing.'}
+New-Item -ItemType Directory -Path $scratch -Force | Out-Null
+$oldSetup=Join-Path $scratch ('OpenInternetGateway-Setup-'+$priorVersion+'.exe')
+& gh release download ('v'+$priorVersion) --repo GOD13emad/OpenInternetGateway --pattern ('OpenInternetGateway-Setup-'+$priorVersion+'.exe') --dir $scratch
+if($LASTEXITCODE -ne 0 -or !(Test-Path -LiteralPath $oldSetup -PathType Leaf)){throw 'Pinned published stable installer unavailable.'}
+$oldHash=(Get-FileHash -LiteralPath $oldSetup -Algorithm SHA256).Hash.ToLowerInvariant()
+if($oldHash -ne $priorSha256){throw 'Pinned previous published installer SHA-256 mismatch.'}
+$oldInstall=Start-Process -FilePath $oldSetup -ArgumentList '/S' -PassThru -Wait
+if($oldInstall.ExitCode -ne 0){throw ('Published stable NSIS install returned '+$oldInstall.ExitCode)}
+if(!(Test-Path -LiteralPath $target -PathType Leaf)){throw 'Published stable installer did not create per-user executable.'}
+$previousInstalledVersion=[string](Get-Item -LiteralPath $target).VersionInfo.ProductVersion
+if(!$previousInstalledVersion.StartsWith($priorVersion)){throw 'Wrong version after installing published stable.'}
+$previousExeSha=(Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash.ToLowerInvariant()
+$asarPath=Join-Path (Split-Path -Parent $target) 'resources\app.asar'
+if(!(Test-Path -LiteralPath $asarPath -PathType Leaf)){throw 'Published stable installed app.asar missing.'}
+$previousAsarSha=(Get-FileHash -LiteralPath $asarPath -Algorithm SHA256).Hash.ToLowerInvariant()
+Write-Host ('Verified published stable installation: '+$previousInstalledVersion)
 $service=Get-Service OVPNConnectorService -ErrorAction SilentlyContinue
 $before=if($null -eq $service){'Missing'}else{$service.Status.ToString()}
 $oldAppData=$env:APPDATA;$oldCaptureOnly=$env:OIG_CAPTURE_ONLY;$oldCaptureRoot=$env:OIG_CAPTURE_ROOT;$oldCapturePath=$env:OIG_CAPTURE_PATH
@@ -67,6 +88,10 @@ try {
   if(!(Test-Path -LiteralPath $target -PathType Leaf)){throw 'Updated installed EXE missing.'}
   $detected=[string](Get-Item -LiteralPath $target).VersionInfo.ProductVersion
   if(!$detected.StartsWith($Version)){throw 'Installed version mismatch.'}
+  $updatedExeSha=(Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash.ToLowerInvariant()
+  if(!(Test-Path -LiteralPath $asarPath -PathType Leaf)){throw 'Updated installed app.asar missing.'}
+  $updatedAsarSha=(Get-FileHash -LiteralPath $asarPath -Algorithm SHA256).Hash.ToLowerInvariant()
+  if($updatedAsarSha -eq $previousAsarSha){throw 'Updated app.asar is unchanged from published stable.'}
   $deadline=(Get-Date).AddSeconds(45)
   while(!(Test-Path -LiteralPath $frame -PathType Leaf)){
     if((Get-Date) -ge $deadline){throw 'No relaunched installed Dashboard screenshot.'}
@@ -89,10 +114,14 @@ try {
   [pscustomobject]@{
     pass=$true;scope='disposable GitHub-hosted Windows runner only';version=$Version
     installerSHA256=$actual;installedVersion=$detected;installScope='current-user'
+    publishedPriorInstallerSHA256=$priorSha256;previousVersion=$previousInstalledVersion
+    previousExeSHA256=$previousExeSha;updatedExeSHA256=$updatedExeSha
+    previousAsarSHA256=$previousAsarSha;updatedAsarSHA256=$updatedAsarSha
+    inPlaceUpgradeVerified=$true
     nativeHandoff=$true;nativeApply=$true;nativeRelaunch=$true;captureDimensions=$dimensions
     silentUninstall=$true;connectorServiceUnchanged=$true
   } | ConvertTo-Json -Compress |Set-Content -LiteralPath $receipt -Encoding UTF8
-  Write-Host ('Windows native updater apply/relaunch/uninstall PASS; Dashboard '+$dimensions)
+  Write-Host ('Windows published v2.5.19 -> v2.5.20 in-place updater apply/relaunch/uninstall PASS; Dashboard '+$dimensions)
 } finally {
   $env:APPDATA=$oldAppData;$env:OIG_CAPTURE_ONLY=$oldCaptureOnly
   $env:OIG_CAPTURE_ROOT=$oldCaptureRoot;$env:OIG_CAPTURE_PATH=$oldCapturePath
