@@ -160,15 +160,17 @@ async function refreshStatus(silent = true) {
 async function reconcileStartupTunnel(initialStatus) {
   const s = initialStatus || {};
   if (s.connected || s.desiredState !== 'on' || !s.autoRecovery) return s;
-  setBusy(true, 'ensure', 'Restoring the protected tunnel requested before the app was reopened…');
+  setBusy(true, 'ensure', 'Restoring the previously requested VPN tunnel…');
   try {
     const result = await window.gateway.action('ensure');
     const finalStatus = result?.status || await window.gateway.status();
     renderStatus(finalStatus);
-    if (finalStatus?.connected) showToast('Previous protected tunnel restored.');
+    if (finalStatus?.connected) showToast(finalStatus.serverIdentityVerified === true
+      ? 'Verified VPN tunnel restored.'
+      : 'VPN tunnel restored; relay identity remains unverified.');
     return finalStatus;
   } catch (e) {
-    showToast(e.message || 'Could not restore the previous protected tunnel.', true);
+    showToast(e.message || 'Could not restore the previously requested VPN tunnel.', true);
     return await refreshStatus(true);
   } finally {
     setBusy(false);
