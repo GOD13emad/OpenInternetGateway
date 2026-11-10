@@ -28,7 +28,27 @@ if cmd=='curl':
 elif cmd=='getent':
     print('8.8.8.8 STREAM dns.google')
 elif cmd=='systemctl':
-    sys.exit(1)  # recovery timer is disabled in isolated test home
+    recovery=os.environ.get('OIG_RECOVERY_FIXTURE','disabled')
+    unit='openinternetgateway-recovery.service'
+    timer='openinternetgateway-recovery.timer'
+    if args==['--user','is-enabled',timer]:
+        if recovery=='disabled': sys.exit(1)
+        print('enabled')
+    elif args==['--user','show','-P','Environment',unit]:
+        if recovery=='missing_service': sys.exit(1)
+        if recovery=='foreign':
+            print('OIG_HOME=/tmp/foreign OIG_COMMON=/tmp/foreign/common')
+        elif recovery=='missing_env':
+            print('OIG_COMMON='+os.environ['OIG_COMMON'])
+        else:
+            print('OIG_HOME='+os.environ['OIG_HOME']+' OIG_COMMON='+os.environ['OIG_COMMON'])
+    elif args==['--user','show','-P','ExecStart',unit]:
+        root=('/tmp/foreign' if recovery=='wrong_exec' else os.environ['OIG_HOME'])
+        print('{ path=/bin/bash ; argv[]=/bin/bash '+root+'/linux/oig-linux.sh ensure ; ignore_errors=no }')
+    elif args==['--user','is-active',timer]:
+        print('active')
+    else:
+        raise RuntimeError('Unexpected systemctl argv: '+repr(args))
 elif cmd=='nmcli':
     if args==['-t','-f','NAME,TYPE,DEVICE','connection','show','--active']:
         print('Home Ethernet:802-3-ethernet:enp1s0')
@@ -78,7 +98,7 @@ else:
 '''
 
 
-def verify_case(name, expect_connected):
+def verify_case(name, expect_connected, recovery='disabled'):
     with tempfile.TemporaryDirectory(prefix="oig-owned-tunnel-status-") as d:
         root = pathlib.Path(d)
         stubs = root / "bin"
@@ -95,12 +115,16 @@ def verify_case(name, expect_connected):
                "OIG_HOME": str(root / "home"),
                "OIG_COMMON": str(root / "home" / "common"),
                "OIG_ROUTE_FIXTURE": name,
+               "OIG_RECOVERY_FIXTURE": recovery,
                "PYTHONDONTWRITEBYTECODE": "1"}
         done = subprocess.run(["/bin/bash", str(SOURCE), "status"], env=env,
                               capture_output=True, text=True, timeout=8)
         assert done.returncode == 0, (name, done.stderr, done.stdout)
         status = json.loads(done.stdout)
         assert status["desiredState"] == "off", (name, status)
+        assert status["autoRecovery"] is (recovery == 'owned'), (name, recovery, status)
+        expected_state = 'Missing' if recovery == 'disabled' else ('active' if recovery == 'owned' else 'Unverified')
+        assert status["autoRecoveryState"] == expected_state, (name, recovery, status)
         assert status["managedTunnelActive"] == (name != "foreign_tun"), (name,status)
         assert status["fullRoutes"] == (2 if expect_connected or name in ("foreign_ipv6","foreign_ipv6_upper","ipv6_probe_error") else 0), (name,status)
         assert status["connected"] == expect_connected, (name,status)
@@ -126,4 +150,6 @@ if __name__ == "__main__":
         ("ipv6_probe_error", False),
     ):
         verify_case(case, accepted)
-    print("PASS: only managed VPN source with owned full IPv4 routes can claim tunnel health (13 offline cases)")
+    for recovery in ('owned','foreign','wrong_exec','missing_env','missing_service'):
+        verify_case('foreign_tun', False, recovery)
+    print("PASS: only managed VPN source with owned full IPv4 routes can claim tunnel health (13 offline cases), plus 5 systemd recovery-ownership cases")

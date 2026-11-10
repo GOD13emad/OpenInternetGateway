@@ -126,6 +126,18 @@ managed_ipv6_egress_safe() {
   return 0
 }
 
+# An enabled global user timer is not proof it manages this OIG backend root.
+# A different app/QA HOME may share the same systemd user manager and unit names.
+# Query effective service properties (including overrides), never just unit files.
+recovery_unit_owned() {
+  local environment execstart
+  environment="$(systemctl --user show -P Environment openinternetgateway-recovery.service 2>/dev/null)" || return 1
+  execstart="$(systemctl --user show -P ExecStart openinternetgateway-recovery.service 2>/dev/null)" || return 1
+  [[ " $environment " == *" OIG_HOME=$OIG_HOME "* ]] || return 1
+  [[ " $environment " == *" OIG_COMMON=$OIG_COMMON "* ]] || return 1
+  [[ " $execstart " == *" argv[]=/bin/bash $OIG_HOME/linux/oig-linux.sh ensure ; "* ]] || return 1
+}
+
 json_status() {
   local cf ip loc dns poison routes iface relay auto_state auto effective desired managed_active profile_ip profile_country probe_degraded source ipv6_leak
   cf="$(curl -4 --max-time 4 -s https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null || true)"
@@ -181,8 +193,14 @@ PY
   desired="$(desired_state)"
 
   if systemctl --user is-enabled openinternetgateway-recovery.timer >/dev/null 2>&1; then
-    auto=true
-    auto_state="$(systemctl --user is-active openinternetgateway-recovery.timer 2>/dev/null || true)"
+    if recovery_unit_owned; then
+      auto=true
+      auto_state="$(systemctl --user is-active openinternetgateway-recovery.timer 2>/dev/null || true)"
+    else
+      # Enabled, but not proven to recover THIS OIG root. Fail closed.
+      auto=false
+      auto_state="Unverified"
+    fi
   else
     auto=false
     auto_state="Missing"
