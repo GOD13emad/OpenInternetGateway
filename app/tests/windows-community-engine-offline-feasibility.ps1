@@ -65,10 +65,27 @@ try{
   if((Get-FileHash -LiteralPath $binary -Algorithm SHA256).Hash.ToLowerInvariant() -cne $expectedExe){
     throw 'VERIFIED_MSI_OPENVPN_EXE_MISMATCH'
   }
+  # 7-Zip exports MSI logical file IDs with underscores, but the authenticated
+  # PE import table explicitly requires these exact hyphenated DLL names.
+  # Reconstruct only this known vendor layout; no OS installation or PATH edit.
+  $dllNames=[ordered]@{
+    'libcrypto_3_x64.dll'='libcrypto-3-x64.dll'
+    'libssl_3_x64.dll'='libssl-3-x64.dll'
+    'libpkcs11_helper_1.dll'='libpkcs11-helper-1.dll'
+  }
+  foreach($key in $dllNames.Keys){
+    $source=Join-Path $payload $key
+    $target=Join-Path $payload $dllNames[$key]
+    if(-not(Test-Path -LiteralPath $source -PathType Leaf) -or
+       (Test-Path -LiteralPath $target)){throw ('SIGNED_MSI_DLL_LAYOUT_INVALID_'+$key)}
+    Move-Item -LiteralPath $source -Destination $target
+  }
   $exe=Join-Path $payload 'openvpn.exe'
   Move-Item -LiteralPath $binary -Destination $exe
   $version=(& $exe --version 2>&1 | Out-String)
-  if($version -notmatch 'OpenVPN 2\.7\.9'){throw 'OPENVPN_VERSION_NOT_EXECUTABLE'}
+  if($version -notmatch 'OpenVPN 2\.7\.9'){
+    throw ('OPENVPN_VERSION_NOT_EXECUTABLE_EXIT_'+$LASTEXITCODE+'_OUTPUT_'+$version.Substring(0,[Math]::Min(160,$version.Length)))
+  }
   $help=(& $exe --help 2>&1 | Out-String)
   $required=@('auth-user-pass','management-query-passwords','verify-x509-name','remote-cert-tls','route-noexec')
   $matched=[ordered]@{}
