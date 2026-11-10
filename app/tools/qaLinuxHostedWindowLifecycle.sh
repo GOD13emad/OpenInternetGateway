@@ -39,7 +39,10 @@ if [[ "${OIG_QA_X11_CHILD:-0}" == 1 ]]; then
   done
   [[ -n "$window" ]] || { echo NO_VISIBLE_DASHBOARD >&2; tail -25 "$work/app.log" >&2; exit 74; }
   xwininfo -id "$window" | grep -q 'Map State: IsViewable' || exit 75
-  xdotool windowclose "$window"
+  # xdotool windowclose calls XDestroyWindow and bypasses Electron's
+  # BrowserWindow 'close' handler. wmctrl sends _NET_CLOSE_WINDOW via WM.
+  wmctrl -ic "$(printf '0x%x' "$window")"
+  echo "NATIVE_WM_CLOSE_REQUESTED=graceful"
   # Black-box UX contract: no dashboard remains visible and the background
   # process stays alive. X11 is allowed to destroy/recreate its native XID.
   hidden=false
@@ -57,6 +60,13 @@ if [[ "${OIG_QA_X11_CHILD:-0}" == 1 ]]; then
     tail -35 "$work/app.log" >&2 || :
     exit 76
   fi
+  # A true titlebar Close must execute the Electron handler, not destroy the XID.
+  if ! grep -Eq 'OIG_QA_WINDOW_EVENT close-after-hide .*"visible":false' "$work/app.log"; then
+    echo ELECTRON_CLOSE_EVENT_NOT_RECEIVED >&2
+    tail -50 "$work/app.log" >&2 || :
+    exit 76
+  fi
+  echo "ELECTRON_NATIVE_CLOSE_HANDLER_PASS=true"
   mainState="$(ps -o stat= -p "$mainpid" 2>/dev/null | tr -d ' ' || : )"
   echo "MAIN_PROCESS_STATE_AFTER_CLOSE=${mainState:-not-found} PID=$mainpid"
   if [[ -z "$mainState" || "$mainState" == *Z* ]]; then
@@ -87,6 +97,8 @@ if [[ "${OIG_QA_X11_CHILD:-0}" == 1 ]]; then
     exit 80
   fi
   xwininfo -id "$reopenedWindow" | grep -q 'Map State: IsViewable' || exit 80
+  grep -q 'OIG_QA_WINDOW_EVENT second-instance-show' "$work/app.log" || exit 80
+  grep -q 'OIG_QA_WINDOW_EVENT show-after' "$work/app.log" || exit 80
   echo "DASHBOARD_REOPENED_X11_ID=$reopenedWindow"
 
   timeout 25s "$exe" --quit >"$work/quit.log" 2>&1 || { echo QUIT_INTENT_FAILED >&2; tail -20 "$work/quit.log" >&2; exit 81; }

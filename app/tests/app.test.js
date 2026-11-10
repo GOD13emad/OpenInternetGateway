@@ -44,6 +44,18 @@ test('Config Factory is wired through platform and renderer',()=>{
 });
 
 
+test('hosted Linux packaged UX uses real WM graceful close and guards against XDestroyWindow false failures',()=>{
+  const script=fs.readFileSync(path.join(root,'tools/qaLinuxHostedWindowLifecycle.sh'),'utf8');
+  const workflow=fs.readFileSync(path.resolve(root,'../.github/workflows/build.yml'),'utf8');
+  assert.match(script,/wmctrl -ic/);
+  assert.doesNotMatch(script,/^\s*xdotool\s+windowclose\b/m);
+  assert.match(script,/ELECTRON_NATIVE_CLOSE_HANDLER_PASS/);
+  assert.match(script,/OIG_QA_WINDOW_EVENT close-after-hide/);
+  assert.match(script,/SECOND_INSTANCE_WINDOW_NOT_SHOWN/);
+  assert.match(script,/RUNNER_ENVIRONMENT:-.*github-hosted/s);
+  assert.match(workflow,/xvfb xauth xdotool wmctrl x11-utils openbox tint2/);
+});
+
 test('desktop app enforces single-instance tray UX',()=>{
   const main=fs.readFileSync(path.join(root,'src/main/main.js'),'utf8');
   assert.match(main,/requestSingleInstanceLock\(\{ intent: launchIntent \}\)/);
