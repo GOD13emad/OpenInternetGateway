@@ -270,6 +270,109 @@ class Backend {
     }
   }
 
+  // Windows offline-only: inspect an operator-selected certificate AUTLOGIN
+  // file against independent pins. Never import, connect, persist a private
+  // key or promote a real TLS server-identity claim.
+  async inspectWindowsPinnedAutologinProfile(profilePath, options = {}) {
+    if (this.platform !== 'win32' || !this.backendRoot) {
+      throw new Error('Offline pinned AUTLOGIN inspection is Windows-only.');
+    }
+    if (this.operatorTrialBusy || this.operatorProfileTaskBusy ||
+        this.operatorUpdateBusy || this.gatewayActionCount > 0) {
+      throw new Error('Another gateway or profile task is active.');
+    }
+    const ca = String(options.caSha256 || '').replace(/:/g, '').toLowerCase();
+    const cn = String(options.peerCN || '');
+    const host = String(options.host || '');
+    const port = Number(options.port);
+    const protocol = String(options.protocol || '');
+    if (!/^[0-9a-f]{64}$/.test(ca) || !/^[A-Za-z0-9._-]{1,128}$/.test(cn) ||
+        !/^[A-Za-z0-9][A-Za-z0-9.-]{0,252}$/.test(host) ||
+        !Number.isSafeInteger(port) || port < 1 || port > 65535 ||
+        !['udp', 'tcp'].includes(protocol)) {
+      throw new Error('Independently authenticated CA, CN, endpoint and protocol are required.');
+    }
+    if (typeof profilePath !== 'string' || !path.isAbsolute(profilePath) ||
+        !/\.ovpn$/i.test(profilePath) || profilePath.includes('\0')) {
+      throw new Error('Select a local .ovpn through the native chooser.');
+    }
+    const source = path.join(this.backendRoot, 'scripts', 'Operator-PinnedProfile.ps1');
+    if (!fs.existsSync(source)) throw new Error('Offline Windows policy helper is missing.');
+    const inspected = fs.lstatSync(profilePath);
+    if (!inspected.isFile() || inspected.isSymbolicLink() ||
+        inspected.size < 1 || inspected.size > 131072) {
+      throw new Error('The selected profile is not a bounded regular file.');
+    }
+    this.operatorProfileTaskBusy = true;
+    try {
+      // Hold the descriptor and read at most 128KiB, so a path replacement
+      // cannot make an unbounded or unexpected profile enter the checker.
+      const fd = fs.openSync(profilePath, 'r');
+      let bytes;
+      try {
+        const stat = fs.fstatSync(fd);
+        if (!stat.isFile() || stat.size < 1 || stat.size > 131072) {
+          throw new Error('Profile size or type changed before inspection.');
+        }
+        const chunk = Buffer.alloc(stat.size);
+        let n = 0;
+        while (n < chunk.length) {
+          const got = fs.readSync(fd, chunk, n, chunk.length - n, null);
+          if (!got) break;
+          n += got;
+        }
+        const trailing = Buffer.alloc(1);
+        if (n !== chunk.length || fs.readSync(fd, trailing, 0, 1, null) !== 0) {
+          throw new Error('The selected profile changed during inspection.');
+        }
+        bytes = chunk;
+      } finally { fs.closeSync(fd); }
+      const profileSha256 = crypto.createHash('sha256').update(bytes).digest('hex');
+      const payload = JSON.stringify({
+        text: bytes.toString('utf8'), caSha256: ca, peerCN: cn, host, port, protocol
+      });
+      // Only this constant script enters PowerShell argv. The profile (with
+      // private key) passes on stdin, never argv, environment or diagnostic log.
+      const script = [
+        "$ErrorActionPreference='Stop'",
+        ". $env:OIG_PINNED_POLICY_PATH",
+        "try {",
+        " $i=([Console]::In.ReadToEnd() | ConvertFrom-Json -ErrorAction Stop)",
+        " $v=Test-OigPinnedAutologinProfile -Text ([string]$i.text) -ExpectedHost ([string]$i.host) -ExpectedPort ([int]$i.port) -ExpectedProtocol ([string]$i.protocol) -PinnedCaSha256 ([string]$i.caSha256) -ExpectedPeerCN ([string]$i.peerCN)",
+        " $v | ConvertTo-Json -Compress -Depth 3",
+        "} catch {",
+        " '{\"valid\":false,\"pinnedConstraintsMatch\":false,\"transportAttempted\":false,\"serverIdentityVerified\":false,\"readyForAutomaticConnection\":false}'",
+        "}"
+      ].join('\n');
+      let result;
+      try {
+        result = await run(this._requireWindowsPwsh(),
+          ['-NoProfile', '-NonInteractive', '-Command', script], {
+            timeout: 12000, input: payload, env: { OIG_PINNED_POLICY_PATH: source }
+          });
+      } catch {
+        throw new Error('Offline Windows profile inspection did not complete.');
+      }
+      let parsed;
+      try { parsed = JSON.parse(String(result.stdout || '')); } catch {
+        throw new Error('Offline Windows profile inspection returned no valid result.');
+      }
+      if (parsed?.valid !== true || parsed?.pinnedConstraintsMatch !== true ||
+          parsed?.transportAttempted !== false || parsed?.serverIdentityVerified !== false ||
+          parsed?.readyForAutomaticConnection !== false ||
+          parsed?.caDerSha256 !== ca || parsed?.expectedPeerCN !== cn ||
+          parsed?.host !== host || parsed?.port !== port || parsed?.protocol !== protocol) {
+        throw new Error('Profile rejected: independent pin or AUTLOGIN policy did not match.');
+      }
+      return {
+        inspectedOffline: true, valid: true, pinnedConstraintsMatch: true,
+        host, port, protocol, caDerSha256: ca, expectedPeerCN: cn, profileSha256,
+        transportAttempted: false, serverIdentityVerified: false,
+        readyForAutomaticConnection: false, profilePersisted: false
+      };
+    } finally { this.operatorProfileTaskBusy = false; }
+  }
+
   async stageOperatorProfile(profilePath, caSha256, peerCN) {
     if (this.operatorTrialBusy) throw new Error('Cannot replace the operator profile while its trial is active.');
     if (this.operatorProfileTaskBusy) throw new Error('Another operator-profile task is still running.');

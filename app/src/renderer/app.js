@@ -757,6 +757,48 @@ async function stageOperatorProfileFromPicker() {
   }
 }
 
+async function inspectWindowsPinnedAutologin() {
+  if (state.busy || state.platform?.platform !== 'win32') return;
+  const ca = String($('windowsPinnedCa').value || '').replace(/:/g, '').toLowerCase();
+  const cn = String($('windowsPinnedCN').value || '').trim();
+  const host = String($('windowsPinnedHost').value || '').trim();
+  const port = Number($('windowsPinnedPort').value);
+  const protocol = String($('windowsPinnedProtocol').value || '');
+  if (!/^[0-9a-f]{64}$/.test(ca) || !/^[A-Za-z0-9._-]{1,128}$/.test(cn) ||
+      !/^[A-Za-z0-9][A-Za-z0-9.-]{0,252}$/.test(host) ||
+      !Number.isSafeInteger(port) || port < 1 || port > 65535 ||
+      !['udp','tcp'].includes(protocol)) {
+    showToast('Enter independent CA SHA-256, exact CN, host, port and transport.', true);
+    return;
+  }
+  const button = $('windowsPinnedInspectButton');
+  button.disabled = true;
+  setText('windowsPinnedStatus', 'Inspecting selected file offline; no connection or key storage.');
+  try {
+    const result = await window.gateway.inspectWindowsPinnedAutologin({ caSha256: ca, peerCN: cn, host, port, protocol });
+    if (result?.canceled) {
+      setText('windowsPinnedStatus', 'File selection canceled. No profile was inspected or saved.');
+      return;
+    }
+    if (result?.valid !== true || result?.pinnedConstraintsMatch !== true ||
+        result?.inspectedOffline !== true || result?.transportAttempted !== false ||
+        result?.serverIdentityVerified !== false || result?.profilePersisted !== false ||
+        result?.readyForAutomaticConnection !== false) {
+      throw new Error('Offline AUTLOGIN inspection did not preserve the trust boundary.');
+    }
+    setText('windowsPinnedStatus',
+      'Offline AUTLOGIN syntax, CA pin, CN and client keypair match. Profile was not saved. ' +
+      'NO VPN connection or live server identity verified; not enabled for automatic connection.');
+    showToast('Offline pinned AUTLOGIN inspection passed; VPN NOT connected.');
+  } catch (error) {
+    setText('windowsPinnedStatus',
+      'Offline profile rejected or check unavailable. No VPN connection was attempted or saved.');
+    showToast(userErrorMessage(error, 'Offline Windows AUTLOGIN profile rejected.'), true);
+  } finally {
+    button.disabled = false;
+  }
+}
+
 async function init() {
   document.querySelectorAll('.nav-item').forEach(b => b.addEventListener('click', () => setPage(b.dataset.page)));
   $('powerButton').addEventListener('click', () => runAction(state.status?.connected ? 'disconnect' : 'connect', state.status?.connected ? 'Disconnected.' : 'Connection attempt completed; check protection and relay identity status.'));
@@ -787,6 +829,7 @@ async function init() {
   $('installRecovery').addEventListener('click', () => runAction('auto-install', 'Auto-Recovery installed.'));
   $('removeRecovery').addEventListener('click', () => runAction('auto-remove', 'Auto-Recovery removed.'));
   $('openLogs').addEventListener('click', () => window.gateway.openLogs());
+  $('windowsPinnedInspectButton').addEventListener('click', inspectWindowsPinnedAutologin);
   $('operatorStageButton').addEventListener('click', stageOperatorProfileFromPicker);
   $('operatorNativeCheckButton').addEventListener('click', checkOperatorNativeCompatibility);
   $('operatorFullDevicePreflightButton').addEventListener('click', checkOperatorFullDevicePreflight);
@@ -831,6 +874,7 @@ async function init() {
   themeBtn?.click();
 
   state.platform = await window.gateway.platform();
+  $('windowsPinnedProfileCard').hidden = state.platform.platform !== 'win32';
   $('operatorProfileCard').hidden = state.platform.platform !== 'linux';
   if (state.platform.platform === 'linux') await loadOperatorProfileStatus();
   setText('platformBadge', (state.platform.platform === 'win32' ? 'Windows' : 'Linux') + ' · ' + state.platform.arch);

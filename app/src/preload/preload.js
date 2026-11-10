@@ -7,6 +7,7 @@ contextBridge.exposeInMainWorld('gateway', {
   diagnostics: () => ipcRenderer.invoke('gateway:diagnostics'),
   activity: () => ipcRenderer.invoke('gateway:activity'),
   platform: () => ipcRenderer.invoke('gateway:platform'),
+  inspectWindowsPinnedAutologin: (input) => ipcRenderer.invoke('gateway:inspectWindowsPinnedAutologin', input),
   operatorProfileStatus: () => ipcRenderer.invoke('gateway:operatorProfileStatus'),
   operatorNativeCheck: () => ipcRenderer.invoke('gateway:operatorNativeCheck'),
   operatorFullDevicePreflight: () => ipcRenderer.invoke('gateway:operatorFullDevicePreflight'),

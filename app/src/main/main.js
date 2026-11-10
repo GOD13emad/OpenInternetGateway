@@ -162,6 +162,29 @@ function registerIpc() {
   ipcMain.handle('gateway:diagnostics', () => backend.diagnostics());
   ipcMain.handle('gateway:activity', () => backend.activity());
   ipcMain.handle('gateway:platform', () => backend.platformInfo());
+  ipcMain.handle('gateway:inspectWindowsPinnedAutologin', async (_event, input = {}) => {
+    if (process.platform !== 'win32') throw new Error('Windows offline AUTLOGIN inspection is Windows-only.');
+    const ca = String(input?.caSha256 || '').replace(/:/g, '').toLowerCase();
+    const cn = String(input?.peerCN || '');
+    const host = String(input?.host || '');
+    const port = Number(input?.port);
+    const protocol = String(input?.protocol || '');
+    // Validate untrusted renderer data BEFORE showing a native chooser.
+    if (!/^[a-f0-9]{64}$/.test(ca) || !/^[A-Za-z0-9._-]{1,128}$/.test(cn) ||
+        !/^[A-Za-z0-9][A-Za-z0-9.-]{0,252}$/.test(host) ||
+        !Number.isSafeInteger(port) || port < 1 || port > 65535 ||
+        !['udp', 'tcp'].includes(protocol)) {
+      throw new Error('A trusted CA pin, exact peer CN, endpoint and protocol are required.');
+    }
+    const selected = await dialog.showOpenDialog(mainWindow, {
+      title: 'Inspect an independently pinned Windows OpenVPN AUTLOGIN profile (offline only)',
+      properties: ['openFile'],
+      filters: [{ name: 'OpenVPN configuration', extensions: ['ovpn'] }]
+    });
+    if (selected.canceled || selected.filePaths?.length !== 1) return { canceled: true };
+    return backend.inspectWindowsPinnedAutologinProfile(selected.filePaths[0],
+      { caSha256: ca, peerCN: cn, host, port, protocol });
+  });
   ipcMain.handle('gateway:operatorProfileStatus', () => backend.operatorProfileStatus());
   ipcMain.handle('gateway:operatorNativeCheck', () => backend.checkOperatorNativeCompatibility());
   ipcMain.handle('gateway:operatorFullDevicePreflight', () => backend.checkOperatorFullDevicePreflight());

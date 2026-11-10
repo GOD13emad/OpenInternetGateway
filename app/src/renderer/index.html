@@ -245,6 +245,27 @@
             </div>
           </article>
 
+          <article class="panel settings-card wide" id="windowsPinnedProfileCard" hidden>
+            <span class="eyebrow">OPTIONAL · WINDOWS · OFFLINE ONLY</span>
+            <h3>Inspect a pinned OpenVPN AUTLOGIN profile</h3>
+            <p>Requires an independently authenticated CA SHA-256, exact server certificate CN and provider endpoint. Select an owner-provided certificate-based AUTLOGIN .ovpn file. No VPN connection, client-key storage or automatic use is permitted by this check.</p>
+            <div class="operator-import-fields">
+              <label for="windowsPinnedCa">Independent CA DER SHA-256</label>
+              <input id="windowsPinnedCa" type="text" maxlength="95" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="64 hex characters">
+              <label for="windowsPinnedCN">Exact server certificate CN</label>
+              <input id="windowsPinnedCN" type="text" maxlength="128" autocomplete="off" spellcheck="false" placeholder="Independently authenticated server CN">
+              <label for="windowsPinnedHost">Expected server hostname</label>
+              <input id="windowsPinnedHost" type="text" maxlength="253" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="vpn.example.net">
+              <label for="windowsPinnedPort">Expected port</label>
+              <input id="windowsPinnedPort" type="number" min="1" max="65535" step="1" placeholder="443">
+              <label for="windowsPinnedProtocol">Transport</label>
+              <select id="windowsPinnedProtocol"><option value="udp">OpenVPN UDP</option><option value="tcp">OpenVPN TCP</option></select>
+            </div>
+            <div class="button-row">
+              <button class="btn secondary" id="windowsPinnedInspectButton">Choose .ovpn and inspect offline</button>
+            </div>
+            <p class="measurement-note" id="windowsPinnedStatus">No AUTLOGIN profile has been inspected. An offline match is not a real TLS handshake or authorization to connect.</p>
+          </article>
           <article class="panel settings-card wide" id="operatorProfileCard" hidden>
             <span class="eyebrow">OPTIONAL · LINUX · OFFLINE ONLY</span>
             <h3>Import operator-pinned OpenVPN profile</h3>

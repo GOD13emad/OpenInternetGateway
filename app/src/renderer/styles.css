@@ -108,6 +108,6 @@ html[data-theme="light"] .panel{background:var(--panel)}
 /* Explicit offline operator profile import: no active VPN control here. */
 .operator-import-fields{display:grid;grid-template-columns:minmax(140px,1fr) 2fr;align-items:center;gap:9px;margin-top:13px}
 .operator-import-fields label{font-size:11px;color:var(--muted)}
-.operator-import-fields input{width:100%;min-width:0;padding:9px 11px;border:1px solid var(--line);border-radius:9px;background:var(--panel-strong);color:var(--text);font-size:12px}
+.operator-import-fields input,.operator-import-fields select{width:100%;min-width:0;padding:9px 11px;border:1px solid var(--line);border-radius:9px;background:var(--panel-strong);color:var(--text);font-size:12px}
 #operatorProfileCard[hidden]{display:none}
 @media(max-width:740px){.operator-import-fields{grid-template-columns:1fr}}
