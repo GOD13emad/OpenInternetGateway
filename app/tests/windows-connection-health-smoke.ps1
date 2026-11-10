@@ -295,4 +295,4 @@ try{
     Remove-Item -LiteralPath $shadowFile -Force
   }
 }
-Write-Output 'PASS: Windows native mocked health, universal rollback, actual owned route removal, and durable recovery journal (offline, no network mutation)'
+Write-Output 'PASS: Windows headless health refuses effective foreign IPv4/IPv6 routes; native mocked universal rollback, actual owned route removal, and durable recovery journal (offline, no network mutation)'
