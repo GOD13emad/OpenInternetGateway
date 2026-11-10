@@ -160,6 +160,22 @@ jobs:
       - name: Seed verified Electron checksums
         run: node tools/prepareElectronChecksumCache.js
       - run: npm run dist:linux
+      - name: Test packaged Linux Close/Hide/Reopen/Quit on disposable X11 runner
+        shell: bash
+        timeout-minutes: 10
+        run: |
+          set -euo pipefail
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          sudo apt-get update -qq
+          sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends xvfb xauth xdotool x11-utils openbox tint2 dbus-x11 libgtk-3-0 libnss3 libasound2t64 libgbm1
+          version="$(node -p 'require("./package.json").version')"
+          bash tools/qaLinuxHostedWindowLifecycle.sh "dist/OpenInternetGateway-${version}-amd64.deb"
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: linux-window-lifecycle-receipt
+          path: ${{ runner.temp }}/oig-linux-window-lifecycle-receipt.json
+          if-no-files-found: warn
       - uses: actions/upload-artifact@v7
         with:
           name: linux-packages

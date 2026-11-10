@@ -56,6 +56,7 @@ app/tools/*
 !app/tools/prepareElectronChecksumCache.js
 !app/tools/qaWindowsInstalledTray.ps1
 !app/tools/qaWindowsHostedUpdateApply.ps1
+!app/tools/qaLinuxHostedWindowLifecycle.sh
 
 # Electron archives and local build helpers
 app/electron-v*.zip
