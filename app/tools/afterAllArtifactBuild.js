@@ -18,6 +18,12 @@ function fixDebDesktopMode(debPath) {
   try {
     run('dpkg-deb', ['--raw-extract', debPath, root]);
     fs.chmodSync(root, 0o755);
+    const appRun = path.join(root, 'opt', 'open-internet-gateway', 'AppRun');
+    // AppRun is an AppImage-only root entrypoint; Debian launches the packaged
+    // executable directly and uses its installed root-owned chrome-sandbox.
+    if (fs.existsSync(appRun)) fs.rmSync(appRun);
+    if (fs.existsSync(appRun)) throw new Error('AppImage-only AppRun leaked into Debian payload');
+
     const controlDir = path.join(root, 'DEBIAN');
     if (!fs.existsSync(controlDir)) throw new Error('Debian control directory missing after raw extract');
     fs.chmodSync(controlDir, 0o755);

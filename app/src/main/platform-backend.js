@@ -81,35 +81,40 @@ class Backend {
       supported: false,
       hardened: false,
       changed: false,
-      restartRequired: false,
       currentProcessNoSandbox: false,
+      processArgvVerified: false,
       runtimeRoot: '',
       helper: '',
+      method: '',
       reason: 'Native packaged Linux runtime is unavailable.'
     };
-    if (process.platform !== 'linux' || !this.backendRoot) return base;
+    let currentProcessNoSandbox = false;
+    let processArgvVerified = false;
+    try {
+      const argv = fs.readFileSync('/proc/' + String(process.pid) + '/cmdline', 'utf8').split('\0').filter(Boolean);
+      currentProcessNoSandbox = argv.includes('--no-sandbox');
+      processArgvVerified = true;
+    } catch {}
+    if (process.platform !== 'linux' || !this.backendRoot) {
+      return { ...base, currentProcessNoSandbox, processArgvVerified };
+    }
     const runtimeRoot = path.dirname(process.execPath || '');
     const appRun = path.join(runtimeRoot, 'AppRun');
+    const localSandbox = path.join(runtimeRoot, 'chrome-sandbox');
     const helperScript = path.join(this.backendRoot, 'linux', 'harden_sandbox.py');
-    if (!runtimeRoot || !fs.existsSync(appRun) || !fs.existsSync(helperScript)) {
-      return { ...base, runtimeRoot };
+    if (!runtimeRoot || !fs.existsSync(helperScript) ||
+        (!fs.existsSync(appRun) && !fs.existsSync(localSandbox))) {
+      return { ...base, runtimeRoot, currentProcessNoSandbox, processArgvVerified };
     }
     try {
       const r = await run('python3', [helperScript, runtimeRoot], { timeout: 10000 });
       const parsed = JSON.parse(String(r.stdout || '{}').trim() || '{}');
-      let currentProcessNoSandbox = false;
-      try {
-        const argv = fs.readFileSync('/proc/' + String(process.pid) + '/cmdline', 'utf8').split('\0').filter(Boolean);
-        currentProcessNoSandbox = argv.includes('--no-sandbox');
-      } catch {}
       const result = {
         ...base,
         ...parsed,
-        runtimeRoot,
+        runtimeRoot: parsed.runtimeRoot || runtimeRoot,
         currentProcessNoSandbox,
-        restartRequired: !!parsed.hardened
-          && currentProcessNoSandbox
-          && process.env.OIG_SANDBOX_RESTARTED !== '1',
+        processArgvVerified,
         version: this.version,
         at: new Date().toISOString()
       };
@@ -119,7 +124,9 @@ class Backend {
       const result = {
         ...base,
         runtimeRoot,
-        reason: 'Sandbox hardening helper failed safely: ' + String(error?.message || error),
+        currentProcessNoSandbox,
+        processArgvVerified,
+        reason: 'Sandbox verification failed safely: ' + String(error?.message || error),
         version: this.version,
         at: new Date().toISOString()
       };

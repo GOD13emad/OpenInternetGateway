@@ -626,23 +626,44 @@ test('GitHub updater checks latest release and verifies published SHA-256',()=>{
 });
 
 
-test('Linux Chromium sandbox hardening is fail-safe and update-persistent',()=>{
+test('Linux Chromium sandbox verification is fail-closed and never mutates packaged runtime files',()=>{
   const backend=fs.readFileSync(path.join(root,'src/main/platform-backend.js'),'utf8');
   const main=fs.readFileSync(path.join(root,'src/main/main.js'),'utf8');
   const helper=fs.readFileSync(path.join(root,'backend/linux/harden_sandbox.py'),'utf8');
+  const appRun=fs.readFileSync(path.join(root,'build/linux/AppRun'),'utf8');
+  const afterPack=fs.readFileSync(path.join(root,'tools/afterPack.js'),'utf8');
+  const afterAll=fs.readFileSync(path.join(root,'tools/afterAllArtifactBuild.js'),'utf8');
+  const pkg=require(path.join(root,'package.json'));
+  assert.deepEqual(pkg.build.appImage.executableArgs, []);
   assert.match(backend,/_hardenLinuxChromiumSandbox/);
-  assert.match(backend,/linux-sandbox-hardening.json/);
-  assert.match(backend,/sandboxHardened/);
-  assert.match(backend,/resources\/backend\/linux\/harden_sandbox\.py/);
-  assert.match(main,/OIG_SANDBOX_RESTARTED/);
-  assert.ok(main.includes('initialized?.sandboxHardening?.restartRequired'));
+  assert.match(backend,/linux-sandbox-hardening\.json/);
+  assert.match(backend,/processArgvVerified/);
+  assert.match(backend,/parsed\.runtimeRoot \|\| runtimeRoot/);
+  assert.match(main,/Secure startup blocked/);
+  assert.match(main,/sandbox\?\.currentProcessNoSandbox === false/);
+  assert.match(main,/app\.exit\(78\)/);
   assert.match(helper,/0o4755/);
-  assert.match(helper,/hash-compatible root-owned setuid Chromium sandbox/);
-  assert.match(helper,/OIG sandbox hardening: prefer a compatible root-owned setuid helper/);
+  assert.match(helper,/find_compatible_helper/);
   assert.match(helper,/CHROME_DEVEL_SANDBOX/);
-  assert.match(helper,/readlink -f .*chrome-sandbox/);
-  assert.match(helper,/LEGACY_REPLACEMENT/);
-  assert.doesNotMatch(helper,/sysctl|apparmor_parser|sudo|pkexec/);
+  assert.match(helper,/user_namespaces_available/);
+  assert.doesNotMatch(helper,/os\.replace|os\.symlink|sudo|pkexec/);
+  assert.match(appRun,/CHROME_DEVEL_SANDBOX/);
+  assert.match(appRun,/unshare -Ur true/);
+  assert.match(appRun,/--appimage-extract/);
+  assert.doesNotMatch(appRun,/--appimage-extract-and-run/);
+  assert.match(appRun,/mktemp -d/);
+  assert.match(appRun,/wait "\$child_pid"/);
+  assert.match(appRun,/rm -rf "\$tmp_root"/);
+  assert.match(appRun,/ln -s/);
+  assert.match(appRun,/rm -f \"\$local_sandbox\"/);
+  assert.match(helper,/os\.path\.islink\(local_sandbox\)/);
+  assert.match(helper,/not os\.path\.lexists\(local_sandbox\)/);
+  assert.match(appRun,/exit 78/);
+  assert.doesNotMatch(appRun,/NO_SANDBOX=\(--no-sandbox\)/);
+  assert.match(afterPack,/build.*linux.*AppRun/);
+  assert.match(afterPack,/fs\.copyFileSync\(customAppRun, appRun\)/);
+  assert.match(afterAll,/opt', 'open-internet-gateway', 'AppRun/);
+  assert.match(afterAll,/fs\.rmSync\(appRun\)/);
 });
 
 test('GitHub workflows use current hosted-runner actions and Node LTS',()=>{
