@@ -40,11 +40,27 @@ if [[ "${OIG_QA_X11_CHILD:-0}" == 1 ]]; then
   xwininfo -id "$window" | grep -q 'Map State: IsViewable' || exit 75
   xdotool windowclose "$window"
   hidden=false
+  state=''
   for _ in $(seq 1 80); do
-    if xwininfo -id "$window" 2>/dev/null | grep -q 'Map State: IsUnMapped'; then hidden=true; break; fi
+    state="$(xwininfo -id "$window" 2>/dev/null | grep 'Map State:' || :)"
+    # X11 reports IsUnviewable when a mapped child has an unmapped parent.
+    if [[ "$state" == *IsUnMapped* || "$state" == *IsUnviewable* ]]; then
+      hidden=true
+      break
+    fi
     sleep .2
   done
-  [[ "$hidden" == true ]] || { echo WM_CLOSE_FAILED_TO_HIDE >&2; exit 76; }
+  echo "POST_WM_CLOSE_X11_MAP_STATE=${state:-not-found}"
+  if [[ "$hidden" != true ]]; then
+    echo WM_CLOSE_FAILED_TO_HIDE >&2
+    xwininfo -id "$window" 2>&1 | tail -23 >&2 || :
+    xprop -id "$window" _NET_WM_STATE WM_STATE 2>&1 | tail -8 >&2 || :
+    echo 'VISIBLE_MATCHING_WINDOWS:' >&2
+    xdotool search --onlyvisible --name '^Open Internet Gateway$' 2>&1 | tail -10 >&2 || :
+    echo 'APP_LOG_TAIL:' >&2
+    tail -35 "$work/app.log" >&2 || :
+    exit 76
+  fi
   kill -0 "$mainpid" 2>/dev/null || { echo WM_CLOSE_KILLED_PROCESS >&2; exit 77; }
   [[ "$(cat "$OIG_HOME/state/desired-state")" == off ]] || exit 78
 
