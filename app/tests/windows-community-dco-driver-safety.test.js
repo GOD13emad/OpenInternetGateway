@@ -141,6 +141,17 @@ test('disposable DCO native WFP packet filter retains narrow scope and never cla
   assert.match(p, /packetFilterIsDynamic/);
   assert.match(p, /explicitTunSourceCurlAllowedIfFailed/);
   assert.match(p, /vpnHttpsAllowedWithRuleTemporarilyRemoved/);
+  for (const marker of [
+    'coldFullRouteVerifiedBeforeAnyWfp',
+    'oig-dco-wfp-cold-fullroute-baseline.json',
+    'COLD_FULLROUTE_RECEIPT_NOT_ACCEPTED',
+    'COLD_FULLROUTE_HOST_NETWORK_NOT_RESTORED',
+    'coldFullRouteReceiptSha256'
+  ]) assert.ok(p.includes(marker), 'missing cold host matched control: ' + marker);
+  assert.ok(p.indexOf('fullroute.main(cold_args)') <
+    p.indexOf('add_rule(name, nic["index"], target, curl)'),
+    'Cold full-route test must precede any dynamic WFP filter');
+
   for (const marker of ['directEgressRestoredBeforeVpn',
     'vpnHttpsAllowedWithoutWfp', 'wfpRuleRearmedOnVpn',
     'VPN_HTTPS_FAILED_WITH_NO_ADDITIONAL_WFP_RULE']) {

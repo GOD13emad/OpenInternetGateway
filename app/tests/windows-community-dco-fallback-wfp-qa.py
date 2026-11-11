@@ -298,6 +298,8 @@ def main(args):
         "wfpRuleFilterVerified": False, "packetLayerFilterVerified": False,
         "packetFilterIsDynamic": True,
         "ownedPacketWfpFilterRemoved": False,
+        "coldFullRouteVerifiedBeforeAnyWfp": False,
+        "coldFullRouteReceiptSha256": None,
         "directBlockedBeforeVpn": False,
         "directEgressRestoredBeforeVpn": False,
         "vpnHttpsAllowedWithoutWfp": False,
@@ -324,6 +326,36 @@ def main(args):
     index = None
     failure = ""
     try:
+        # Prove the accepted full-route harness works on this exact hosted
+        # machine BEFORE our dynamic WFP rule is first installed.
+        cold_receipt = Path(os.environ["RUNNER_TEMP"]) / (
+            "oig-dco-wfp-cold-fullroute-baseline.json")
+        if cold_receipt.exists():
+            raise RuntimeError("PREEXISTING_COLD_BASELINE_RECEIPT_REFUSED")
+        os.environ["OIG_HOSTED_DCO_FULL_IPV4_QA"] = "1"
+        try:
+            cold_args = argparse.Namespace(
+                root=str(root), receipt=str(cold_receipt),
+                openvpn=str(binary), adapter=args.adapter)
+            fullroute.main(cold_args)
+        finally:
+            os.environ.pop("OIG_HOSTED_DCO_FULL_IPV4_QA", None)
+        cold = json.loads(cold_receipt.read_text(encoding="utf-8"))
+        if not (cold.get("pass") is True and
+                cold.get("pinnedPeerVerified") is True and
+                cold.get("dcoRoutePairActive") is True and
+                cold.get("publicIpv4ViaVpnVerified") is True and
+                cold.get("ownedRoutesRemoved") is True and
+                cold.get("hostRoutesRestored") is True and
+                cold.get("hostDnsRestored") is True and
+                cold.get("fullDeviceAccepted") is False and
+                cold.get("sourceSha") == os.environ["GITHUB_SHA"]):
+            raise RuntimeError("COLD_FULLROUTE_RECEIPT_NOT_ACCEPTED")
+        report["coldFullRouteReceiptSha256"] = hashlib.sha256(
+            cold_receipt.read_bytes()).hexdigest()
+        report["coldFullRouteVerifiedBeforeAnyWfp"] = True
+        if scoped.host_snapshot() != original_network:
+            raise RuntimeError("COLD_FULLROUTE_HOST_NETWORK_NOT_RESTORED")
         add_rule(name, nic["index"], target, curl)
         report["wfpRuleFilterVerified"] = rule_contract(
             name, nic["index"], target, curl)
@@ -498,8 +530,8 @@ def main(args):
         must = (
             "pinnedPeerVerified", "dcoRoutePairActive",
             "wfpRuleFilterVerified", "packetLayerFilterVerified",
-            "ownedPacketWfpFilterRemoved", "directBlockedBeforeVpn",
-            "directEgressRestoredBeforeVpn", "vpnHttpsAllowedWithoutWfp",
+            "ownedPacketWfpFilterRemoved", "coldFullRouteVerifiedBeforeAnyWfp",
+            "directBlockedBeforeVpn", "directEgressRestoredBeforeVpn", "vpnHttpsAllowedWithoutWfp",
             "wfpRuleRearmedOnVpn", "physicalIpv4DistinctFromDco",
             "httpsOverVpnAllowed", "ownedTunnelStopped",
             "directFallbackBlockedAfterDrop",
