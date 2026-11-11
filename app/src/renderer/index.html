@@ -221,7 +221,7 @@
               <button class="btn" id="installUpdate" disabled>Install verified update</button>
               <button class="btn ghost" id="openRelease">Open GitHub release</button>
             </div>
-            <p class="measurement-note">Updates are applied only after SHA-256 matches both the GitHub asset digest and SHA256SUMS. Windows uses a current-user NSIS install and Linux uses AppImage under ~/.local/opt, so normal updates do not require administrator/root approval.</p>
+            <p class="measurement-note" id="updateInstallScopeNote">Updates require matching GitHub and SHA256SUMS digests. System-managed Linux installs use the same one-file installer with native OS approval only for installation; portable AppImage and Windows per-user updates do not require elevation.</p>
           </article>
         </div>
       </section>

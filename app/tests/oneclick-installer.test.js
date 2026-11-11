@@ -191,3 +191,110 @@ test('Linux single-file installer acceptance launches the same packaged dashboar
   assert.match(lifecycle, /NATIVE_QUIT_NO_ACTIVE_VPN_WITH_READONLY_EMPTY_NM_PASS/);
   assert.doesNotMatch(lifecycle, /nmcli connection (up|down|modify|delete)/);
 });
+
+
+test('Linux system-DEB online update selects the same one-file installer and hands off without running apt in Electron', async () => {
+  const vm=require('node:vm');
+  const {EventEmitter}=require('node:events');
+  const os=require('node:os');
+  const source=fs.readFileSync(path.join(__dirname,'../src/main/platform-backend.js'),'utf8');
+  const scratch=fs.mkdtempSync(path.join(os.tmpdir(),'oig-deb-onefile-update-mock-'));
+  const calls=[];
+  let verification='valid';
+  const fakeSpawn=(program,args)=>{
+    calls.push({program,args:[...args]});
+    const child=new EventEmitter();
+    child.stdin=new EventEmitter();child.stdin.end=()=>{};
+    child.stdout=new EventEmitter();child.stderr=new EventEmitter();
+    child.unref=()=>{};
+    process.nextTick(()=>{
+      child.emit('spawn');
+      if(program==='bash'){
+        const output=verification==='valid'
+          ? 'OIG_LINUX_ONECLICK_EMBEDDED_DEB_VERIFIED version=2.5.21 sha256='+'b'.repeat(64)
+          : 'UNVERIFIED_PAYLOAD';
+        child.stdout.emit('data',Buffer.from(output));
+        child.emit('close',0);
+      }
+    });
+    return child;
+  };
+  const mod={exports:{}};
+  vm.runInNewContext(source,{module:mod,exports:mod.exports,process,Buffer,setTimeout,clearTimeout,
+    require:name=>name==='child_process'?{spawn:fakeSpawn}:require(name)
+  },{filename:'oig-synthetic-system-deb-updater.js'});
+  const Backend=mod.exports;
+  const b=new Backend({version:'2.5.20',resourcesPath:scratch,appPath:scratch,userData:scratch});
+  b.platform='linux';b.backendRoot=scratch;
+  const debExe='/opt/open-internet-gateway/open-internet-gateway';
+  assert.equal(b._linuxInstallFlavor(debExe),'system-deb');
+  assert.equal(b._linuxInstallFlavor('/home/test/AppImageRoot/open-internet-gateway'),'user-appimage');
+  const name='OpenInternetGateway-Linux-Setup-2.5.21-amd64.run';
+  const asset={name,browser_download_url:'https://example.invalid/never-fetch',
+    digest:'sha256:'+'a'.repeat(64)};
+  const appImage={name:'OpenInternetGateway-2.5.21-x86_64.AppImage',
+    browser_download_url:'https://example.invalid/never-fetch',digest:'sha256:'+'c'.repeat(64)};
+  assert.equal(b._selectUpdateAsset([appImage,asset],'2.5.21')?.name,appImage.name);
+  b._linuxInstallFlavor=()=> 'system-deb';
+  assert.equal(b._selectUpdateAsset([appImage,asset],'2.5.21')?.name,name);
+  assert.equal(b._selectUpdateAsset([appImage],'2.5.21'),undefined,
+    'Debian installs must refuse an AppImage-only update rather than duplicate the application');
+  const file=path.join(scratch,name);
+  fs.writeFileSync(file,'SYNTHETIC_FILE_NEVER_EXECUTE');
+  fs.mkdirSync(path.join(scratch,'linux'));
+  fs.copyFileSync(path.join(__dirname,'../backend/linux/apply-oneclick-update.sh'),
+    path.join(scratch,'linux','apply-oneclick-update.sh'));
+  b._githubJson=async()=>({tag_name:'v2.5.21',assets:[appImage,asset]});
+  try{
+    const info=await b.updateInfo(true);
+    assert.equal(info.installScope,'system-deb');
+    assert.equal(info.requiresOsAuthorization,true);
+    assert.equal(info.asset.name,name);
+    const handoff=await b.launchDownloadedUpdate({
+      path:file,sha256:'a'.repeat(64),info:{latestVersion:'2.5.21'}
+    },{appPid:123456789,currentExecutable:debExe});
+    assert.equal(handoff.applying,true);
+    assert.equal(handoff.installScope,'system-deb');
+    assert.equal(handoff.requiresOsAuthorization,true);
+    assert.equal(calls.length,2);
+    assert.equal(calls[0].program,'bash');
+    assert.deepEqual(Array.from(calls[0].args),[file,'--verify-only']);
+    assert.equal(calls[1].program,'/bin/bash');
+    assert.equal(calls[1].args[0],path.join(scratch,'linux','apply-oneclick-update.sh'));
+    assert.equal(calls[1].args[1],file);
+    assert.equal(calls[1].args.at(-1),debExe);
+    assert.equal(calls.every(x=>!['apt','apt-get','sudo','pkexec'].includes(x.program)),true,
+      'Only the OS-approved one-file installer may touch apt, never Electron');
+    verification='invalid';
+    await assert.rejects(b.launchDownloadedUpdate({
+      path:file,sha256:'a'.repeat(64),info:{latestVersion:'2.5.21'}
+    },{appPid:123456789,currentExecutable:debExe}),/embedded Debian package could not be verified/);
+    assert.equal(calls.length,3,'Failed verification must not start a handoff');
+    const alternate=path.join(scratch,'alternate');
+    fs.mkdirSync(alternate);
+    fs.symlinkSync(file,path.join(alternate,name));
+    await assert.rejects(b.launchDownloadedUpdate({
+      path:path.join(alternate,name),sha256:'a'.repeat(64),
+      info:{latestVersion:'2.5.21'}
+    },{appPid:123456789,currentExecutable:debExe}),/regular non-symlink/);
+    assert.equal(calls.length,3);
+  }finally{
+    fs.rmSync(scratch,{recursive:true,force:true});
+  }
+});
+
+test('Linux native update helper only performs a one-file OS-authorized upgrade after app exit', () => {
+  const script=fs.readFileSync(path.join(__dirname,'../backend/linux/apply-oneclick-update.sh'),'utf8');
+  assert.match(script,/while kill -0 "\$wait_pid"/);
+  assert.match(script,/sha256sum -- "\$installer"/);
+  assert.match(script,/bash "\$installer" --verify-only/);
+  assert.match(script,/timeout 600s bash "\$installer"/);
+  assert.match(script,/NATIVE_INSTALLER_REFUSED_OR_FAILED/);
+  assert.match(script,/dpkg-query -W -f='\$\{Version\}' open-internet-gateway/);
+  assert.match(script,/installScope':'system-deb'/);
+  assert.doesNotMatch(script,/apt-get|nmcli connection (up|down|modify)|--no-sandbox/);
+  const {spawnSync}=require('node:child_process');
+  const syntax=spawnSync('bash',['-n',path.join(__dirname,'../backend/linux/apply-oneclick-update.sh')],
+    {encoding:'utf8',timeout:5000});
+  assert.equal(syntax.status,0,syntax.stderr);
+});

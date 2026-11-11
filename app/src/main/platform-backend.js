@@ -1691,6 +1691,14 @@ class Backend {
     return 0;
   }
 
+  // The managed Debian installation must not silently create a second
+  // versioned AppImage under the user's home on an online update.
+  _linuxInstallFlavor(executable = process.execPath) {
+    return path.normalize(String(executable || '')) ===
+      '/opt/open-internet-gateway/open-internet-gateway'
+      ? 'system-deb' : 'user-appimage';
+  }
+
   _selectUpdateAsset(assets, version) {
     const list = Array.isArray(assets) ? assets : [];
     // Bind the downloaded binary to the exact release tag. SHA-256 proves
@@ -1699,8 +1707,10 @@ class Backend {
       return list.find(a => a.name === 'OpenInternetGateway-Setup-' + version + '.exe');
     }
     if (this.platform === 'linux') {
-      // Automatic Linux updates remain user-space AppImages; no DEB/apt/sudo.
-      return list.find(a => a.name === 'OpenInternetGateway-' + version + '-x86_64.AppImage');
+      const name = this._linuxInstallFlavor() === 'system-deb'
+        ? 'OpenInternetGateway-Linux-Setup-' + version + '-amd64.run'
+        : 'OpenInternetGateway-' + version + '-x86_64.AppImage';
+      return list.find(a => a.name === name);
     }
     return null;
   }
@@ -1710,7 +1720,10 @@ class Backend {
     if (!force) {
       const cached = this._readJson(stateFile, null);
       const checked = cached?.checkedAt ? Date.parse(cached.checkedAt) : 0;
-      if (checked && Date.now() - checked < 5 * 60 * 1000) return cached;
+      if (checked && Date.now() - checked < 5 * 60 * 1000 &&
+          (this.platform !== 'linux' || cached.installScope === this._linuxInstallFlavor())) {
+        return cached;
+      }
     }
 
     const release = await this._githubJson('https://api.github.com/repos/GOD13emad/OpenInternetGateway/releases/latest');
@@ -1727,6 +1740,9 @@ class Backend {
       updateAvailable: comparison < 0,
       currentAhead: comparison > 0,
       upToDate: comparison === 0,
+      installScope: this.platform === 'linux' ? this._linuxInstallFlavor()
+        : this.platform === 'win32' ? 'current-user' : 'unsupported',
+      requiresOsAuthorization: this.platform === 'linux' && this._linuxInstallFlavor() === 'system-deb',
       releaseUrl: String(release.html_url || 'https://github.com/GOD13emad/OpenInternetGateway/releases/latest'),
       publishedAt: release.published_at || null,
       releaseName: release.name || release.tag_name || '',
@@ -1892,6 +1908,46 @@ try {
         throw new Error('Windows update helper failed to start with the verified PowerShell runtime.');
       }
       return { ok: true, applying: true, restart: true, installScope: 'current-user', resultFile, target };
+    }
+
+    if (this.platform === 'linux' &&
+        this._linuxInstallFlavor(currentExecutable) === 'system-deb') {
+      const expectedName = 'OpenInternetGateway-Linux-Setup-' + version + '-amd64.run';
+      if (!/^[0-9]+\.[0-9]+\.[0-9]+$/.test(version) ||
+          path.basename(downloaded.path) !== expectedName ||
+          !/^[a-f0-9]{64}$/.test(expectedSha)) {
+        throw new Error('Linux Debian upgrade requires the exact verified one-file setup.');
+      }
+      const fileInfo = fs.lstatSync(downloaded.path);
+      if (!fileInfo.isFile() || fileInfo.isSymbolicLink()) {
+        throw new Error('Linux one-file update must be a regular non-symlink file.');
+      }
+      // Verify the embedded DEB before closing the app; the detached
+      // handoff repeats SHA validation before any native OS authorization.
+      const verified = await run('bash', [downloaded.path, '--verify-only'], {
+        timeout: 60000
+      });
+      const marker = 'OIG_LINUX_ONECLICK_EMBEDDED_DEB_VERIFIED version=' + version + ' sha256=';
+      const output = String(verified.stdout || '').trim();
+      if (!output.startsWith(marker) || !/^[a-f0-9]{64}$/.test(output.slice(marker.length))) {
+        throw new Error('Linux one-file update embedded Debian package could not be verified.');
+      }
+      const helper = path.join(this.backendRoot, 'linux', 'apply-oneclick-update.sh');
+      if (!fs.existsSync(helper)) {
+        throw new Error('Linux native Debian update handoff is unavailable.');
+      }
+      const child = spawn('/bin/bash', [
+        helper, downloaded.path, expectedSha, version, String(appPid),
+        resultFile, String(currentExecutable)
+      ], { detached: true, stdio: 'ignore', env: { ...process.env } });
+      await new Promise((resolve, reject) => {
+        child.once('spawn', resolve);
+        child.once('error', reject);
+      });
+      child.unref();
+      return { ok: true, applying: true, restart: true,
+        installScope: 'system-deb', requiresOsAuthorization: true,
+        resultFile, target: '/opt/open-internet-gateway/open-internet-gateway' };
     }
 
     if (this.platform === 'linux') {

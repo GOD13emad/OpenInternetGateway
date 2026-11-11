@@ -509,6 +509,11 @@ function renderUpdateInfo(info) {
   setText('updatePublished', formatDate(info?.publishedAt));
   setText('updateAsset', info?.asset?.name || 'No compatible asset');
   setText('updateChecksum', info?.asset?.sha256 || '—');
+  setText('updateInstallScopeNote', info?.installScope === 'system-deb'
+    ? 'This Linux installation is managed by Debian/apt. Updates use the same verified one-file setup and request native OS authorization only during package installation. No duplicate AppImage is installed. Disconnect other VPNs before upgrading.'
+    : info?.installScope === 'user-appimage'
+      ? 'This Linux AppImage updates in your user directory without administrator/root approval. GitHub SHA-256 and the published checksum are checked when available.'
+      : 'Windows updates use the verified current-user NSIS installer without administrator approval. GitHub SHA-256 and the published checksum are checked when available.');
   if (pill) {
     pill.className = 'update-pill ' + (available ? 'ready' : (info?.upToDate ? 'current' : ''));
     pill.textContent = available ? 'Update available' : (info?.currentAhead ? 'Development build' : (info?.upToDate ? 'Up to date' : 'Checked'));

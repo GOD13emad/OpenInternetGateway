@@ -277,6 +277,39 @@ jobs:
             dpkg-query -W -f='${Status}' "$required" | grep -qx 'install ok installed'
           done
           echo 'HOSTED_LINUX_ONEFILE_REAL_INSTALL_AND_DEPENDENCIES_PASS'
+          # The in-app Debian updater must be in the SAME installed payload.
+          # Exercise its handoff with a synthetic installer that can never
+          # call apt/pkexec: actual apt installation was already accepted above.
+          installed_helper="/opt/open-internet-gateway/resources/backend/linux/apply-oneclick-update.sh"
+          test -f "$installed_helper"
+          cmp backend/linux/apply-oneclick-update.sh "$installed_helper"
+          update_scratch="$(mktemp -d "$RUNNER_TEMP/oig-onefile-updater-XXXXXXXX")"
+          fake="$update_scratch/OpenInternetGateway-Linux-Setup-$version-amd64.run"
+          cat > "$fake" <<'SH'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          if [[ "${1:-}" == '--verify-only' ]]; then
+            printf 'OIG_LINUX_ONECLICK_EMBEDDED_DEB_VERIFIED version=%s sha256=%064d\\n' "${OIG_FAKE_VERSION:?}" 0
+            exit 0
+          fi
+          [[ "$#" == 0 ]] || exit 61
+          printf 'FAKE_HELPER_NO_APT\\n' > "${OIG_FAKE_SENTINEL:?}"
+          SH
+          chmod 700 "$fake"
+          export OIG_FAKE_VERSION="$version" OIG_FAKE_SENTINEL="$update_scratch/fake-only"
+          digest="$(sha256sum "$fake" | awk '{print $1}')"
+          result="$update_scratch/receipt.json"
+          bash "$installed_helper" "$fake" "$digest" "$version" 2147000000 "$result" /opt/open-internet-gateway/open-internet-gateway
+          python3 - "$result" "$version" <<'PY'
+          import json,sys
+          d=json.load(open(sys.argv[1],encoding='utf-8'))
+          assert d.get('ok') is True and d.get('version')==sys.argv[2]
+          assert d.get('installScope')=='system-deb' and d.get('requiresOsAuthorization') is True
+          assert d.get('reason')=='NATIVE_DEB_INSTALL_COMPLETE'
+          print('HOSTED_LINUX_ONEFILE_NATIVE_UPDATE_HANDOFF_ISOLATED_PASS')
+          PY
+          grep -Fqx FAKE_HELPER_NO_APT "$OIG_FAKE_SENTINEL"
+          rm -rf -- "$update_scratch"
           # Black-box acceptance of the SAME installed /opt executable produced
           # by the one-file installer, not just a separately extracted DEB.
           # Xvfb, desktop and D-Bus are private; NetworkManager is read-only
