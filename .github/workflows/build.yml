@@ -289,11 +289,11 @@ jobs:
           #!/usr/bin/env bash
           set -euo pipefail
           if [[ "${1:-}" == '--verify-only' ]]; then
-            printf 'OIG_LINUX_ONECLICK_EMBEDDED_DEB_VERIFIED version=%s sha256=%064d\\n' "${OIG_FAKE_VERSION:?}" 0
+            printf 'OIG_LINUX_ONECLICK_EMBEDDED_DEB_VERIFIED version=%s sha256=%064d\n' "${OIG_FAKE_VERSION:?}" 0
             exit 0
           fi
           [[ "$#" == 0 ]] || exit 61
-          printf 'FAKE_HELPER_NO_APT\\n' > "${OIG_FAKE_SENTINEL:?}"
+          printf 'FAKE_HELPER_NO_APT\n' > "${OIG_FAKE_SENTINEL:?}"
           SH
           chmod 700 "$fake"
           export OIG_FAKE_VERSION="$version" OIG_FAKE_SENTINEL="$update_scratch/fake-only"

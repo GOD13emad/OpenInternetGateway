@@ -53,8 +53,10 @@ done
 actual="$(sha256sum -- "$installer" | awk '{print tolower($1)}')" || fail 'INSTALLER_HASH_UNAVAILABLE'
 [[ "$actual" == "$expected" ]] || fail 'INSTALLER_HASH_CHANGED'
 verified="$(timeout 45s bash "$installer" --verify-only)" || fail 'EMBEDDED_DEB_VERIFICATION_FAILED'
-[[ "$verified" == "OIG_LINUX_ONECLICK_EMBEDDED_DEB_VERIFIED version=$version sha256="* ]] ||
-  fail 'EMBEDDED_DEB_VERSION_MISMATCH'
+prefix="OIG_LINUX_ONECLICK_EMBEDDED_DEB_VERIFIED version=$version sha256="
+[[ "$verified" == "$prefix"* ]] || fail 'EMBEDDED_DEB_VERSION_MISMATCH'
+embedded_digest="${verified#"$prefix"}"
+[[ "$embedded_digest" =~ ^[a-f0-9]{64}$ ]] || fail 'EMBEDDED_DEB_DIGEST_INVALID'
 
 # Native one-file setup refuses independent active VPNs before apt, installs
 # OS dependencies from trusted configured repositories, and launches as user.

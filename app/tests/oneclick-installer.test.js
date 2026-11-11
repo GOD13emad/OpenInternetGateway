@@ -228,6 +228,8 @@ test('Linux system-DEB online update selects the same one-file installer and han
   b.platform='linux';b.backendRoot=scratch;
   const debExe='/opt/open-internet-gateway/open-internet-gateway';
   assert.equal(b._linuxInstallFlavor(debExe),'system-deb');
+  assert.equal(b._linuxInstallFlavor(String.raw`\opt\open-internet-gateway\open-internet-gateway`),
+    'system-deb','Linux executable identity is invariant in cross-host synthetic Windows tests');
   assert.equal(b._linuxInstallFlavor('/home/test/AppImageRoot/open-internet-gateway'),'user-appimage');
   const name='OpenInternetGateway-Linux-Setup-2.5.21-amd64.run';
   const asset={name,browser_download_url:'https://example.invalid/never-fetch',
@@ -290,6 +292,16 @@ test('Linux native update helper only performs a one-file OS-authorized upgrade 
   assert.match(script,/bash "\$installer" --verify-only/);
   assert.match(script,/timeout 600s bash "\$installer"/);
   assert.match(script,/NATIVE_INSTALLER_REFUSED_OR_FAILED/);
+  assert.match(script,/EMBEDDED_DEB_DIGEST_INVALID/);
+  const workflow=fs.readFileSync(path.join(__dirname,'../../.github/workflows/build.yml'),'utf8');
+  const sentinelLine=workflow.split(/\r?\n/).find(s=>s.includes("printf 'FAKE_HELPER_NO_APT"));
+  const verifiedLine=workflow.split(/\r?\n/).find(s=>s.includes("printf 'OIG_LINUX_ONECLICK_EMBEDDED_DEB_VERIFIED version=%s"));
+  assert.ok(sentinelLine && verifiedLine,'Isolated CI update fixture must exist');
+  for(const line of [sentinelLine,verifiedLine]){
+    const slashRun=line.match(/\\+n/);
+    assert.equal(slashRun?.[0],String.fromCharCode(92)+'n',
+      'Synthetic CI sentinel must print an actual newline, not a literal backslash-n');
+  }
   assert.match(script,/dpkg-query -W -f='\$\{Version\}' open-internet-gateway/);
   assert.match(script,/installScope':'system-deb'/);
   assert.doesNotMatch(script,/apt-get|nmcli connection (up|down|modify)|--no-sandbox/);

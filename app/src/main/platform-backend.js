@@ -1694,7 +1694,9 @@ class Backend {
   // The managed Debian installation must not silently create a second
   // versioned AppImage under the user's home on an online update.
   _linuxInstallFlavor(executable = process.execPath) {
-    return path.normalize(String(executable || '')) ===
+    // Normalize only separators, not host-OS path semantics: a Linux
+    // package path is also evaluated by source tests on Windows runners.
+    return String(executable || '').replace(/\\/g, '/') ===
       '/opt/open-internet-gateway/open-internet-gateway'
       ? 'system-deb' : 'user-appimage';
   }
