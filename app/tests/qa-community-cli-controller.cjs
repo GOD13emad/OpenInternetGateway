@@ -211,9 +211,15 @@ async function executeSyntheticLifecycle(data) {
       const markers = ['Initialization Sequence Completed', 'VERIFY X509NAME ERROR', 'AUTH_FAILED',
         'Options error', 'Connection reset', 'SIGTERM', 'TLS Error', 'AUTH: Received']
         .filter(marker => log.includes(marker));
+      // Diagnostics contain only a synthetic local server, fixed credential
+      // placeholders and bounded OpenVPN status, not any arbitrary secrets.
+      const tail = log.split(/\r?\n/).filter(Boolean).slice(-12).join(' | ')
+        .replace(/oig_user|oig_pass|wrong-pass/g, '[SYNTHETIC_CREDENTIAL]')
+        .slice(-1600);
       throw new Error('SYNTHETIC_LIFECYCLE_NOT_ACCEPTED_'+a.mode+
         '_observed='+markers.join(',')+'_management='+managementConnected+
-        '_hold='+sawHold+'_challenge='+prompted);
+        '_hold='+sawHold+'_challenge='+prompted+
+        '_childExit='+String(child.exitCode)+'_tail='+tail);
     }
   } finally {
     // The only process signalled is the child PID we spawned. No service,
@@ -271,7 +277,7 @@ if (require.main === module) {
   main().catch(error => {
     // Never log credentials or arbitrary process output.
     const message = String(error && error.message || 'QA_CONTROLLER_ERROR');
-    process.stderr.write('FAIL_QA_CONTROLLER: ' + message.replace(/[\r\n]/g, ' ').slice(0, 350) + '\n');
+    process.stderr.write('FAIL_QA_CONTROLLER: ' + message.replace(/[\r\n]/g, ' ').slice(0, 2100) + '\n');
     process.exitCode = 1;
   });
 }
