@@ -151,9 +151,19 @@ test('management hold/auth protocol uses one reply frame, bounds challenges and 
   assert.ok(events.includes('MANAGEMENT_AUTH_CHALLENGE_LIMIT'));
   session.clear();
   assert.equal(session.snapshot().credentialsCleared,true);
-  assert.throws(()=>session.onLine(">PASSWORD:Need 'Auth' username/password"),
-    /MANAGEMENT_AUTH_SESSION_CLEARED/);
+  session.onLine(">PASSWORD:Need 'Auth' username/password");
+  assert.equal(sent.length,4,'Late teardown event cannot resend stored credentials');
+  session.onLine('>HOLD:late teardown event');
   assert.equal(sent.length,4);
+  const badSession=createAuthSession({
+    username:'x', password:'y', send:()=>{throw new Error('UNEXPECTED_SEND');},
+    stop:()=>stops++, onEvent:label=>events.push(label)
+  });
+  badSession.onLine('x'.repeat(16385));
+  assert.equal(stops,2);
+  assert.equal(badSession.snapshot().challenges,0);
+  assert.ok(events.includes('INVALID_MANAGEMENT_EVENT'));
+  badSession.clear();
   assert.throws(()=>createAuthSession({username:'test\nquit',password:'secret',send:()=>{},stop:()=>{}}),
     /UNSAFE_OPENVPN_MANAGEMENT_CREDENTIAL/);
 });

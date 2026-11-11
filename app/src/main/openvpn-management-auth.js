@@ -39,10 +39,13 @@ function createAuthSession({username, password, send, stop, onEvent = () => {}})
   const emit = label => onEvent(label); // fixed protocol labels, never raw lines
 
   function onLine(line) {
-    if (!credentials) throw new Error('MANAGEMENT_AUTH_SESSION_CLEARED');
+    // During teardown a late management event must never resurrect a
+    // credential exchange or throw from an asynchronous socket callback.
+    if (!credentials) return;
     if (typeof line !== 'string' || line.length > 16384) {
       stop();
-      throw new Error('INVALID_MANAGEMENT_EVENT');
+      emit('INVALID_MANAGEMENT_EVENT');
+      return;
     }
     if (line.startsWith('>HOLD:') && !holdObserved) {
       holdObserved = true;
