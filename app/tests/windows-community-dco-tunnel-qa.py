@@ -170,15 +170,19 @@ def run(args):
         'remote ' + HOST + ' 443', 'nobind', 'resolv-retry 1',
         'remote-cert-tls server',
         'verify-x509-name ' + PEER_CN + ' name',
-        'ca ' + str(ca), 'cert ' + str(cert), 'key ' + str(key),
-        'auth-user-pass ' + str(auth), 'auth-nocache',
+        # OpenVPN config uses backslash escapes: Windows paths must be
+        # normalized to forward slashes and quoted (OpenVPN 2.7 manual).
+        'ca "' + ca.as_posix() + '"',
+        'cert "' + cert.as_posix() + '"',
+        'key "' + key.as_posix() + '"',
+        'auth-user-pass "' + auth.as_posix() + '"', 'auth-nocache',
         'data-ciphers AES-256-GCM:AES-128-GCM',
         'route-nopull', 'route-noexec',
         'pull-filter ignore redirect-gateway',
         'pull-filter ignore dhcp-option',
         'pull-filter ignore route-ipv6',
         'auth-retry none', 'connect-retry-max 1',
-        'verb 4', 'log ' + str(log), ''
+        'verb 4', 'log "' + log.as_posix() + '"', ''
     ]))
     report = {
         'schema': 'oig-hosted-windows-community-dco-scoped-dataplane-v1',

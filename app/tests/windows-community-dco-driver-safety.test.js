@@ -52,6 +52,10 @@ test('scoped DCO tunneled HTTPS is opt-in, runner-only, and owns just a /32 prob
     'New-NetRoute', 'Remove-NetRoute', 'sourceBoundHttpsOverVpn',
     'vpnProcessStopped', 'fullDeviceOrKillSwitchProven', 'diagnosticSignals'
   ]) assert.ok(probe.includes(marker), 'missing bounded DCO probe: ' + marker);
+  for (const windowsPath of ['ca', 'cert', 'key', 'auth', 'log']) {
+    assert.ok(probe.includes(windowsPath + '.as_posix()'),
+      'OpenVPN config path not normalized: ' + windowsPath);
+  }
   assert.match(workflow, /dco-tunnel:/);
   assert.match(workflow, /needs: dco-driver/);
   assert.match(script, /\[switch\]\$ProbeTun/);
