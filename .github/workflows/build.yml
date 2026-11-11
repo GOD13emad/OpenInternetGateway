@@ -198,6 +198,9 @@ jobs:
             }
           done
           echo 'Linux one-file setup checksum and native dependency metadata PASS'
+      - name: Prefer official Ubuntu archive on disposable hosted Linux
+        shell: bash
+        run: bash tools/prepareHostedUbuntuApt.sh
       - name: Test packaged Linux Close/Hide/Reopen/Quit on disposable X11 runner
         shell: bash
         timeout-minutes: 10
@@ -291,6 +294,7 @@ jobs:
         run: |
           set -euo pipefail
           if ! command -v openvpn >/dev/null 2>&1; then
+            bash app/tools/prepareHostedUbuntuApt.sh
             sudo apt-get update -qq
             sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends openvpn
           fi

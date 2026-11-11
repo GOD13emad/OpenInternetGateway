@@ -5,6 +5,7 @@ on:
     paths:
       - '.github/workflows/hosted-linux-provider-data-plane.yml'
       - 'app/tests/hosted-linux-provider-data-plane.py'
+      - 'app/tools/prepareHostedUbuntuApt.sh'
 
 permissions:
   contents: read
@@ -53,6 +54,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          bash app/tools/prepareHostedUbuntuApt.sh
           sudo apt-get update -qq
           sudo apt-get install -y -qq openvpn iproute2 iptables dnsutils curl
           test -c /dev/net/tun
