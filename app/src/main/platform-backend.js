@@ -703,9 +703,31 @@ class Backend {
     });
   }
 
+  // The vendor MSI can install services/drivers. Never initiate that native
+  // system change while Windows reports any other VPN connection or tunnel.
+  // This is an observation only: exit 17=occupied, 18=unable to verify.
+  async _assertWindowsIndependentVpnInactive() {
+    const script = path.join(this.backendRoot, 'scripts', 'Guard-IndependentVpn.ps1');
+    if (!fs.existsSync(script)) {
+      throw new Error('Cannot verify independent Windows VPN safety: packaged guard is missing.');
+    }
+    const result = await run(this._requireWindowsPwsh(), [
+      '-NoProfile', '-NonInteractive', '-File', script
+    ], { timeout: 15000, allowFailure: true });
+    if (result.code === 17) {
+      throw new Error('Another Windows VPN or tunnel is active. Prerequisite installation was refused to protect that connection. End the independent session yourself before first-time setup.');
+    }
+    if (result.code !== 0) {
+      throw new Error('Cannot verify independent Windows VPN state; refusing prerequisite system installation.');
+    }
+  }
+
   async _ensureWindowsConnector() {
     const connector = this._windowsConnectorPath();
     if (fs.existsSync(connector)) return { ready: true, installed: false, path: connector };
+    // Check before downloading and again immediately before UAC/MSI because
+    // a competing VPN may start while the verified installer is downloaded.
+    await this._assertWindowsIndependentVpnInactive();
     const dir = path.join(this.backendRoot, 'updates', 'prerequisites');
     const msi = path.join(dir, WINDOWS_OPENVPN_CONNECT.fileName);
     let sha256 = '';
@@ -738,6 +760,7 @@ class Backend {
       "  exit $p.ExitCode",
       "} catch { Write-Error $_.Exception.Message; exit 1223 }"
     ].join(';');
+    await this._assertWindowsIndependentVpnInactive();
     const install = await run(pwsh, ['-NoProfile','-Command',elevate], { timeout: 300000, allowFailure: true });
     if (![0, 3010, 1641].includes(Number(install.code))) {
       throw new Error('OpenVPN Connect prerequisite installation failed or administrator approval was cancelled (Windows Installer exit ' + install.code + '). Administrator approval is required once.');
