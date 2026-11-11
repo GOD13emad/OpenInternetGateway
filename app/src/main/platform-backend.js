@@ -1538,7 +1538,7 @@ class Backend {
     const downBytes = 2_000_000;
     const downloadArgs = [
       ...tunnelCurlArgs,'-L','--connect-timeout','8','--max-time','20','-sS','-o',sink,
-      '-w','%{http_code}|%{time_total}|%{speed_download}',
+      '-w','%{http_code}|%{time_total}|%{speed_download}|%{size_download}',
       'https://speed.cloudflare.com/__down?bytes=' + String(downBytes)
     ];
     let down;
@@ -1549,11 +1549,13 @@ class Backend {
     for (let attempt = 0; attempt < 2; attempt++) {
       downloadAttempts++;
       down = await run('curl', downloadArgs, { timeout: 24000, allowFailure: true });
-      const [code,,speed] = String(down.stdout || '').trim().split('|');
-      if (code === '200' && Number(speed) > 0) break;
+      const [code,,speed,actualBytes] = String(down.stdout || '').trim().split('|');
+      if (down.code === 0 && code === '200' && Number(speed) > 0 &&
+          Number(actualBytes) === downBytes) break;
     }
-    const [downCode, downTime, downSpeed] = String(down?.stdout || '').trim().split('|');
-    if (downCode !== '200' || !(Number(downSpeed) > 0)) {
+    const [downCode, downTime, downSpeed, downloadedBytes] = String(down?.stdout || '').trim().split('|');
+    if (down?.code !== 0 || downCode !== '200' || !(Number(downSpeed) > 0) ||
+        Number(downloadedBytes) !== downBytes) {
       throw new Error('Real download test did not complete successfully after a bounded retry.');
     }
 
@@ -1565,20 +1567,22 @@ class Backend {
     let uploadAttempts = 0;
     try {
       const uploadArgs = [
-        ...tunnelCurlArgs,'-L','--connect-timeout','8','--max-time','20','-sS','-o',sink,'-w','%{http_code}|%{time_total}|%{speed_upload}',
+        ...tunnelCurlArgs,'-L','--connect-timeout','8','--max-time','20','-sS','-o',sink,'-w','%{http_code}|%{time_total}|%{speed_upload}|%{size_upload}',
         '-X','POST','--data-binary','@' + tempUpload,'https://speed.cloudflare.com/__up'
       ];
       for (let attempt = 0; attempt < 2; attempt++) {
         uploadAttempts++;
         up = await run('curl', uploadArgs, { timeout: 24000, allowFailure: true });
-        const [code,,speed] = String(up.stdout || '').trim().split('|');
-        if (code === '200' && Number(speed) > 0) break;
+        const [code,,speed,actualBytes] = String(up.stdout || '').trim().split('|');
+        if (up.code === 0 && code === '200' && Number(speed) > 0 &&
+            Number(actualBytes) === upBytes) break;
       }
     } finally {
       try { fs.unlinkSync(tempUpload); } catch {}
     }
-    const [upCode, upTime, upSpeed] = String(up?.stdout || '').trim().split('|');
-    if (upCode !== '200' || !(Number(upSpeed) > 0)) throw new Error('Real upload test did not complete successfully after a bounded retry.');
+    const [upCode, upTime, upSpeed, uploadedBytes] = String(up?.stdout || '').trim().split('|');
+    if (up?.code !== 0 || upCode !== '200' || !(Number(upSpeed) > 0) ||
+        Number(uploadedBytes) !== upBytes) throw new Error('Real upload test did not complete successfully after a bounded retry.');
 
     const endStatus = await this.status();
     if (!endStatus.connected || Number(endStatus.fullRoutes || 0) < 2 ||
@@ -1616,8 +1620,8 @@ class Backend {
       httpsLatencyMs: latencyMs,
       downloadMbps: Math.round(Number(downSpeed) * 8 / 1_000_000 * 100) / 100,
       uploadMbps: Math.round(Number(upSpeed) * 8 / 1_000_000 * 100) / 100,
-      downloadBytes: downBytes,
-      uploadBytes: upBytes,
+      downloadBytes: Number(downloadedBytes),
+      uploadBytes: Number(uploadedBytes),
       downloadAttempts,
       uploadAttempts,
       downloadSeconds: Number(downTime) || null,

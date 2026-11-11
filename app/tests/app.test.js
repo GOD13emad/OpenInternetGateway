@@ -1408,7 +1408,7 @@ test('real throughput never persists measurements when VPN source or active rela
     child.stdout=new EventEmitter();child.stderr=new EventEmitter();
     process.nextTick(()=>{
       const upload=args.includes('-X');
-      child.stdout.emit('data',Buffer.from(upload?'200|1|62500':'200|1|1250000'));
+      child.stdout.emit('data',Buffer.from(upload?'200|1|62500|512000':'200|1|1250000|2000000'));
       child.emit('close',0);
     });
     return child;
@@ -1477,9 +1477,12 @@ test('active download retries once on the same VPN-bound source and never persis
     const isUpload=args.includes('--data-binary');
     if(isUpload) uploadCount++;
     else downloadCount++;
-    const response=isUpload?'200|1|62500':
-      (mode==='all-fail'||downloadCount===1?'503|0.8|0':'200|1|1250000');
-    process.nextTick(()=>{child.stdout.emit('data',Buffer.from(response));child.emit('close',0)});
+    const response=isUpload
+      ? (mode==='short-upload'?'200|1|62500|256000':'200|1|62500|512000')
+      : (mode==='short-download'?'200|1|1250000|1000000'
+        : mode==='all-fail'||downloadCount===1?'503|0.8|0|0':'200|1|1250000|2000000');
+    const closeCode=mode==='curl-error'&&!isUpload?18:0;
+    process.nextTick(()=>{child.stdout.emit('data',Buffer.from(response));child.emit('close',closeCode)});
     return child;
   };
   const mod={exports:{}};
@@ -1503,11 +1506,16 @@ test('active download retries once on the same VPN-bound source and never persis
       }]});
       b._httpsLatencyMs=async()=>20;b._icmpPing=async()=>null;
       const saved=path.join(temp,'state','connection-benchmarks.json');
-      if(scenario==='all-fail'){
+      if(['all-fail','short-download','curl-error'].includes(scenario)){
         await assert.rejects(b.benchmarkActive(),/Real download test.*bounded retry/);
         assert.equal(downloadCount,2);
         assert.equal(uploadCount,0,'Never upload after an unverified download');
         assert.equal(fs.existsSync(saved),false,'Failed transfer must not be persisted');
+      }else if(scenario==='short-upload'){
+        await assert.rejects(b.benchmarkActive(),/Real upload test.*bounded retry/);
+        assert.equal(downloadCount,2);
+        assert.equal(uploadCount,2);
+        assert.equal(fs.existsSync(saved),false,'Incomplete upload must not be counted');
       }else if(scenario==='source-change'){
         await assert.rejects(b.benchmarkActive(),/Tunnel route or active connection changed/);
         assert.equal(downloadCount,2);
@@ -1519,13 +1527,14 @@ test('active download retries once on the same VPN-bound source and never persis
         assert.equal(res.benchmark.uploadAttempts,1);
         assert.equal(res.benchmark.throughputPath,'vpn-source-ip-bound');
         assert.equal(res.benchmark.downloadBytes,2000000);
+        assert.equal(res.benchmark.uploadBytes,512000);
         assert.equal(downloadCount,2);
         assert.equal(uploadCount,1);
         assert.equal(JSON.parse(fs.readFileSync(saved,'utf8'))[sha].downloadAttempts,2);
       }
     }finally{fs.rmSync(temp,{recursive:true,force:true})}
   }
-  for(const scenario of ['transient','all-fail','source-change'])await exercise(scenario);
+  for(const scenario of ['transient','all-fail','short-download','short-upload','curl-error','source-change'])await exercise(scenario);
 });
 
 test('Windows packaged capture QA is fail-closed and never writes the real installed backend or registers autostart', async()=>{
