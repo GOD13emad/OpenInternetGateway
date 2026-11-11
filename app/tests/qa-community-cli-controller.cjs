@@ -363,6 +363,9 @@ async function executeSyntheticLifecycle(data) {
     authRejected: final.authRejected,
     localOnly: !a.live, devNull: true, routesNotExecuted: true,
     remoteProviderProbed: a.live,
+    // Preserve the historical receipt contract for synthetic no-TUN cases.
+    // Real provider trust is separately and explicitly scoped by pinnedPeerVerified.
+    independentPublicServerVerified: false,
     pinnedProviderCaSha256: a.live ? PINNED_PROVIDER.caDerSha256 : null,
     pinnedPeerVerified: final.pinnedPeerVerified === true,
     publicUserAuthenticated: final.publicUserAuthenticated === true,
