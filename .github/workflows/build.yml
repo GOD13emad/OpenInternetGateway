@@ -55,7 +55,9 @@ jobs:
         if: always() && github.event_name == 'pull_request' && github.head_ref == 'qa/v2.5.20-operator-safety-20261019'
         with:
           name: windows-community-engine-feasibility-receipt
-          path: ${{ runner.temp }}/oig-community-engine-feasibility.json
+          path: |
+            ${{ runner.temp }}/oig-community-engine-feasibility.json
+            ${{ runner.temp }}/oig-community-loopback-receipt.json
           if-no-files-found: warn
       - run: npm run dist:win
       - name: Smoke-test silent NSIS install on disposable runner

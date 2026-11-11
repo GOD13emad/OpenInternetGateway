@@ -93,6 +93,32 @@ try{
     $matched[$flag]=($help.Contains($flag))
     if(-not $matched[$flag]){throw ('WINDOWS_COMMUNITY_CLI_FLAG_MISSING_'+$flag)}
   }
+  # Exercise verified native 2.7.9 as an actual localhost TLS client and
+  # server. Synthetic password challenge is answered over management TCP;
+  # both negative cases must fail closed. dev null prevents tunnel creation.
+  $python=(Get-Command python.exe -ErrorAction Stop).Source
+  $opensslCandidates=@(
+    (Get-Command openssl.exe -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty Source),
+    'C:\Program Files\Git\usr\bin\openssl.exe',
+    'C:\Program Files\Git\mingw64\bin\openssl.exe'
+  )
+  $openssl=@($opensslCandidates | Where-Object {$_ -and (Test-Path -LiteralPath $_ -PathType Leaf)} | Select-Object -First 1)
+  if($openssl.Count -ne 1){throw 'OPENSSL_UNAVAILABLE_IN_DISPOSABLE_WINDOWS_RUNNER'}
+  $localReceipt=Join-Path $env:RUNNER_TEMP 'oig-community-loopback-receipt.json'
+  if(Test-Path -LiteralPath $localReceipt){throw 'LOCAL_LOOPBACK_RECEIPT_ALREADY_EXISTS'}
+  $localSmoke=Join-Path (Get-Location) 'tests/windows-community-engine-loopback.py'
+  if(!(Test-Path -LiteralPath $localSmoke -PathType Leaf)){throw 'LOCAL_LOOPBACK_SCRIPT_MISSING'}
+  & $python -B $localSmoke --openvpn $exe --openssl $openssl[0] --receipt $localReceipt
+  if($LASTEXITCODE -ne 0){throw 'LOCAL_TLS_PASSWORD_MANAGEMENT_SMOKE_FAILED'}
+  $proof=Get-Content -LiteralPath $localReceipt -Raw | ConvertFrom-Json
+  if($proof.schema -cne 'oig-community-windows-loopback-v1' -or -not $proof.pass -or
+     @($proof.cases).Count -ne 3 -or
+     @($proof.cases|Where-Object { -not $_.managementPromptObserved }).Count -ne 0 -or
+     @($proof.cases|Where-Object {$_.mode -eq 'valid' -and $_.tlsAccepted}).Count -ne 1 -or
+     @($proof.cases|Where-Object {$_.mode -eq 'bad-cn' -and $_.identityRejected -and -not $_.tlsAccepted}).Count -ne 1 -or
+     @($proof.cases|Where-Object {$_.mode -eq 'bad-password' -and $_.authRejected -and -not $_.tlsAccepted}).Count -ne 1){
+    throw 'LOCAL_LOOPBACK_RECEIPT_NEGATIVE_CASE_NOT_ACCEPTED'
+  }
   $routesAfter=@(Get-NetRoute -AddressFamily IPv4 -ErrorAction SilentlyContinue |
     Where-Object {$_.DestinationPrefix -in @('0.0.0.0/1','128.0.0.0/1')} |
     Sort-Object DestinationPrefix,InterfaceIndex |
@@ -102,20 +128,23 @@ try{
   if([string]$routesBefore -cne [string]$routesAfter){throw 'DISPOSABLE_WINDOWS_ROUTES_CHANGED'}
   if([string]$preExistingService -cne [string]$postService){throw 'OPENVPN_SERVICE_CHANGED_BY_READONLY_PROBE'}
   $result=[ordered]@{
-    schema='oig-windows-community-engine-offline-feasibility-v1'
+    schema='oig-windows-community-engine-offline-feasibility-v2'
     sourceSha=$env:GITHUB_SHA;version=$release
     msiSHA256=$expectedHash;openvpnExeSHA256=$expectedExe
     primarySigningKeyFingerprint=$vendorPrimaryFingerprint
     sourceReleaseHashVerifiedAgainstGpgSignedMSI=$true
-    binaryExecutedVersionAndHelpOnly=$true
+    binaryExecutedVersionAndHelpOnly=$false
     availableOptions=$matched
-    passwordManagementFeatureProbedLive=$false
-    serverTlsHandshakeAttempted=$false
+    passwordManagementFeatureProbedLive=$true
+    serverTlsHandshakeAttempted=$true
     userVpnConnected=$false
     networkRoutesUnchanged=$true
     serviceOrDriverInstalled=$false
     productEngineSwitched=$false
-    result='PASS_OFFLINE_FEASIBILITY_ONLY'
+    loopbackReceiptSHA256=(Get-FileHash -LiteralPath $localReceipt -Algorithm SHA256).Hash.ToLowerInvariant()
+    localSyntheticTlsAndManagementOnly=$true
+    independentlyTrustedRemoteServer=$false
+    result='PASS_LOCAL_SYNTHETIC_TLS_AND_PASSWORD_MANAGEMENT_ONLY'
   }
   [IO.File]::WriteAllText($Receipt,($result|ConvertTo-Json -Depth 6),[Text.UTF8Encoding]::new($false))
   Write-Output 'VERIFIED_OFFICIAL_OPENVPN_2_7_9_WINDOWS_PASSWORD_OPTIONS_PRESENT'
