@@ -1599,6 +1599,7 @@ test('Windows direct ISP requires the winning physical route before claiming phy
   const source=fs.readFileSync(path.join(root,'src/main/platform-backend.js'),'utf8');
   const calls=[];
   let redirectedDestination='';
+  let truncateDownload=false,truncateUpload=false,downloadCurlError=false;
   const spawnMock=(program,args,options)=>{
     const cmd=args.at(-1);
     let response='';
@@ -1610,13 +1611,13 @@ test('Windows direct ISP requires the winning physical route before claiming phy
       calls.push(to);
       response=to===redirectedDestination?'REJECTED_FAKE_VPN_ROUTE':'VERIFIED_DIRECT_ROUTE';
     }else if(program==='curl'){
-      if(args.includes('--data-binary'))response='200|1|900000|203.0.113.21';
-      else if(args.some(a=>String(a).includes('__down')))response='200|1|1800000|203.0.113.20';
+      if(args.includes('--data-binary'))response='200|1|900000|203.0.113.21|'+(truncateUpload?'250000':'1000000');
+      else if(args.some(a=>String(a).includes('__down')))response='200|1|1800000|203.0.113.20|'+(truncateDownload?'2500000':'5000000');
       else response='ip=203.0.113.50\\nloc=US';
     }else throw Error('Unexpected external process in QA route fixtures '+program);
     const child=new EventEmitter();child.stdin=new EventEmitter();child.stdin.end=()=>{};
     child.stdout=new EventEmitter();child.stderr=new EventEmitter();
-    process.nextTick(()=>{child.stdout.emit('data',Buffer.from(response));child.emit('close',0)});
+    process.nextTick(()=>{child.stdout.emit('data',Buffer.from(response));child.emit('close',downloadCurlError&&program==='curl'&&args.some(a=>String(a).includes('__down'))?18:0)});
     return child;
   };
   const mod={exports:{}};
@@ -1661,12 +1662,27 @@ test('Windows direct ISP requires the winning physical route before claiming phy
     assert.equal(fs.existsSync(path.join(temp,'state','direct-benchmark-upload.bin')),false,
       'QA upload payload must be removed on refusal');
     redirectedDestination='';
+    truncateDownload=true;
+    await assert.rejects(b.benchmarkDirectInternet(),/Direct ISP download test did not complete/);
+    assert.equal(fs.existsSync(tempJson),false,'Short physical download cannot be persisted');
+    truncateDownload=false;
+    truncateUpload=true;
+    await assert.rejects(b.benchmarkDirectInternet(),/Direct ISP upload test did not complete/);
+    assert.equal(fs.existsSync(tempJson),false,'Short physical upload cannot be persisted');
+    assert.equal(fs.existsSync(path.join(temp,'state','direct-benchmark-upload.bin')),false);
+    truncateUpload=false;
+    downloadCurlError=true;
+    await assert.rejects(b.benchmarkDirectInternet(),/Direct ISP download test did not complete/);
+    assert.equal(fs.existsSync(tempJson),false,'Nonzero curl exit invalidates positive metadata');
+    downloadCurlError=false;
     const ok=await b.benchmarkDirectInternet();
     assert.equal(ok.ok,true);
     assert.equal(ok.benchmark.effectiveRouteVerified,true);
     assert.equal(ok.benchmark.interface,'Ethernet QA');
     assert.equal(ok.benchmark.downloadMbps,14.4);
     assert.equal(ok.benchmark.uploadMbps,7.2);
+    assert.equal(ok.benchmark.downloadBytes,5000000);
+    assert.equal(ok.benchmark.uploadBytes,1000000);
     assert.deepEqual(calls.slice(-3),['203.0.113.19','203.0.113.20','203.0.113.21']);
     assert.equal(JSON.parse(fs.readFileSync(tempJson,'utf8')).effectiveRouteVerified,true);
   }finally{fs.rmSync(temp,{recursive:true,force:true})}

@@ -1343,11 +1343,12 @@ class Backend {
     const downBytes = 5_000_000;
     const down = await run('curl', [
       ...this._directCurlArgs(pathInfo),'-L','--fail','--connect-timeout','6','--max-time','20',
-      '-sS','-o',sink,'-w','%{http_code}|%{time_total}|%{speed_download}|%{remote_ip}',
+      '-sS','-o',sink,'-w','%{http_code}|%{time_total}|%{speed_download}|%{remote_ip}|%{size_download}',
       'https://speed.cloudflare.com/__down?bytes=' + String(downBytes)
     ], { timeout: 24000, allowFailure: true });
-    const [downCode, downTime, downSpeed, downloadRemoteIP] = String(down.stdout || '').trim().split('|');
-    if (downCode !== '200' || !(Number(downSpeed) > 0)) throw new Error('Direct ISP download test did not complete successfully.');
+    const [downCode, downTime, downSpeed, downloadRemoteIP, actualDownBytes] = String(down.stdout || '').trim().split('|');
+    if (down.code !== 0 || downCode !== '200' || !(Number(downSpeed) > 0) ||
+        Number(actualDownBytes) !== downBytes) throw new Error('Direct ISP download test did not complete successfully.');
 
     const upBytes = 1_000_000;
     const tempUpload = path.join(this.backendRoot, 'state', 'direct-benchmark-upload.bin');
@@ -1357,14 +1358,15 @@ class Backend {
     try {
       up = await run('curl', [
         ...this._directCurlArgs(pathInfo),'-L','--fail','--connect-timeout','6','--max-time','20',
-        '-sS','-o',sink,'-w','%{http_code}|%{time_total}|%{speed_upload}|%{remote_ip}',
+        '-sS','-o',sink,'-w','%{http_code}|%{time_total}|%{speed_upload}|%{remote_ip}|%{size_upload}',
         '-X','POST','--data-binary','@' + tempUpload,'https://speed.cloudflare.com/__up'
       ], { timeout: 24000, allowFailure: true });
     } finally {
       try { fs.unlinkSync(tempUpload); } catch {}
     }
-    const [upCode, upTime, upSpeed, uploadRemoteIP] = String(up.stdout || '').trim().split('|');
-    if (upCode !== '200' || !(Number(upSpeed) > 0)) throw new Error('Direct ISP upload test did not complete successfully.');
+    const [upCode, upTime, upSpeed, uploadRemoteIP, actualUpBytes] = String(up.stdout || '').trim().split('|');
+    if (up.code !== 0 || upCode !== '200' || !(Number(upSpeed) > 0) ||
+        Number(actualUpBytes) !== upBytes) throw new Error('Direct ISP upload test did not complete successfully.');
 
     let normalEgress = { ip: '', country: '' };
     try {
@@ -1400,8 +1402,8 @@ class Backend {
       httpsLatencyMs: trace.httpsLatencyMs,
       downloadMbps: Math.round(Number(downSpeed) * 8 / 1_000_000 * 100) / 100,
       uploadMbps: Math.round(Number(upSpeed) * 8 / 1_000_000 * 100) / 100,
-      downloadBytes: downBytes,
-      uploadBytes: upBytes,
+      downloadBytes: Number(actualDownBytes),
+      uploadBytes: Number(actualUpBytes),
       downloadSeconds: Number(downTime) || null,
       uploadSeconds: Number(upTime) || null,
       endpoint: 'speed.cloudflare.com',
