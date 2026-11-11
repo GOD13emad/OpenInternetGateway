@@ -33,7 +33,8 @@ test('ovpn-dco test pins signed vendor source and uninstalls only its own adapte
     'TAPCTL_CREATE_FAILED','Get-CimInstance Win32_PnPSignedDriver',
     'IsSigned','PNPDeviceID','delete $rollbackGuid',"Run-Msi '/x' $msi",
     'hostRoutesAndDnsRestored','vendorServicesRemoved',
-    'fullDeviceVpnTested=$false','externalVpnConnected=$false'
+    'fullDeviceVpnTested=$false','externalVpnConnected=$tunAccepted',
+    'externalVpnConnectionAttempted=[bool]$ProbeTun'
   ]) assert.ok(script.includes(marker), 'missing bounded lifecycle: '+marker);
   assert.doesNotMatch(script, /Remove-NetRoute|Set-DnsClientServerAddress|Add-NetRoute/);
   assert.match(script, /tapctl list --hwid ovpn-dco/);
@@ -49,7 +50,7 @@ test('scoped DCO tunneled HTTPS is opt-in, runner-only, and owns just a /32 prob
     'OPENVPN_PE_PIN_MISMATCH', 'route-nopull', 'route-noexec',
     'remote-cert-tls server', 'verify-x509-name ', 'api.ipify.org',
     'New-NetRoute', 'Remove-NetRoute', 'sourceBoundHttpsOverVpn',
-    'vpnProcessStopped', 'fullDeviceOrKillSwitchProven'
+    'vpnProcessStopped', 'fullDeviceOrKillSwitchProven', 'diagnosticSignals'
   ]) assert.ok(probe.includes(marker), 'missing bounded DCO probe: ' + marker);
   assert.match(workflow, /dco-tunnel:/);
   assert.match(workflow, /needs: dco-driver/);

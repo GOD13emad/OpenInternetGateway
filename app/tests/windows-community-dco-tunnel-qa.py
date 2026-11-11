@@ -272,6 +272,30 @@ def run(args):
             report['hostDnsUnchanged'] = prior['dns'] == after['dns']
         except Exception as exc:
             failure += ';NETWORK_RECHECK_' + type(exc).__name__
+        # Only fixed boolean diagnostic categories leave this ephemeral VM.
+        # Raw OpenVPN log contains paths and provider material and is discarded.
+        private_log = log.read_text(errors='replace')[-100000:] if log.exists() else ''
+        report['processExitCode'] = process.poll() if process else None
+        report['diagnosticSignals'] = {
+            'optionsError': 'Options error:' in private_log,
+            'unknownOption': 'Unrecognized option' in private_log,
+            'tunnelDeviceError': any(x in private_log for x in (
+                'TUN/TAP', 'tap device open', 'DCO device', 'ovpn-dco device',
+                'There are no TAP', 'failed to open tun')),
+            'keyOrCertificateError': any(x in private_log for x in (
+                'Cannot load private key', 'Cannot load certificate', 'BIO_new_file')),
+            'tlsHandshakeError': 'TLS Error' in private_log,
+            'peerVerifyError': 'VERIFY ERROR' in private_log,
+            'authRejected': 'AUTH_FAILED' in private_log,
+            'networkResolveError': 'Cannot resolve host address' in private_log,
+            'fatalError': 'Exiting due to fatal error' in private_log,
+            'dcoDisabled': any(x in private_log for x in (
+                'DCO disabled', 'disabling data channel offload')),
+            'optionMentions': [opt for opt in (
+                'route-nopull', 'route-noexec', 'dev-node', 'proto',
+                'auth-user-pass', 'pull-filter', 'remote-cert-tls',
+                'resolv-retry', 'data-ciphers') if opt in private_log]
+        }
         report['pass'] = (
             all(report[k] for k in (
                 'peerIdentityVerified', 'tunnelIpAssigned',
