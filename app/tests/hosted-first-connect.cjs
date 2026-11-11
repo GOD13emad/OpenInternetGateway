@@ -15,7 +15,7 @@ const normalizeAsarEntry=s=>s.split(String.fromCharCode(92)).join('/').replace(/
 const managementHits=asar.listPackage(archive).filter(s=>
   normalizeAsarEntry(s)==='src/main/openvpn-management-auth.js');
 assert.equal(managementHits.length,1,'PACKAGED_COMMUNITY_MANAGEMENT_PROTOCOL_MISSING');
-const shippedManagement=asar.extractFile(archive,normalizeAsarEntry(managementHits[0]));
+const shippedManagement=asar.extractFile(archive,managementHits[0].replace(/^[\\\\/]+/,''));
 const sourceManagement=fs.readFileSync(path.join(__dirname,'../src/main/openvpn-management-auth.js'));
 assert.equal(Buffer.compare(shippedManagement,sourceManagement),0,'PACKAGED_MANAGEMENT_PROTOCOL_MISMATCH');
 const m=new Module(path.join(os.tmpdir(),'oig-installed-backend.cjs'),module);

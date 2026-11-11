@@ -167,3 +167,30 @@ test('management hold/auth protocol uses one reply frame, bounds challenges and 
   assert.throws(()=>createAuthSession({username:'test\nquit',password:'secret',send:()=>{},stop:()=>{}}),
     /UNSAFE_OPENVPN_MANAGEMENT_CREDENTIAL/);
 });
+
+
+test('native ASAR extraction keeps the host separator for packaged Community protocol', async () => {
+  const asar = require('@electron/asar');
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'oig-community-asar-native-'));
+  try {
+    const src = path.join(temp, 'source', 'src', 'main');
+    fs.mkdirSync(src, {recursive: true});
+    const filename = 'openvpn-management-auth.js';
+    const original = fs.readFileSync(path.join(root, 'src', 'main', filename));
+    fs.writeFileSync(path.join(src, filename), original);
+    const archive = path.join(temp, 'app.asar');
+    await asar.createPackageFromFiles(path.join(temp, 'source'), archive,
+      [path.join(src, filename)]);
+    const normalized = s => s.split(String.fromCharCode(92)).join('/').replace(/^\/+/, '');
+    const hits = asar.listPackage(archive).filter(s =>
+      normalized(s) === 'src/main/' + filename);
+    assert.equal(hits.length, 1, 'Packaged file must be discoverable on Windows and Linux');
+    // asar.Filesystem uses Node's platform-native path.dirname/path.basename.
+    // Normalize *only* for comparison; never transform the extraction path.
+    const nativeEntry = hits[0].replace(/^[\\/]+/, '');
+    assert.equal(nativeEntry.includes(path.sep), true);
+    assert.equal(Buffer.compare(asar.extractFile(archive, nativeEntry), original), 0);
+  } finally {
+    fs.rmSync(temp, {recursive: true, force: true});
+  }
+});
