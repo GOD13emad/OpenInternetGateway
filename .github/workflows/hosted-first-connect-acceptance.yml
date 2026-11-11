@@ -32,6 +32,7 @@ on:
       - 'app/tests/windows-community-engine-offline-feasibility.ps1'
       - 'app/tests/windows-community-engine-loopback.py'
       - 'app/tests/qa-community-cli-controller.cjs'
+      - 'app/tests/windows-community-provider-live.py'
       - 'app/tests/windows-community-qa-controller.test.js'
 
 permissions:

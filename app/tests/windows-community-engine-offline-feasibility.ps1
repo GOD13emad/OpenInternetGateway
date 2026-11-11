@@ -148,6 +148,39 @@ try{
      @($control.cases | Where-Object {$_.mode -eq 'bad-password' -and $_.authRejected -and -not $_.tlsAccepted}).Count -ne 1){
     throw 'OWNED_COMMUNITY_CONTROLLER_RECEIPT_INVALID'
   }
+  # Real public provider CA/CN/password acceptance, without a TUN or any
+  # route/DNS/service changes. The provider's official HTTPS profile/credential
+  # are independently pinned and the temporary private material is removed.
+  $liveReceipt=Join-Path $env:RUNNER_TEMP 'oig-community-live-peer-receipt.json'
+  if(Test-Path -LiteralPath $liveReceipt){throw 'LIVE_PROVIDER_RECEIPT_EXISTS'}
+  $liveSmoke=Join-Path (Get-Location) 'tests/windows-community-provider-live.py'
+  if(-not(Test-Path -LiteralPath $liveSmoke -PathType Leaf)){throw 'LIVE_PROVIDER_SCRIPT_MISSING'}
+  try{
+    $env:OIG_HOSTED_LIVE_PROVIDER_QA='1'
+    & $python -B $liveSmoke --openvpn $exe --node-bin $node --receipt $liveReceipt
+    if($LASTEXITCODE -ne 0){throw 'WINDOWS_PINNED_PROVIDER_LIVE_PEER_NOT_VERIFIED'}
+  }finally{
+    Remove-Item Env:\OIG_HOSTED_LIVE_PROVIDER_QA -ErrorAction SilentlyContinue
+  }
+  $liveProof=Get-Content -LiteralPath $liveReceipt -Raw | ConvertFrom-Json
+  if($liveProof.schema -cne 'oig-hosted-windows-community-provider-identity-v1' -or
+     -not $liveProof.pass -or
+     -not $liveProof.providerIdentityPinned -or
+     -not $liveProof.providerAuthenticatedWithPublicSharedLogin -or
+     -not $liveProof.noTunOrRouteOrDnsMutation -or
+     $liveProof.productEngineChanged -or
+     $liveProof.ownerHostTouched -or
+     $liveProof.caDerSha256 -cne 'c0c7c3663bd229bce127647dece873d37e022a5d283a35b162bb125ac70bb9ff' -or
+     @($liveProof.cases).Count -ne 2 -or
+     @($liveProof.cases | Where-Object { -not $_.ownedProcessStopped -or
+        -not $_.closedManagementListener -or -not $_.managementTokenErased -or
+        -not $_.managementPasswordProtected -or -not $_.routesNotExecuted }).Count -ne 0 -or
+     @($liveProof.cases | Where-Object { $_.mode -eq 'live-provider' -and
+        $_.tlsAccepted -and $_.pinnedPeerVerified -and $_.publicUserAuthenticated }).Count -ne 1 -or
+     @($liveProof.cases | Where-Object { $_.mode -eq 'live-wrong-cn' -and
+        $_.identityRejected -and -not $_.tlsAccepted }).Count -ne 1){
+    throw 'WINDOWS_PINNED_PROVIDER_LIVE_RECEIPT_FAIL_CLOSED'
+  }
   $routesAfter=@(Get-NetRoute -AddressFamily IPv4 -ErrorAction SilentlyContinue |
     Where-Object {$_.DestinationPrefix -in @('0.0.0.0/1','128.0.0.0/1')} |
     Sort-Object DestinationPrefix,InterfaceIndex |
@@ -157,7 +190,7 @@ try{
   if([string]$routesBefore -cne [string]$routesAfter){throw 'DISPOSABLE_WINDOWS_ROUTES_CHANGED'}
   if([string]$preExistingService -cne [string]$postService){throw 'OPENVPN_SERVICE_CHANGED_BY_READONLY_PROBE'}
   $result=[ordered]@{
-    schema='oig-windows-community-engine-offline-feasibility-v3'
+    schema='oig-windows-community-engine-offline-feasibility-v4'
     sourceSha=$env:GITHUB_SHA;version=$release
     msiSHA256=$expectedHash;openvpnExeSHA256=$expectedExe
     primarySigningKeyFingerprint=$vendorPrimaryFingerprint
@@ -175,8 +208,10 @@ try{
     applicationOwnedManagementClientSyntheticOnly=$true
     controllerReceiptSHA256=(Get-FileHash -LiteralPath $controllerReceipt -Algorithm SHA256).Hash.ToLowerInvariant()
     ownerNetworkUntouched=$true
+    providerPeerIdentityPinnedAndLiveVerified=$true
+    liveProviderReceiptSHA256=(Get-FileHash -LiteralPath $liveReceipt -Algorithm SHA256).Hash.ToLowerInvariant()
     independentlyTrustedRemoteServer=$false
-    result='PASS_LOCAL_SYNTHETIC_TLS_AND_APP_OWNED_MANAGEMENT_ONLY'
+    result='PASS_LOCAL_SYNTHETIC_AND_PINNED_LIVE_PROVIDER_NO_TUN'
   }
   [IO.File]::WriteAllText($Receipt,($result|ConvertTo-Json -Depth 6),[Text.UTF8Encoding]::new($false))
   Write-Output 'PASS_PINNED_OPENVPN_2_7_9_APP_OWNED_LOCAL_TLS_MANAGEMENT'

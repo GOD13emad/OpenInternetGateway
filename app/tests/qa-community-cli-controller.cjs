@@ -11,7 +11,12 @@ const crypto = require('node:crypto');
 const {spawn} = require('node:child_process');
 
 const WIN_EXE_SHA = '0b9b5ad60279b912ae826da5e13a57750fdc918d9ec28b73f031aaffef8dd485';
-const MODES = new Set(['valid', 'bad-cn', 'bad-password']);
+const MODES = new Set(['valid', 'bad-cn', 'bad-password',
+  'live-provider', 'live-wrong-cn']);
+const PINNED_PROVIDER = Object.freeze({
+  host: 'uk205.vpnbook.com', port: 443, serverCN: 'server.vpnbook.com',
+  caDerSha256: 'c0c7c3663bd229bce127647dece873d37e022a5d283a35b162bb125ac70bb9ff'
+});
 
 function assertDisposable() {
   const ci = process.platform === 'win32' &&
@@ -48,12 +53,33 @@ function boundedInput(data) {
   if (!Number.isInteger(data.port) || data.port < 1 || data.port > 65535) {
     throw new Error('INVALID_LOCAL_PORT');
   }
-  if (data.username !== 'oig_user' ||
-      (data.password !== 'oig_pass' && data.password !== 'wrong-pass')) {
-    throw new Error('NOT_SYNTHETIC_CREDENTIALS');
-  }
-  if ((data.mode === 'bad-password') !== (data.password === 'wrong-pass')) {
-    throw new Error('TEST_MODE_CREDENTIAL_MISMATCH');
+  const live = data.mode === 'live-provider' || data.mode === 'live-wrong-cn';
+  if (live) {
+    // Never open a real external connection from an owner Linux/Windows host.
+    if (process.platform !== 'win32' ||
+        process.env.OIG_HOSTED_LIVE_PROVIDER_QA !== '1') {
+      throw new Error('HOSTED_WINDOWS_LIVE_PROVIDER_ONLY');
+    }
+    if (data.port !== PINNED_PROVIDER.port ||
+        data.username !== 'vpnbook' ||
+        typeof data.password !== 'string' ||
+        !/^[A-Za-z0-9]{4,32}$/.test(data.password)) {
+      throw new Error('INVALID_PUBLIC_PROVIDER_IDENTITY_OR_LOGIN');
+    }
+    const caFile = localFile(root, data.ca);
+    const ca = new crypto.X509Certificate(fs.readFileSync(caFile));
+    if (crypto.createHash('sha256').update(ca.raw).digest('hex') !==
+        PINNED_PROVIDER.caDerSha256) {
+      throw new Error('PUBLIC_PROVIDER_CA_PIN_MISMATCH');
+    }
+  } else {
+    if (data.username !== 'oig_user' ||
+        (data.password !== 'oig_pass' && data.password !== 'wrong-pass')) {
+      throw new Error('NOT_SYNTHETIC_CREDENTIALS');
+    }
+    if ((data.mode === 'bad-password') !== (data.password === 'wrong-pass')) {
+      throw new Error('TEST_MODE_CREDENTIAL_MISMATCH');
+    }
   }
   const binary = fs.realpathSync(data.exe);
   if (!fs.lstatSync(binary).isFile()) throw new Error('NO_OPENVPN_EXECUTABLE');
@@ -64,7 +90,7 @@ function boundedInput(data) {
   return {
     root, binary, ca: localFile(root, data.ca),
     cert: localFile(root, data.cert), key: localFile(root, data.key),
-    mode: data.mode, port: data.port, username: data.username,
+    mode: data.mode, live, port: data.port, username: data.username,
     password: data.password
   };
 }
@@ -181,14 +207,20 @@ async function executeSyntheticLifecycle(data) {
     // challenge for the disposable runner. It is never logged or shipped.
     fs.writeFileSync(managementTokenFile, managementToken + '\n',
       {flag: 'wx', mode: 0o600});
-    const expectedCN = a.mode === 'bad-cn' ? 'wrong-oig-local-server' : 'oig-local-server';
+    const expectedCN = a.live
+      ? (a.mode === 'live-wrong-cn' ? 'invalid-untrusted-provider-cn' :
+        PINNED_PROVIDER.serverCN)
+      : (a.mode === 'bad-cn' ? 'wrong-oig-local-server' : 'oig-local-server');
+    const host = a.live ? PINNED_PROVIDER.host : '127.0.0.1';
     const argv = [
       '--dev', 'null', '--ifconfig-noexec', '--route-noexec',
       '--ca', a.ca, '--cert', a.cert, '--key', a.key,
       '--proto', 'tcp-client', '--nobind',
-      '--remote', '127.0.0.1', String(a.port), '--tls-client',
+      '--remote', host, String(a.port), '--tls-client',
       '--remote-cert-tls', 'server', '--verify-x509-name', expectedCN, 'name',
-      '--data-ciphers', 'AES-256-GCM', '--auth-user-pass', '--pull',
+      '--data-ciphers', 'AES-256-GCM:AES-128-GCM', '--auth-user-pass', '--pull',
+      ...(a.live ? ['--pull-filter', 'ignore', 'redirect-gateway',
+        '--pull-filter', 'ignore', 'dhcp-option'] : []),
       '--auth-retry', 'none',
       '--management', '127.0.0.1', String(managementPort), managementTokenFile,
       '--management-hold', '--management-query-passwords',
@@ -227,7 +259,7 @@ async function executeSyntheticLifecycle(data) {
       }
     }
     if (!socket) throw new Error('OWNED_MANAGEMENT_LISTENER_UNREACHABLE');
-    const until = Date.now() + 16500;
+    const until = Date.now() + (a.live ? 50000 : 16500);
     while (Date.now() < until) {
       const log = getLog(logFile);
       const initialized = log.includes('Initialization Sequence Completed');
@@ -246,6 +278,22 @@ async function executeSyntheticLifecycle(data) {
         final = { tlsAccepted: false, identityRejected: false, authRejected: true };
         break;
       }
+      const pinnedPeer = a.live &&
+        log.includes('VERIFY OK: depth=1, CN=vpnbook.com') &&
+        log.includes('VERIFY X509NAME OK: CN=server.vpnbook.com') &&
+        log.includes('VERIFY OK: depth=0, CN=server.vpnbook.com');
+      const providerAcceptedLogin = a.live && log.includes('PUSH_REPLY');
+      if (a.mode === 'live-provider' && pinnedPeer && providerAcceptedLogin &&
+          !identityRejected && !authRejected && prompted) {
+        final = {tlsAccepted: true, identityRejected: false, authRejected: false,
+          pinnedPeerVerified: true, publicUserAuthenticated: true};
+        break;
+      }
+      if (a.mode === 'live-wrong-cn' && identityRejected && !initialized) {
+        final = {tlsAccepted: false, identityRejected: true, authRejected: false,
+          pinnedPeerVerified: false, publicUserAuthenticated: false};
+        break;
+      }
       if (child.exitCode !== null || child.signalCode !== null) break;
       await pause(100);
     }
@@ -257,7 +305,7 @@ async function executeSyntheticLifecycle(data) {
       // Diagnostics contain only a synthetic local server, fixed credential
       // placeholders and bounded OpenVPN status, not any arbitrary secrets.
       const tail = log.split(/\r?\n/).filter(Boolean).slice(-12).join(' | ')
-        .replace(/oig_user|oig_pass|wrong-pass/g, '[SYNTHETIC_CREDENTIAL]')
+        .replace(/oig_user|oig_pass|wrong-pass|vpnbook/g, '[CREDENTIAL_OR_PROVIDER]')
         .slice(-1600);
       throw new Error('SYNTHETIC_LIFECYCLE_NOT_ACCEPTED_'+a.mode+
         '_observed='+markers.join(',')+'_management='+managementConnected+
@@ -299,7 +347,8 @@ async function executeSyntheticLifecycle(data) {
       (managementTokenFile && fs.existsSync(managementTokenFile))) {
     throw new Error('OWNED_CLIENT_OR_MANAGEMENT_TOKEN_NOT_CLEANED');
   }
-  if (!managementConnected || !sawHold || !prompted) {
+  if (!managementConnected || !sawHold ||
+      (!prompted && a.mode !== 'live-wrong-cn')) {
     throw new Error('MANAGEMENT_LIFECYCLE_INCOMPLETE');
   }
   return {
@@ -312,9 +361,12 @@ async function executeSyntheticLifecycle(data) {
     tlsAccepted: final.tlsAccepted,
     identityRejected: final.identityRejected,
     authRejected: final.authRejected,
-    localOnly: true, devNull: true, routesNotExecuted: true,
-    independentPublicServerVerified: false, productionEngineChanged: false,
-    lifecycleEvents: events
+    localOnly: !a.live, devNull: true, routesNotExecuted: true,
+    remoteProviderProbed: a.live,
+    pinnedProviderCaSha256: a.live ? PINNED_PROVIDER.caDerSha256 : null,
+    pinnedPeerVerified: final.pinnedPeerVerified === true,
+    publicUserAuthenticated: final.publicUserAuthenticated === true,
+    productionEngineChanged: false, lifecycleEvents: events
   };
 }
 

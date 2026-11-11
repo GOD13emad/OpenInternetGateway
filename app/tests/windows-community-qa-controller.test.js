@@ -38,6 +38,9 @@ test('QA Community controller is excluded from Windows installer and production 
   assert.match(qa, /--management-query-passwords/);
   assert.match(qa, /managementTokenFile/);
   assert.match(qa, /managementPasswordProtected/);
+  assert.match(qa, /PUBLIC_PROVIDER_CA_PIN_MISMATCH/);
+  assert.match(qa, /pinnedPeerVerified/);
+  assert.match(qa, /--pull-filter/);
   assert.doesNotMatch(qa, /--auth-nocache/);
   assert.doesNotMatch(qa, /'--management-forget-disconnect'/);
   assert.match(qa, /--dev', 'null'/);
@@ -65,6 +68,13 @@ test('local QA input checker permits only bounded synthetic credentials and same
     assert.throws(() => mod.boundedInput({...a, port: 0}), /INVALID_LOCAL_PORT/);
     assert.throws(() => mod.boundedInput({...a, port: 70000}), /INVALID_LOCAL_PORT/);
     assert.throws(() => mod.boundedInput({...a, mode: 'unknown'}), /INVALID_QA_MODE/);
+    assert.throws(() => mod.boundedInput({...a, mode: 'live-provider',
+      port: 443, username: 'vpnbook', password: 'not-a-real-password'}),
+      /HOSTED_WINDOWS_LIVE_PROVIDER_ONLY/);
+    assert.throws(() => mod.boundedInput({...a, mode: 'live-wrong-cn',
+      port: 443, username: 'vpnbook', password: 'not-a-real-password'}),
+      /HOSTED_WINDOWS_LIVE_PROVIDER_ONLY/);
+
     assert.throws(() => mod.boundedInput({...a, username: 'real_user'}),
       /NOT_SYNTHETIC_CREDENTIALS/);
     assert.throws(() => mod.boundedInput({...a, password: 'real_secret'}),

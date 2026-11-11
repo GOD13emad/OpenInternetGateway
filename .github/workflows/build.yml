@@ -44,10 +44,10 @@ jobs:
       - name: Seed verified Electron checksums
         run: node tools/prepareElectronChecksumCache.js
       - run: npm test
-      - name: Probe GPG-pinned Community CLI and app-owned local TLS lifecycle (QA only)
+      - name: Probe GPG-pinned Community CLI and live pinned provider TLS (disposable QA only)
         if: github.event_name == 'pull_request' && github.head_ref == 'qa/v2.5.20-operator-safety-20261019'
         shell: pwsh
-        timeout-minutes: 5
+        timeout-minutes: 10
         run: |
           $ErrorActionPreference='Stop'
           & ./tests/windows-community-engine-offline-feasibility.ps1
@@ -59,6 +59,7 @@ jobs:
             ${{ runner.temp }}/oig-community-engine-feasibility.json
             ${{ runner.temp }}/oig-community-loopback-receipt.json
             ${{ runner.temp }}/oig-community-controller-loopback-receipt.json
+            ${{ runner.temp }}/oig-community-live-peer-receipt.json
           if-no-files-found: warn
       - run: npm run dist:win
       - name: Smoke-test silent NSIS install on disposable runner
