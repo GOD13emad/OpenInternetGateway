@@ -139,6 +139,16 @@ def main():
     controller = Path(__file__).resolve().parent / "qa-community-cli-controller.cjs"
     if not controller.is_file():
         raise RuntimeError("QA_CONTROLLER_MISSING")
+    # Windows Python and Node may resolve TEMP/TMP differently on hosted
+    # runners. Derive the scratch parent from the controller's actual Node
+    # runtime; never weaken the controller's same-parent safety boundary.
+    temp_query = subprocess.run(
+        [str(node), "-p", 'require("node:os").tmpdir()'],
+        capture_output=True, text=True, timeout=8, check=True,
+    )
+    node_temp = Path(temp_query.stdout.strip()).resolve()
+    if not node_temp.is_dir() or node_temp.is_symlink() or        str(node_temp).startswith("\\\\"):
+        raise RuntimeError("NODE_RUNTIME_SCRATCH_ROOT_INVALID")
     p = provider_module()
     profile, profile_sha = p.official_profile()
     if p.EXPECTED_CA != PINNED_CA or p.ENDPOINT != "uk205.vpnbook.com" or \
@@ -147,7 +157,8 @@ def main():
     password, updated = p.official_login()
     if not re.fullmatch(r"[A-Za-z0-9]{4,32}", password):
         raise RuntimeError("PUBLIC_LOGIN_INVALID")
-    with tempfile.TemporaryDirectory(prefix="oig-community-loopback-") as temp:
+    with tempfile.TemporaryDirectory(
+            prefix="oig-community-loopback-", dir=str(node_temp)) as temp:
         root = Path(temp).resolve()
         ca = write_private(root, "ca.pem", extract_unique_pem(profile, "ca"))
         cert = write_private(root, "client.pem", extract_unique_pem(profile, "cert"))
