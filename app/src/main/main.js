@@ -384,6 +384,31 @@ app.on('second-instance', (_event, argv, _workingDirectory, additionalData) => {
     createWindow();
     // A passive Windows QA capture must not register a host notification icon.
     if (process.platform !== 'win32' || process.env.OIG_CAPTURE_ONLY !== '1') createTray();
+
+    // The NSIS per-user installer launches the app after installation.
+    // On that INTERACTIVE first run, prepare only missing Windows VPN
+    // prerequisites. Hosted capture/tray CI and login autostart never request
+    // UAC, and no VPN is connected, stopped or enabled by this setup.
+    if (process.platform === 'win32' && app.isPackaged &&
+        process.env.OIG_CAPTURE_ONLY !== '1' &&
+        process.env.RUNNER_ENVIRONMENT !== 'github-hosted' &&
+        !startInBackground &&
+        !backend._windowsPrerequisiteStatus()?.openVpnConnect?.ready) {
+      setTimeout(() => {
+        if (app.isQuitting) return;
+        backend.prepareWindowsInstallerPrerequisites().catch(error => {
+          if (app.isQuitting || !isLiveWindow()) return;
+          dialog.showMessageBox(mainWindow, {
+            type: 'warning',
+            title: 'Open Internet Gateway setup',
+            message: 'OpenVPN Connect prerequisite setup was not completed.',
+            detail: String(error?.message || error) +
+              '\n\nThe dashboard remains available. Retry by selecting Connect when ready.',
+            buttons: ['OK']
+          }).catch(() => {});
+        });
+      }, 850);
+    }
   });
   
   app.on('activate', () => {

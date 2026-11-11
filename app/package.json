@@ -96,7 +96,18 @@
     },
     "afterPack": "tools/afterPack.js",
     "deb": {
-      "afterInstall": "build/linux-after-install.sh"
+      "afterInstall": "build/linux-after-install.sh",
+      "depends": [
+        "default",
+        "network-manager",
+        "network-manager-openvpn",
+        "openvpn (>= 2.6)",
+        "python3",
+        "curl",
+        "iproute2",
+        "systemd",
+        "ca-certificates"
+      ]
     },
     "afterAllArtifactBuild": "tools/afterAllArtifactBuild.js"
   },

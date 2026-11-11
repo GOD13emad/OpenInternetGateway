@@ -1278,7 +1278,7 @@ test('Windows first-connect OpenVPN prerequisite is pinned, verified and install
   assert.match(ensure,/ovpnconnector\.exe is still missing/);
   const actionStart=backend.indexOf('async action(action, options = {})');
   const action=backend.slice(actionStart,backend.indexOf('\n  async diagnostics()',actionStart));
-  const pre=action.indexOf('await this._ensureWindowsRuntimePrerequisites()');
+  const pre=action.indexOf('await this.prepareWindowsInstallerPrerequisites()');
   const bench=action.indexOf('await this.benchmarkAllFast()');
   assert.ok(pre >= 0 && bench > pre);
   assert.match(action,/action === 'connect' \|\| action === 'connect-profile'/);

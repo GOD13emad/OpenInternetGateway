@@ -177,6 +177,23 @@ jobs:
       - name: Seed verified Electron checksums
         run: node tools/prepareElectronChecksumCache.js
       - run: npm run dist:linux
+      - name: Verify one-file Linux installer payload and apt prerequisites (no installation)
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(node -p 'require("./package.json").version')"
+          deb="dist/OpenInternetGateway-$version-amd64.deb"
+          setup="dist/OpenInternetGateway-Linux-Setup-$version-amd64.run"
+          test -s "$deb" && test -x "$setup"
+          bash "$setup" --verify-only
+          depends="$(dpkg-deb -f "$deb" Depends)"
+          for package in network-manager network-manager-openvpn openvpn python3 curl iproute2 systemd ca-certificates libgtk-3-0 libnss3; do
+            grep -Eq "(^|, )$package([ (]|$)" <<< "$depends" || {
+              echo "Required native dependency missing in Debian package: $package" >&2
+              exit 1
+            }
+          done
+          echo 'Linux one-file setup checksum and native dependency metadata PASS'
       - name: Test packaged Linux Close/Hide/Reopen/Quit on disposable X11 runner
         shell: bash
         timeout-minutes: 10
@@ -184,6 +201,9 @@ jobs:
           set -euo pipefail
           test "$RUNNER_ENVIRONMENT" = github-hosted
           sudo apt-get update -qq
+          version="$(node -p 'require("./package.json").version')"
+          apt-get -s install --no-install-recommends "./dist/OpenInternetGateway-$version-amd64.deb" |
+            grep -F 'Inst open-internet-gateway'
           sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends xvfb xauth xdotool wmctrl x11-utils openbox tint2 dbus-x11 libgtk-3-0 libnss3 libasound2t64 libgbm1
           version="$(node -p 'require("./package.json").version')"
           bash tools/qaLinuxHostedWindowLifecycle.sh "dist/OpenInternetGateway-${version}-amd64.deb"
@@ -199,6 +219,7 @@ jobs:
           path: |
             app/dist/*.AppImage
             app/dist/*.deb
+            app/dist/*.run
 
   tls-loopback:
     name: Native OpenVPN TLS loopback (no TUN)

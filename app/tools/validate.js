@@ -6,6 +6,7 @@ const required = [
   'package.json','src/main/main.js','src/main/platform-backend.js','src/preload/preload.js',
   'src/renderer/index.html','src/renderer/styles.css','src/renderer/app.js',
   'backend/linux/oig-linux.sh','backend/linux/refresh_cache.py',
+  'build/linux-oneclick-installer.sh', 'tools/afterAllArtifactBuild.js',
   'backend/linux/operator_profile.py','backend/linux/operator_rollback.py','backend/linux/operator_trial.py',
   'backend/linux/operator_full_device.py',
   'assets/icon.png','assets/icon.ico'

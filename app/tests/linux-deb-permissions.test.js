@@ -52,7 +52,33 @@ test('Linux DEB hook repairs desktop/icon modes with a compatible fast compresso
     const before = run(['--contents', deb]);
     assert.equal(before.status, 0, before.stderr);
     assert.match(before.stdout, /-rw-------[^\n]*OpenInternetGateway\.desktop/);
-    await afterAllArtifactBuild({artifactPaths: [deb]});
+    const oneClick = await afterAllArtifactBuild({artifactPaths: [deb]});
+    assert.equal(oneClick.length, 1, 'Exactly one Linux one-file setup per Debian package');
+    const setup = oneClick[0];
+    assert.ok(setup.endsWith('-amd64.run'), 'Installer must be a Linux AMD64 .run');
+    assert.equal(fs.statSync(setup).mode & 0o111, 0o111, 'Installer must be executable');
+    const verify = spawnSync('bash', [setup, '--verify-only'], {encoding: 'utf8', timeout: 12000});
+    assert.equal(verify.status, 0, verify.stderr);
+    assert.match(verify.stdout, /OIG_LINUX_ONECLICK_EMBEDDED_DEB_VERIFIED/);
+    const help = spawnSync('bash', [setup, '--help'], {encoding: 'utf8', timeout: 5000});
+    assert.equal(help.status, 0, help.stderr);
+    assert.match(help.stdout, /--verify-only/);
+    const unsupported = spawnSync('bash', [setup, '--install-now-without-auth'], {encoding: 'utf8', timeout: 5000});
+    assert.equal(unsupported.status, 64, 'Unknown arguments must never install');
+    // Modifying the private QA payload must fail verification before any OS
+    // authorization prompt; no system package commands are invoked.
+    const altered = path.join(dir, 'altered.run');
+    fs.copyFileSync(setup, altered);
+    const fd = fs.openSync(altered, 'r+');
+    const last = fs.statSync(altered).size - 1;
+    const original = Buffer.alloc(1);
+    fs.readSync(fd, original, 0, 1, last);
+    const corrupt = Buffer.from([original[0] ^ 0xff]);
+    fs.writeSync(fd, corrupt, 0, 1, last);
+    fs.closeSync(fd);
+    const refused = spawnSync('bash', [altered, '--verify-only'], {encoding: 'utf8', timeout: 12000});
+    assert.notEqual(refused.status, 0, 'Tampered installer must refuse');
+    assert.match(refused.stderr, /SHA-256 mismatch/);
     const after = run(['--contents', deb]);
     assert.equal(after.status, 0, after.stderr);
     assert.match(after.stdout, /-rw-r--r--[^\n]*OpenInternetGateway\.desktop/);

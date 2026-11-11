@@ -104,6 +104,43 @@ The dashboard exposes:
 - diagnostics and activity evidence,
 - GitHub update status and release integrity information.
 
+## One-file installation and first launch (QA 2.5.20)
+
+**Windows 10/11 x64:** Run `OpenInternetGateway-Setup-2.5.20.exe`. The
+current-user NSIS installer includes the Electron application and the pinned
+portable PowerShell 7 runtime, creates desktop/Start shortcuts and launches OIG
+when the installer finishes. On the first **interactive** app run, if the
+headless OpenVPN Connect engine is missing, OIG downloads the official pinned
+OpenVPN Connect 3.9 MSI, checks its SHA-256, suppresses the vendor GUI autostart
+and asks for native Windows UAC approval **for that one system installation**.
+OIG stays unconnected until the user selects Connect. If OpenVPN Connect is
+already installed, it is preserved, not force-upgraded or disconnected.
+Cancelled/failed UAC leaves the dashboard available with a retry on Connect.
+Normal desktop launches and updates do not need administrator access.
+Background login autostart and hosted capture-only QA never initiate UAC setup.
+
+**Ubuntu/Debian x64:** The `OpenInternetGateway-Linux-Setup-2.5.20-amd64.run`
+one-file installer contains the complete Debian application package. It checks
+the embedded SHA-256, name, architecture and version before invoking APT.
+Run `chmod +x OpenInternetGateway-Linux-Setup-2.5.20-amd64.run`, then run the
+file as a **normal** desktop user. Native `sudo` (terminal) or `pkexec`
+(desktop) authorizes APT to install/update only the application and its
+declared dependencies: NetworkManager, NetworkManager-OpenVPN, OpenVPN,
+Python 3, curl, iproute2, certificates, systemd, and the existing Electron
+libraries. It then launches the app under the original, unprivileged user.
+With no graphical desktop it installs only and reports how to launch later.
+`--verify-only` validates the complete embedded package without privilege
+or system changes. The regular `.deb` and optional portable `AppImage`
+remain available; only the one-file `.run` performs the integrated APT install.
+
+**Safety limits:** Installing/upgrading NetworkManager or OpenVPN can restart
+network services. The Linux one-file setup refuses an active NetworkManager
+VPN or effective tunnel-route rather than silently interrupting it; install
+only when that session can safely be ended by its owner. The installer itself does not connect/disconnect VPNs, change routes
+or disable OS security. Administrator approval is never bypassed. These QA
+installers are not a claim of public release or production Community DCO
+leak/kill-switch acceptance. macOS is not currently supported.
+
 ## Requirements
 
 ### Windows

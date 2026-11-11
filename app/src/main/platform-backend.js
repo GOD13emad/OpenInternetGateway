@@ -74,6 +74,7 @@ class Backend {
     this.operatorProfileTaskBusy = false;
     this.operatorUpdateBusy = false;
     this.gatewayActionCount = 0;
+    this.windowsPrerequisiteTask = null;
   }
 
   async _hardenLinuxChromiumSandbox() {
@@ -766,6 +767,24 @@ class Backend {
     // Recheck in case the vendor installer or another application opened the GUI.
     await assertGuiClosed();
     return { powerShell7: { ready: true, path: pwsh }, openVpnConnect: openVpn };
+  }
+
+  // One shared first-run/Connect prerequisite operation: duplicate installer
+  // downloads and competing MSI executions must never race. This never
+  // activates a VPN; Windows controls one-time elevation through native UAC.
+  async prepareWindowsInstallerPrerequisites() {
+    if (this.platform !== 'win32') return { supported: false };
+    if (!this.backendRoot) throw new Error('Windows backend is not initialized.');
+    if (process.env.OIG_CAPTURE_ONLY === '1') {
+      return { supported: true, ready: false, skipped: 'disposable-qa-capture' };
+    }
+    if (this.windowsPrerequisiteTask) return this.windowsPrerequisiteTask;
+    const task = this._ensureWindowsRuntimePrerequisites();
+    this.windowsPrerequisiteTask = task;
+    try { return await task; }
+    finally {
+      if (this.windowsPrerequisiteTask === task) this.windowsPrerequisiteTask = null;
+    }
   }
 
   async _windows(action, extraArgs = []) {
@@ -2023,7 +2042,7 @@ exit 0
       this.emit({ type: 'busy', action, busy: true });
       let result;
       if (this.platform === 'win32' && (action === 'connect' || action === 'connect-profile')) {
-        await this._ensureWindowsRuntimePrerequisites();
+        await this.prepareWindowsInstallerPrerequisites();
       }
       if (action === 'connect-profile') result = await this.connectProfile(options.sha256);
       else if (action === 'benchmark-active') result = await this.benchmarkActive();

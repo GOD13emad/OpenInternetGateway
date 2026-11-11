@@ -2,6 +2,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { spawnSync } = require('child_process');
+const crypto = require('crypto');
 
 function run(command, args) {
   const result = spawnSync(command, args, { encoding: 'utf8' });
@@ -79,9 +80,78 @@ function fixDebDesktopMode(debPath) {
   }
 }
 
+function buildLinuxOneClick(debPath) {
+  const name = path.basename(debPath);
+  if (!/^OpenInternetGateway-[0-9]+\.[0-9]+\.[0-9]+-amd64\.deb$/.test(name)) {
+    throw new Error('One-file installer requires the known OIG Debian AMD64 artifact name');
+  }
+  const field = fieldName => run('dpkg-deb', ['-f', debPath, fieldName]).trim();
+  if (field('Package') !== 'open-internet-gateway' || field('Architecture') !== 'amd64') {
+    throw new Error('One-file installer refuses an unrelated or non-amd64 Debian package');
+  }
+  const version = field('Version');
+  if (!/^[0-9]+\.[0-9]+\.[0-9]+$/.test(version) || !name.includes('-' + version + '-')) {
+    throw new Error('One-file installer package version and filename mismatch');
+  }
+  const templatePath = path.join(__dirname, '..', 'build', 'linux-oneclick-installer.sh');
+  const template = fs.readFileSync(templatePath, 'utf8');
+  if (!template.endsWith('exit 0\n')) throw new Error('One-file installer header is not shell-terminated');
+  const inputFd = fs.openSync(debPath, 'r');
+  const digest = crypto.createHash('sha256');
+  const buffer = Buffer.alloc(1024 * 1024);
+  let size = 0;
+  try {
+    let read;
+    while ((read = fs.readSync(inputFd, buffer, 0, buffer.length, null)) > 0) {
+      digest.update(buffer.subarray(0, read));
+      size += read;
+    }
+  } finally { fs.closeSync(inputFd); }
+  if (size < 1024 || size !== fs.statSync(debPath).size) {
+    throw new Error('One-file installer Debian artifact changed during checksum read');
+  }
+  const substitutions = {
+    '@PACKAGE@': name, '@VERSION@': version, '@ARCH@': 'amd64',
+    '@PAYLOAD_BYTES@': String(size), '@PAYLOAD_SHA256@': digest.digest('hex')
+  };
+  let header = template;
+  for (const [key, value] of Object.entries(substitutions)) {
+    if (header.split(key).length !== 2) throw new Error('One-file installer placeholder missing or duplicated: ' + key);
+    header = header.replace(key, value);
+  }
+  const result = path.join(path.dirname(debPath), 'OpenInternetGateway-Linux-Setup-' + version + '-amd64.run');
+  const temporary = result + '.building-' + process.pid;
+  let fd;
+  try {
+    fd = fs.openSync(temporary, 'wx', 0o700);
+    fs.writeSync(fd, Buffer.from(header, 'utf8'));
+    const src = fs.openSync(debPath, 'r');
+    try {
+      let bytesRead;
+      while ((bytesRead = fs.readSync(src, buffer, 0, buffer.length, null)) > 0) {
+        let written = 0;
+        while (written < bytesRead) written += fs.writeSync(fd, buffer, written, bytesRead - written);
+      }
+    } finally { fs.closeSync(src); }
+    fs.fsyncSync(fd);
+    fs.closeSync(fd);
+    fd = null;
+    fs.chmodSync(temporary, 0o755);
+    fs.renameSync(temporary, result);
+    return result;
+  } finally {
+    if (fd !== null && fd !== undefined) fs.closeSync(fd);
+    if (fs.existsSync(temporary)) fs.unlinkSync(temporary);
+  }
+}
+
 module.exports = async function afterAllArtifactBuild(result) {
   if (process.platform !== 'linux') return [];
   const debs = (result.artifactPaths || []).filter(file => /\.deb$/i.test(file));
-  for (const deb of debs) fixDebDesktopMode(deb);
-  return [];
+  const oneClick = [];
+  for (const deb of debs) {
+    fixDebDesktopMode(deb);
+    oneClick.push(buildLinuxOneClick(deb));
+  }
+  return oneClick;
 };

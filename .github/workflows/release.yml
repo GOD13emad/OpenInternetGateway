@@ -110,6 +110,7 @@ jobs:
           path: |
             app/dist/OpenInternetGateway-*.AppImage
             app/dist/OpenInternetGateway-*.deb
+            app/dist/OpenInternetGateway-*.run
           if-no-files-found: error
 
   publish:
