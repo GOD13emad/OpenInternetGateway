@@ -95,3 +95,65 @@ test('local QA input checker permits only bounded synthetic credentials and same
     else process.env.OIG_LOOPBACK_LOCAL_QA = previous;
   }
 });
+
+
+test('packaged Community management protocol encodes only bounded line-safe ephemeral credentials', () => {
+  const {formatAuthResponse} = require('../src/main/openvpn-management-auth');
+  assert.equal(formatAuthResponse('oig_user','oig_pass'),
+    'username "Auth" oig_user\npassword "Auth" oig_pass\n');
+  for (const unsafe of [
+    '', ' abc', 'abc def', 'abc\nsignal SIGTERM', 'abc\rhold release',
+    'abc"quit', 'abc\\x', 'abc\tdef', 'a'.repeat(257),
+    '\u0000', '\u007f'
+  ]) {
+    assert.throws(() => formatAuthResponse('oig_user', unsafe),
+      /UNSAFE_OPENVPN_MANAGEMENT_CREDENTIAL/,
+      'Unsafe management credentials must be rejected without escaping or logging');
+  }
+  assert.throws(()=>formatAuthResponse('a'.repeat(97),'oig_pass'),
+    /UNSAFE_OPENVPN_MANAGEMENT_CREDENTIAL/);
+  const packaged = fs.readFileSync(path.join(root,'src/main/openvpn-management-auth.js'),'utf8');
+  const qa = fs.readFileSync(file,'utf8');
+  assert.match(qa,/require\('\.\.\/src\/main\/openvpn-management-auth'\)/);
+  assert.match(qa,/authSession\.clear\(\)/);
+  assert.match(packaged,/MANAGEMENT_AUTH_CHALLENGE_LIMIT/);
+});
+
+test('management hold/auth protocol uses one reply frame, bounds challenges and clears secrets', () => {
+  const {createAuthSession} = require('../src/main/openvpn-management-auth');
+  const sent=[], events=[];
+  let stops=0;
+  const session=createAuthSession({
+    username:'oig_user',password:'oig_pass',
+    send: frame=>sent.push(frame),
+    stop:()=>stops++,
+    onEvent:label=>events.push(label)
+  });
+  session.onLine("NOTE: Need 'Auth' username/password");
+  assert.equal(sent.length,0,'Untrusted logs cannot spoof a management credential challenge');
+  session.onLine('>HOLD:Waiting for hold release');
+  session.onLine('>HOLD:Waiting for hold release');
+  assert.deepEqual(sent,['hold release\n']);
+  session.onLine(">PASSWORD:Need 'Auth' username/password");
+  assert.equal(sent.length,2);
+  assert.equal(sent[1],'username "Auth" oig_user\npassword "Auth" oig_pass\n');
+  assert.deepEqual(session.snapshot(),{
+    holdObserved:true,prompted:true,rejected:false,challenges:1,credentialsCleared:false
+  });
+  session.onLine(">PASSWORD:Verification Failed: 'Auth'");
+  assert.equal(session.snapshot().rejected,true);
+  session.onLine(">PASSWORD:Need 'Auth' username/password");
+  session.onLine(">PASSWORD:Need 'Auth' username/password");
+  session.onLine(">PASSWORD:Need 'Auth' username/password");
+  assert.equal(stops,1,'Fourth credential challenge must stop only owned management transport');
+  assert.equal(session.snapshot().challenges,4);
+  assert.equal(sent.length,4,'No credentials sent for over-limit challenge');
+  assert.ok(events.includes('MANAGEMENT_AUTH_CHALLENGE_LIMIT'));
+  session.clear();
+  assert.equal(session.snapshot().credentialsCleared,true);
+  assert.throws(()=>session.onLine(">PASSWORD:Need 'Auth' username/password"),
+    /MANAGEMENT_AUTH_SESSION_CLEARED/);
+  assert.equal(sent.length,4);
+  assert.throws(()=>createAuthSession({username:'test\nquit',password:'secret',send:()=>{},stop:()=>{}}),
+    /UNSAFE_OPENVPN_MANAGEMENT_CREDENTIAL/);
+});

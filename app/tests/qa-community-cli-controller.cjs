@@ -9,6 +9,7 @@ const path = require('node:path');
 const net = require('node:net');
 const crypto = require('node:crypto');
 const {spawn} = require('node:child_process');
+const {createAuthSession} = require('../src/main/openvpn-management-auth');
 
 const WIN_EXE_SHA = '0b9b5ad60279b912ae826da5e13a57750fdc918d9ec28b73f031aaffef8dd485';
 const MODES = new Set(['valid', 'bad-cn', 'bad-password',
@@ -157,31 +158,19 @@ async function executeSyntheticLifecycle(data) {
   // traffic, credentials, certificate contents or user-controlled logs.
   const append = value => { if (events.length < 24) events.push(value); };
   let pending = '';
+  const authSession = createAuthSession({
+    username: a.username, password: a.password,
+    send: frame => socket.write(frame),
+    stop: () => socket.destroy(),
+    onEvent: append
+  });
   const onLine = line => {
-    if (line.startsWith('>HOLD:') && !sawHold) {
-      sawHold = true;
-      append('HOLD_READY');
-      socket.write('hold release\n');
-      append('HOLD_RELEASE_SENT');
-    }
-    if (line.includes("Need 'Auth' username/password")) {
-      credentialChallenges += 1;
-      if (credentialChallenges > 3) { socket.destroy(); return; }
-      if (!prompted) {
-        prompted = true;
-        append('PASSWORD_CHALLENGE_OBSERVED');
-      }
-      // Write both management commands as a SINGLE frame, as the confirmed
-      // Windows direct-CLI reference does, to avoid interleaved parser states.
-      // Secrets are synthetic, sent only over localhost, never in argv/log.
-      socket.write('username "Auth" ' + a.username + '\n' +
-                   'password "Auth" ' + a.password + '\n');
-      append('PASSWORD_ANSWERED_IN_MEMORY');
-    }
-    if (line.includes('Verification Failed')) {
-      rejectedViaManagement = true;
-      append('AUTH_REJECTED_MANAGEMENT');
-    }
+    authSession.onLine(line);
+    const state = authSession.snapshot();
+    sawHold = state.holdObserved;
+    prompted = state.prompted;
+    rejectedViaManagement = state.rejected;
+    credentialChallenges = state.challenges;
   };
   const attachManagement = accepted => {
     if (accepted.remoteAddress !== '127.0.0.1' &&
@@ -336,6 +325,7 @@ async function executeSyntheticLifecycle(data) {
         '_childExit='+String(child.exitCode)+'_tail='+tail);
     }
   } finally {
+    authSession.clear();
     a.password = null;
     // The only process signalled is the child PID we spawned. No service,
     // task, route, NetworkManager or unrelated OpenVPN instance is touched.

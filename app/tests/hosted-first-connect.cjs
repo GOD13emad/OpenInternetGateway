@@ -9,6 +9,15 @@ const root=process.argv[2],receiptFile=process.argv[3];assert.ok(root&&receiptFi
 const res=path.join(root,'resources'),archive=path.join(res,'app.asar');
 const hits=asar.listPackage(archive).filter(s=>s.replaceAll('\\','/').replace(/^\/+/,'')==='src/main/platform-backend.js');
 assert.equal(hits.length,1,'PACKAGED_BACKEND_AMBIGUOUS');
+// The reusable Community management protocol is now in the product package,
+// but no Community VPN engine is activated by this passive integrity check.
+const normalizeAsarEntry=s=>s.split(String.fromCharCode(92)).join('/').replace(/^[/]+/,'');
+const managementHits=asar.listPackage(archive).filter(s=>
+  normalizeAsarEntry(s)==='src/main/openvpn-management-auth.js');
+assert.equal(managementHits.length,1,'PACKAGED_COMMUNITY_MANAGEMENT_PROTOCOL_MISSING');
+const shippedManagement=asar.extractFile(archive,normalizeAsarEntry(managementHits[0]));
+const sourceManagement=fs.readFileSync(path.join(__dirname,'../src/main/openvpn-management-auth.js'));
+assert.equal(Buffer.compare(shippedManagement,sourceManagement),0,'PACKAGED_MANAGEMENT_PROTOCOL_MISMATCH');
 const m=new Module(path.join(os.tmpdir(),'oig-installed-backend.cjs'),module);
 m.filename=path.join(os.tmpdir(),'oig-installed-backend.cjs');m.paths=Module._nodeModulePaths(os.tmpdir());
 m._compile(asar.extractFile(archive,hits[0].replace(/^[\\/]+/,'')).toString('utf8'),m.filename);
