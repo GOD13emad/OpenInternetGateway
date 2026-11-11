@@ -111,6 +111,8 @@ test('DCO IPv6 route and WFP DNS QA refuses owner hosts and never claims unteste
   assert.match(workflow, /needs: dco-ipv4-fullroute/);
   assert.match(workflow, /windows-community-dco-dualstack-dns-policy-qa\.py/);
   assert.match(script, /\[switch\]\$ProbeLeakPolicy/);
+  assert.match(script, /if\(\$ProbeLeakPolicy\)\{\$selectedQaModes\+=1\}/);
+  assert.doesNotMatch(script, /\[int\]\$ProbeTun|\[int\]\$ProbeLeakPolicy/);
   assert.match(script, /dualstackDnsPolicyReceiptSHA256/);
   assert.match(script, /DCO_LEAK_POLICY_RECEIPT_NOT_ACCEPTED/);
   assert.doesNotMatch(p, /New-NetFirewallRule|Set-NetFirewallProfile/);

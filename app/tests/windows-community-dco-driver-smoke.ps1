@@ -20,7 +20,11 @@ if(-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrat
  throw 'DISPOSABLE_RUNNER_ADMIN_REQUIRED'
 }
 if(-not $env:RUNNER_TEMP){throw 'RUNNER_TEMP_NOT_SET'}
-if(([int]$ProbeTun + [int]$ProbeFullIpv4 + [int]$ProbeLeakPolicy) -gt 1){throw 'CANNOT_COMBINE_DISPOSABLE_DCO_QA_MODES'}
+$selectedQaModes=0
+if($ProbeTun){$selectedQaModes+=1}
+if($ProbeFullIpv4){$selectedQaModes+=1}
+if($ProbeLeakPolicy){$selectedQaModes+=1}
+if($selectedQaModes -gt 1){throw 'CANNOT_COMBINE_DISPOSABLE_DCO_QA_MODES'}
 if(-not $Receipt){$Receipt=Join-Path $env:RUNNER_TEMP 'oig-dco-driver-lifecycle.json'}
 if((Split-Path -Parent $Receipt) -cne $env:RUNNER_TEMP -or (Test-Path -LiteralPath $Receipt)){
  throw 'RECEIPT_NOT_PRIVATE_OR_EXISTS'
