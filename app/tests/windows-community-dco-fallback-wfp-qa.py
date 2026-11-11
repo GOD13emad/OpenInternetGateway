@@ -164,7 +164,7 @@ def remove_exact_rule(name):
         raise RuntimeError("OWNED_FIREWALL_RULE_STILL_PRESENT")
 
 
-def curl_probe(curl, target, timeout=15, source=None):
+def curl_probe(curl, target, timeout=15, source=None, diagnostic=None):
     # Explicit source-bound probe is diagnostic ONLY after a failed regular
     # HTTPS attempt; it must never turn a failure into acceptance.
     bind = []
@@ -180,12 +180,19 @@ def curl_probe(curl, target, timeout=15, source=None):
         p = subprocess.run(cmd, capture_output=True, text=True,
                            timeout=timeout + 3)
     except subprocess.TimeoutExpired:
+        if diagnostic is not None:
+            diagnostic["timedOut"] = True
         return None
+    if diagnostic is not None:
+        # Only numeric status; never include stderr, raw IP or credentials.
+        diagnostic["exitCode"] = p.returncode
     if p.returncode:
         return None
     try:
         return str(ipaddress.IPv4Address(p.stdout.strip()))
     except ValueError:
+        if diagnostic is not None:
+            diagnostic["unexpectedResponse"] = True
         return None
 
 
@@ -249,6 +256,11 @@ def main(args):
         "wfpRuleFilterVerified": False, "directBlockedBeforeVpn": False,
         "physicalIpv4DistinctFromDco": False,
         "explicitTunSourceCurlAllowedIfFailed": None,
+        "wfpOnCurlDiagnostic": None,
+        "wfpOffCurlDiagnostic": None,
+        "vpnHttpsAllowedWithRuleTemporarilyRemoved": None,
+        "wfpRuleReinstalledAfterDiagnostic": None,
+        "fullRouteUnchangedByDiagnostic": None,
         "httpsOverVpnAllowed": False, "ownedTunnelStopped": False,
         "directFallbackBlockedAfterDrop": False,
         "directEgressRestoredAfterRuleRemoval": False,
@@ -311,11 +323,35 @@ def main(args):
         if not report["dcoRoutePairActive"]:
             raise RuntimeError("DCO_SPLIT_DEFAULT_ROUTE_NOT_PROVEN")
         # The exact same curl.exe is permitted through the DCO interface.
-        vpn_public = curl_probe(curl, target, 18)
+        on_status = {}
+        vpn_public = curl_probe(curl, target, 18, diagnostic=on_status)
         if vpn_public is None:
+            report["wfpOnCurlDiagnostic"] = on_status
             report["explicitTunSourceCurlAllowedIfFailed"] = (
                 curl_probe(curl, target, 12, source=tunnel_ipv4) is not None)
-            raise RuntimeError("VPN_PATH_DENIED_BY_OWNED_WFP_RULE")
+            # Diagnostic A/B, on a disposable GitHub VM ONLY:
+            # while pinned VPN is up, temporarily remove ONLY OUR WFP rule,
+            # check the identical HTTPS endpoint, then immediately re-arm it.
+            # This is NOT a PASS or fail-closed guarantee.
+            try:
+                remove_exact_rule(name)
+                off_status = {}
+                off_ip = curl_probe(curl, target, 16, diagnostic=off_status)
+                report["wfpOffCurlDiagnostic"] = off_status
+                report["vpnHttpsAllowedWithRuleTemporarilyRemoved"] = (
+                    off_ip is not None)
+                report["fullRouteUnchangedByDiagnostic"] = all(
+                    fullroute.route_indices(p) == [index]
+                    for p in fullroute.ROUTE_PAIR)
+            finally:
+                # Must restore the exact prior block even if diagnostic fails.
+                if not rule_present(name):
+                    add_rule(name, nic["source"], target, curl)
+                report["wfpRuleReinstalledAfterDiagnostic"] = rule_contract(
+                    name, nic["source"], target, curl)
+            if not report["wfpRuleReinstalledAfterDiagnostic"]:
+                raise RuntimeError("OWNED_WFP_RULE_NOT_RESTORED_AFTER_AB")
+            raise RuntimeError("VPN_PATH_DENIED_WITH_WFP_AB_DIAGNOSTICS")
         report["httpsOverVpnAllowed"] = True
         # Simulate tunnel disappearance, retaining the owned WFP rule.
         proc.terminate()

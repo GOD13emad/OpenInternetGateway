@@ -141,6 +141,11 @@ test('disposable DCO scoped WFP fallback QA never claims a system kill switch', 
   assert.match(p, /local == \[physical_source\]/);
   assert.match(p, /any_interface and local == /);
   assert.match(p, /explicitTunSourceCurlAllowedIfFailed/);
+  assert.match(p, /vpnHttpsAllowedWithRuleTemporarilyRemoved/);
+  assert.match(p, /wfpRuleReinstalledAfterDiagnostic/);
+  assert.match(p, /fullRouteUnchangedByDiagnostic/);
+  assert.match(p, /try:\s+remove_exact_rule\(name\)/);
+  assert.match(p, /if not rule_present\(name\):\s+add_rule/);
   assert.ok(!p.includes("' -InterfaceAlias '"));
   assert.match(p, /Get-NetIPAddress -InterfaceIndex/);
   assert.match(workflow, /dco-scoped-wfp-fallback:/);
