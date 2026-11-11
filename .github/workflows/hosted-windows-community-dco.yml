@@ -154,7 +154,7 @@ jobs:
     needs: dco-driver
     if: ${{ github.event.pull_request.head.repo.full_name == github.repository && github.head_ref == 'qa/v2.5.20-operator-safety-20261019' }}
     runs-on: windows-2025
-    timeout-minutes: 24
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
         with:
@@ -188,7 +188,7 @@ jobs:
           if($LASTEXITCODE -ne 0 -or -not(Test-Path -LiteralPath $out)){throw 'WFP_PACKET_QA_MSVC_BUILD_FAILED'}
       - name: Verify native per-interface WFP packet block and DCO fallback
         shell: pwsh
-        timeout-minutes: 20
+        timeout-minutes: 16
         run: |
           $ErrorActionPreference='Stop'
           $env:OIG_PACKET_WFP_HELPER=Join-Path $env:RUNNER_TEMP 'oig-dco-packet-wfp-helper.exe'
@@ -206,6 +206,5 @@ jobs:
           path: |
             ${{ runner.temp }}/oig-dco-fallback-wfp.json
             ${{ runner.temp }}/oig-dco-fallback-driver-lifecycle.json
-            ${{ runner.temp }}/oig-dco-wfp-cold-fullroute-baseline.json
           if-no-files-found: warn
           retention-days: 7

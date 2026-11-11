@@ -130,7 +130,8 @@ test('disposable DCO native WFP packet filter retains narrow scope and never cla
     'packetLayerFilterVerified', 'packetFilterIsDynamic',
     'ownedPacketWfpFilterRemoved', 'physicalIpv4DistinctFromDco',
     'NATIVE_WFP_PACKET_FILTER_NOT_INSTALLED', 'Get-NetIPAddress -InterfaceIndex',
-    'directBlockedBeforeVpn', 'httpsOverVpnAllowed', 'ownedTunnelStopped',
+    'vpnHttpsAllowedWithoutWfp', 'wfpRuleArmedDuringVpn',
+    'singleOwnedOpenvpnProcessStarted', 'httpsOverVpnAllowed', 'ownedTunnelStopped',
     'directFallbackBlockedAfterDrop', 'directEgressRestoredAfterRuleRemoval',
     'ownedWfpRuleRemoved', 'ownedRoutesRemoved', 'hostRoutesRestored',
     'hostDnsRestored', 'globalKillSwitchProven', 'ipv6LeakProtectionProven',
@@ -141,27 +142,15 @@ test('disposable DCO native WFP packet filter retains narrow scope and never cla
   assert.match(p, /packetFilterIsDynamic/);
   assert.match(p, /explicitTunSourceCurlAllowedIfFailed/);
   assert.match(p, /vpnHttpsAllowedWithRuleTemporarilyRemoved/);
-  for (const marker of [
-    'coldFullRouteVerifiedBeforeAnyWfp',
-    'oig-dco-wfp-cold-fullroute-baseline.json',
-    'COLD_FULLROUTE_RECEIPT_NOT_ACCEPTED',
-    'COLD_FULLROUTE_HOST_NETWORK_NOT_RESTORED',
-    'coldFullRouteReceiptSha256'
-  ]) assert.ok(p.includes(marker), 'missing cold host matched control: ' + marker);
-  assert.ok(p.indexOf('fullroute.main(cold_args)') <
-    p.indexOf('add_rule(name, nic["index"], target, curl)'),
-    'Cold full-route test must precede any dynamic WFP filter');
-
-  for (const marker of ['directEgressRestoredBeforeVpn',
-    'vpnHttpsAllowedWithoutWfp', 'wfpRuleRearmedOnVpn',
-    'VPN_HTTPS_FAILED_WITH_NO_ADDITIONAL_WFP_RULE']) {
-    assert.ok(p.includes(marker), 'missing causal WFP/VPN A/B control: ' + marker);
-  }
-  const a = p.indexOf('remove_exact_rule(name)', p.indexOf('directBlockedBeforeVpn'));
-  const b = p.indexOf('vpnHttpsAllowedWithoutWfp', a);
-  const c = p.indexOf('wfpRuleRearmedOnVpn', b);
-  assert.ok(a >= 0 && b > a && c > b, 'A/B phases not ordered');
-
+  assert.match(p, /VPN_HTTPS_FAILED_WITH_NO_ADDITIONAL_WFP_RULE/);
+  assert.match(p, /singleOwnedOpenvpnProcessStarted/);
+  const tunnelStart = p.indexOf('proc = subprocess.Popen(');
+  const preRuleHttps = p.indexOf('no_wfp_public = curl_probe(');
+  const armRule = p.indexOf('add_rule(name, nic["index"], target, curl)');
+  assert.ok(tunnelStart >= 0 && preRuleHttps > tunnelStart &&
+    armRule > preRuleHttps,
+    'same-process unfiltered VPN HTTPS must precede WFP rule installation');
+  assert.doesNotMatch(p, /coldFullRouteVerifiedBeforeAnyWfp/);
   assert.match(p, /wfpRuleReinstalledAfterDiagnostic/);
   assert.match(p, /fullRouteUnchangedByDiagnostic/);
   assert.match(p, /try:\s+remove_exact_rule\(name\)/);

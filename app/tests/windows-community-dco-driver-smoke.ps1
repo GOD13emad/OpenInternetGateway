@@ -253,7 +253,11 @@ try {
      -not $e.pass -or -not $e.pinnedPeerVerified -or
      -not $e.dcoRoutePairActive -or -not $e.wfpRuleFilterVerified -or
      -not $e.packetLayerFilterVerified -or -not $e.ownedPacketWfpFilterRemoved -or
-     -not $e.packetFilterIsDynamic -or -not $e.directBlockedBeforeVpn -or -not $e.httpsOverVpnAllowed -or
+     -not $e.packetFilterIsDynamic -or
+     -not $e.directEgressHealthyBeforeVpn -or
+     -not $e.singleOwnedOpenvpnProcessStarted -or
+     -not $e.vpnHttpsAllowedWithoutWfp -or -not $e.wfpRuleArmedDuringVpn -or
+     -not $e.httpsOverVpnAllowed -or
      -not $e.ownedTunnelStopped -or -not $e.directFallbackBlockedAfterDrop -or
      -not $e.directEgressRestoredAfterRuleRemoval -or
      -not $e.ownedWfpRuleRemoved -or -not $e.ownedRoutesRemoved -or

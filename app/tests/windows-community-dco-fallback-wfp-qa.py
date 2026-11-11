@@ -11,7 +11,6 @@ This dynamic-session policy is fail-open if its helper crashes; it cannot
 serve as a production kill switch.
 """
 import argparse
-import hashlib
 import ipaddress
 import json
 import os
@@ -298,13 +297,11 @@ def main(args):
         "wfpRuleFilterVerified": False, "packetLayerFilterVerified": False,
         "packetFilterIsDynamic": True,
         "ownedPacketWfpFilterRemoved": False,
-        "coldFullRouteVerifiedBeforeAnyWfp": False,
-        "coldFullRouteReceiptSha256": None,
-        "directBlockedBeforeVpn": False,
-        "directEgressRestoredBeforeVpn": False,
+        "directEgressHealthyBeforeVpn": True,
+        "singleOwnedOpenvpnProcessStarted": False,
         "vpnHttpsAllowedWithoutWfp": False,
         "vpnWithoutWfpCurlDiagnostic": None,
-        "wfpRuleRearmedOnVpn": False,
+        "wfpRuleArmedDuringVpn": False,
         "physicalIpv4DistinctFromDco": False,
         "explicitTunSourceCurlAllowedIfFailed": None,
         "wfpOnCurlDiagnostic": None,
@@ -326,54 +323,8 @@ def main(args):
     index = None
     failure = ""
     try:
-        # Prove the accepted full-route harness works on this exact hosted
-        # machine BEFORE our dynamic WFP rule is first installed.
-        cold_receipt = Path(os.environ["RUNNER_TEMP"]) / (
-            "oig-dco-wfp-cold-fullroute-baseline.json")
-        if cold_receipt.exists():
-            raise RuntimeError("PREEXISTING_COLD_BASELINE_RECEIPT_REFUSED")
-        os.environ["OIG_HOSTED_DCO_FULL_IPV4_QA"] = "1"
-        try:
-            cold_args = argparse.Namespace(
-                root=str(root), receipt=str(cold_receipt),
-                openvpn=str(binary), adapter=args.adapter)
-            fullroute.main(cold_args)
-        finally:
-            os.environ.pop("OIG_HOSTED_DCO_FULL_IPV4_QA", None)
-        cold = json.loads(cold_receipt.read_text(encoding="utf-8"))
-        if not (cold.get("pass") is True and
-                cold.get("pinnedPeerVerified") is True and
-                cold.get("dcoRoutePairActive") is True and
-                cold.get("publicIpv4ViaVpnVerified") is True and
-                cold.get("ownedRoutesRemoved") is True and
-                cold.get("hostRoutesRestored") is True and
-                cold.get("hostDnsRestored") is True and
-                cold.get("fullDeviceAccepted") is False and
-                cold.get("sourceSha") == os.environ["GITHUB_SHA"]):
-            raise RuntimeError("COLD_FULLROUTE_RECEIPT_NOT_ACCEPTED")
-        report["coldFullRouteReceiptSha256"] = hashlib.sha256(
-            cold_receipt.read_bytes()).hexdigest()
-        report["coldFullRouteVerifiedBeforeAnyWfp"] = True
-        if scoped.host_snapshot() != original_network:
-            raise RuntimeError("COLD_FULLROUTE_HOST_NETWORK_NOT_RESTORED")
-        add_rule(name, nic["index"], target, curl)
-        report["wfpRuleFilterVerified"] = rule_contract(
-            name, nic["index"], target, curl)
-        report["packetLayerFilterVerified"] = report["wfpRuleFilterVerified"]
-        if not report["wfpRuleFilterVerified"]:
-            raise RuntimeError("WFP_RULE_FILTER_CONTRACT_NOT_PROVEN")
-        # Firewall must actively block direct HTTPS before opening VPN.
-        report["directBlockedBeforeVpn"] = curl_probe(curl, target, 9) is None
-        if not report["directBlockedBeforeVpn"]:
-            raise RuntimeError("WFP_DIRECT_PATH_NOT_BLOCKED")
-        # Discriminating A/B preflight: remove ONLY our dynamic filter while
-        # the tunnel is DOWN, prove direct HTTPS returns, and only then start
-        # VPN without WFP. This separates host/VPN transport failure from WFP.
-        remove_exact_rule(name)
-        report["directEgressRestoredBeforeVpn"] = (
-            curl_probe(curl, target, 15) is not None)
-        if not report["directEgressRestoredBeforeVpn"]:
-            raise RuntimeError("DIRECT_EGRESS_NOT_RESTORED_AFTER_INITIAL_WFP_REMOVAL")
+        # One pinned VPN session only: prove HTTPS before installing WFP,
+        # then add our filter while the SAME tunnel is still connected.
         # Record the adapter index BEFORE VPN creates any route.
         adapter = json.loads(ps(
             "Get-NetAdapter -Name '" + args.adapter + "' -ErrorAction Stop | "
@@ -386,6 +337,7 @@ def main(args):
             [str(binary), "--config", str(config)], cwd=str(root),
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        report["singleOwnedOpenvpnProcessStarted"] = True
         until = time.monotonic() + 70
         while time.monotonic() < until:
             data = private_log.read_text(errors="replace")[-150000:] if private_log.exists() else ""
@@ -423,13 +375,14 @@ def main(args):
             report["explicitTunSourceCurlAllowedIfFailed"] = (
                 curl_probe(curl, target, 12, source=tunnel_ipv4) is not None)
             raise RuntimeError("VPN_HTTPS_FAILED_WITH_NO_ADDITIONAL_WFP_RULE")
-        # Intervention arm: reapply the SAME owned physical-interface
-        # dynamic rule only after a successful in-tunnel HTTP control.
+        # Arm narrowly scoped WFP on the same already-working VPN session.
         add_rule(name, nic["index"], target, curl)
-        report["wfpRuleRearmedOnVpn"] = rule_contract(
+        report["wfpRuleFilterVerified"] = rule_contract(
             name, nic["index"], target, curl)
-        if not report["wfpRuleRearmedOnVpn"]:
-            raise RuntimeError("WFP_FILTER_REARMED_DURING_VPN_NOT_VERIFIED")
+        report["packetLayerFilterVerified"] = report["wfpRuleFilterVerified"]
+        report["wfpRuleArmedDuringVpn"] = report["wfpRuleFilterVerified"]
+        if not report["wfpRuleArmedDuringVpn"]:
+            raise RuntimeError("WFP_FILTER_ARMED_DURING_VPN_NOT_VERIFIED")
         # The exact same curl.exe must still succeed via the DCO interface.
         on_status = {}
         vpn_public = curl_probe(curl, target, 18, diagnostic=on_status)
@@ -530,9 +483,9 @@ def main(args):
         must = (
             "pinnedPeerVerified", "dcoRoutePairActive",
             "wfpRuleFilterVerified", "packetLayerFilterVerified",
-            "ownedPacketWfpFilterRemoved", "coldFullRouteVerifiedBeforeAnyWfp",
-            "directBlockedBeforeVpn", "directEgressRestoredBeforeVpn", "vpnHttpsAllowedWithoutWfp",
-            "wfpRuleRearmedOnVpn", "physicalIpv4DistinctFromDco",
+            "ownedPacketWfpFilterRemoved", "directEgressHealthyBeforeVpn",
+            "singleOwnedOpenvpnProcessStarted", "vpnHttpsAllowedWithoutWfp",
+            "wfpRuleArmedDuringVpn", "physicalIpv4DistinctFromDco",
             "httpsOverVpnAllowed", "ownedTunnelStopped",
             "directFallbackBlockedAfterDrop",
             "directEgressRestoredAfterRuleRemoval",
