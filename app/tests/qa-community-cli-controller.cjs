@@ -99,6 +99,7 @@ async function executeSyntheticLifecycle(data) {
   let child = null;
   let managementConnected = false;
   let sawHold = false, prompted = false, rejectedViaManagement = false;
+  let credentialChallenges = 0;
   let bytesSeen = 0;
   let disposed = false;
   const logFile = path.join(a.root, a.mode + '-controller-client.log');
@@ -114,14 +115,18 @@ async function executeSyntheticLifecycle(data) {
       socket.write('hold release\n');
       append('HOLD_RELEASE_SENT');
     }
-    if (line.includes("Need 'Auth' username/password") && !prompted) {
-      prompted = true;
-      append('PASSWORD_CHALLENGE_OBSERVED');
-      socket.write('username "Auth" ' + a.username + '\n');
-      socket.write('password "Auth" ' + a.password + '\n');
-      // JS temporary strings cannot be reliably zeroized. Credentials are
-      // synthetic and never copied to a file, argv, log or receipt.
-      a.password = null;
+    if (line.includes("Need 'Auth' username/password")) {
+      credentialChallenges += 1;
+      if (credentialChallenges > 3) { socket.destroy(); return; }
+      if (!prompted) {
+        prompted = true;
+        append('PASSWORD_CHALLENGE_OBSERVED');
+      }
+      // Write both management commands as a SINGLE frame, as the confirmed
+      // Windows direct-CLI reference does, to avoid interleaved parser states.
+      // Secrets are synthetic, sent only over localhost, never in argv/log.
+      socket.write('username "Auth" ' + a.username + '\n' +
+                   'password "Auth" ' + a.password + '\n');
       append('PASSWORD_ANSWERED_IN_MEMORY');
     }
     if (line.includes('Verification Failed')) {
@@ -260,6 +265,7 @@ async function executeSyntheticLifecycle(data) {
         '_childExit='+String(child.exitCode)+'_tail='+tail);
     }
   } finally {
+    a.password = null;
     // The only process signalled is the child PID we spawned. No service,
     // task, route, NetworkManager or unrelated OpenVPN instance is touched.
     try { if (socket && !socket.destroyed) socket.write('signal SIGTERM\n'); } catch {}
@@ -299,6 +305,7 @@ async function executeSyntheticLifecycle(data) {
   return {
     schema: 'oig-community-controller-qa-v1', mode: a.mode,
     managementConnected, managementHoldObserved: sawHold,
+    managementCredentialChallenges: credentialChallenges,
     managementPromptObserved: prompted, ownedProcessStopped: processStopped,
     closedManagementListener: portClosedAfterTeardown,
     managementPasswordProtected: true, managementTokenErased: true,
