@@ -299,6 +299,10 @@ def main(args):
         "packetFilterIsDynamic": True,
         "ownedPacketWfpFilterRemoved": False,
         "directBlockedBeforeVpn": False,
+        "directEgressRestoredBeforeVpn": False,
+        "vpnHttpsAllowedWithoutWfp": False,
+        "vpnWithoutWfpCurlDiagnostic": None,
+        "wfpRuleRearmedOnVpn": False,
         "physicalIpv4DistinctFromDco": False,
         "explicitTunSourceCurlAllowedIfFailed": None,
         "wfpOnCurlDiagnostic": None,
@@ -330,6 +334,14 @@ def main(args):
         report["directBlockedBeforeVpn"] = curl_probe(curl, target, 9) is None
         if not report["directBlockedBeforeVpn"]:
             raise RuntimeError("WFP_DIRECT_PATH_NOT_BLOCKED")
+        # Discriminating A/B preflight: remove ONLY our dynamic filter while
+        # the tunnel is DOWN, prove direct HTTPS returns, and only then start
+        # VPN without WFP. This separates host/VPN transport failure from WFP.
+        remove_exact_rule(name)
+        report["directEgressRestoredBeforeVpn"] = (
+            curl_probe(curl, target, 15) is not None)
+        if not report["directEgressRestoredBeforeVpn"]:
+            raise RuntimeError("DIRECT_EGRESS_NOT_RESTORED_AFTER_INITIAL_WFP_REMOVAL")
         # Record the adapter index BEFORE VPN creates any route.
         adapter = json.loads(ps(
             "Get-NetAdapter -Name '" + args.adapter + "' -ErrorAction Stop | "
@@ -368,7 +380,25 @@ def main(args):
             time.sleep(0.4)
         if not report["dcoRoutePairActive"]:
             raise RuntimeError("DCO_SPLIT_DEFAULT_ROUTE_NOT_PROVEN")
-        # The exact same curl.exe is permitted through the DCO interface.
+        # Control arm: VPN is fully initialized with its IPv4 split-default
+        # routes, but there is NO additional WFP filter installed.
+        no_wfp_status = {}
+        no_wfp_public = curl_probe(
+            curl, target, 18, diagnostic=no_wfp_status)
+        report["vpnWithoutWfpCurlDiagnostic"] = no_wfp_status
+        report["vpnHttpsAllowedWithoutWfp"] = no_wfp_public is not None
+        if not report["vpnHttpsAllowedWithoutWfp"]:
+            report["explicitTunSourceCurlAllowedIfFailed"] = (
+                curl_probe(curl, target, 12, source=tunnel_ipv4) is not None)
+            raise RuntimeError("VPN_HTTPS_FAILED_WITH_NO_ADDITIONAL_WFP_RULE")
+        # Intervention arm: reapply the SAME owned physical-interface
+        # dynamic rule only after a successful in-tunnel HTTP control.
+        add_rule(name, nic["index"], target, curl)
+        report["wfpRuleRearmedOnVpn"] = rule_contract(
+            name, nic["index"], target, curl)
+        if not report["wfpRuleRearmedOnVpn"]:
+            raise RuntimeError("WFP_FILTER_REARMED_DURING_VPN_NOT_VERIFIED")
+        # The exact same curl.exe must still succeed via the DCO interface.
         on_status = {}
         vpn_public = curl_probe(curl, target, 18, diagnostic=on_status)
         if vpn_public is None:
@@ -469,7 +499,8 @@ def main(args):
             "pinnedPeerVerified", "dcoRoutePairActive",
             "wfpRuleFilterVerified", "packetLayerFilterVerified",
             "ownedPacketWfpFilterRemoved", "directBlockedBeforeVpn",
-            "physicalIpv4DistinctFromDco",
+            "directEgressRestoredBeforeVpn", "vpnHttpsAllowedWithoutWfp",
+            "wfpRuleRearmedOnVpn", "physicalIpv4DistinctFromDco",
             "httpsOverVpnAllowed", "ownedTunnelStopped",
             "directFallbackBlockedAfterDrop",
             "directEgressRestoredAfterRuleRemoval",

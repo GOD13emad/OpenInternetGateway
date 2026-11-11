@@ -141,6 +141,16 @@ test('disposable DCO native WFP packet filter retains narrow scope and never cla
   assert.match(p, /packetFilterIsDynamic/);
   assert.match(p, /explicitTunSourceCurlAllowedIfFailed/);
   assert.match(p, /vpnHttpsAllowedWithRuleTemporarilyRemoved/);
+  for (const marker of ['directEgressRestoredBeforeVpn',
+    'vpnHttpsAllowedWithoutWfp', 'wfpRuleRearmedOnVpn',
+    'VPN_HTTPS_FAILED_WITH_NO_ADDITIONAL_WFP_RULE']) {
+    assert.ok(p.includes(marker), 'missing causal WFP/VPN A/B control: ' + marker);
+  }
+  const a = p.indexOf('remove_exact_rule(name)', p.indexOf('directBlockedBeforeVpn'));
+  const b = p.indexOf('vpnHttpsAllowedWithoutWfp', a);
+  const c = p.indexOf('wfpRuleRearmedOnVpn', b);
+  assert.ok(a >= 0 && b > a && c > b, 'A/B phases not ordered');
+
   assert.match(p, /wfpRuleReinstalledAfterDiagnostic/);
   assert.match(p, /fullRouteUnchangedByDiagnostic/);
   assert.match(p, /try:\s+remove_exact_rule\(name\)/);
