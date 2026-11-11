@@ -48,7 +48,15 @@ function boundedInput(data) {
     throw new Error('NONPRIVATE_QA_ROOT');
   }
   const expectedParent = fs.realpathSync(os.tmpdir());
-  if (path.dirname(root) !== expectedParent) throw new Error('QA_SCRATCH_NOT_SYSTEM_TEMP');
+  // Windows Python/Node may canonicalize the same physical Temp directory
+  // with different path casing. Compare real parent identities, not a string
+  // formed by path.dirname(), while still requiring a direct Temp child.
+  const actualParent = fs.realpathSync(path.dirname(root));
+  if (process.platform === 'win32'
+    ? actualParent.toLowerCase() !== expectedParent.toLowerCase()
+    : actualParent !== expectedParent) {
+    throw new Error('QA_SCRATCH_NOT_SYSTEM_TEMP');
+  }
   if (!MODES.has(data.mode)) throw new Error('INVALID_QA_MODE');
   if (!Number.isInteger(data.port) || data.port < 1 || data.port > 65535) {
     throw new Error('INVALID_LOCAL_PORT');
