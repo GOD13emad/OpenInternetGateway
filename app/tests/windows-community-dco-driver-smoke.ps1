@@ -1,7 +1,7 @@
 # Hosted Windows ONLY: pinned vendor MSI, ovpn-dco adapter, owned teardown.
 # No VPN connect, default route, DNS, user credential or product-engine change.
 [CmdletBinding()]
-param([string]$Receipt='')
+param([string]$Receipt='', [switch]$ProbeTun)
 $ErrorActionPreference='Stop'
 Set-StrictMode -Version Latest
 foreach($pair in @(
@@ -78,6 +78,8 @@ $msi=Join-Path $work 'OpenVPN-2.7.9-I001-amd64.msi'
 $installAttempted=$false;$installed=$false;$ownedGuid='';$ownedCreated=$false
 $adapterCreateAttempted=$false
 $driverSigned=$false;$adapterVerified=$false;$removed=$false;$uninstalled=$false
+$tunAccepted=$false
+$tunReceipt=Join-Path $env:RUNNER_TEMP 'oig-dco-scoped-tunnel.json'
 $networkRestored=$false;$servicesRestored=$false;$driverStoreRestored=$false;$failure=''
 try {
  Invoke-WebRequest -Uri $msiUrl -OutFile $msi -TimeoutSec 90 -MaximumRedirection 0 -ErrorAction Stop | Out-Null
@@ -132,6 +134,32 @@ try {
  # require the SAME NetAdapter PNPDeviceID and its verified signature.
  $driverSigned=$true;$adapterVerified=$true
  Write-Output 'HOSTED_VENDOR_DCO_ADAPTER_SIGNED_AND_VISIBLE'
+ if($ProbeTun){
+  if(Test-Path -LiteralPath $tunReceipt){throw 'DCO_TUN_RECEIPT_EXISTS'}
+  $python=(Get-Command python.exe -ErrorAction Stop).Source
+  $probe=Join-Path $PSScriptRoot 'windows-community-dco-tunnel-qa.py'
+  if(-not(Test-Path -LiteralPath $probe -PathType Leaf)){
+   throw 'DCO_TUN_SCRIPT_MISSING'
+  }
+  try {
+   $env:OIG_HOSTED_DCO_DATA_QA='1'
+   & $python -B $probe --root $work --openvpn $installedExe --adapter $alias --receipt $tunReceipt
+   if($LASTEXITCODE -ne 0){throw 'DCO_TUN_NATIVE_PROBE_FAILED'}
+  }finally{
+   Remove-Item Env:\OIG_HOSTED_DCO_DATA_QA -ErrorAction SilentlyContinue
+  }
+  $e=Get-Content -LiteralPath $tunReceipt -Raw | ConvertFrom-Json
+  if($e.schema -cne 'oig-hosted-windows-community-dco-scoped-dataplane-v1' -or
+     -not $e.pass -or -not $e.peerIdentityVerified -or
+     -not $e.tunnelIpAssigned -or -not $e.sourceBoundHttpsOverVpn -or
+     -not $e.routeRemoved -or -not $e.vpnProcessStopped -or
+     -not $e.defaultRoutesUnchanged -or -not $e.hostDnsUnchanged -or
+     $e.productionEngineChanged -or $e.fullDeviceOrKillSwitchProven){
+   throw 'DCO_SCOPED_TUN_RECEIPT_NOT_ACCEPTED'
+  }
+  $tunAccepted=$true
+ }
+
 }catch{
  $failure=[string]$_.Exception.Message
 }finally{
@@ -180,6 +208,10 @@ if($failure){$failureShort=$failure.Substring(0,[Math]::Min($failure.Length,300)
 $pass=($installed -and $adapterVerified -and $driverSigned -and $removed -and
        $uninstalled -and $networkRestored -and $servicesRestored -and
        $driverStoreRestored -and -not $failure)
+$tunSha=''
+if($ProbeTun -and (Test-Path -LiteralPath $tunReceipt)){
+ $tunSha=(Get-FileHash -LiteralPath $tunReceipt -Algorithm SHA256).Hash.ToLowerInvariant()
+}
 $report=[ordered]@{
  schema='oig-disposable-windows-dco-driver-lifecycle-v1'
  sourceSha=$env:GITHUB_SHA
@@ -195,7 +227,10 @@ $report=[ordered]@{
  vendorServicesRemoved=$servicesRestored
  driverStorePackagesRestored=$driverStoreRestored
  fullDeviceVpnTested=$false
- externalVpnConnected=$false
+ scopedDcoTunReceiptSHA256=$tunSha
+ externalVpnConnected=$tunAccepted
+ externalVpnConnectionAttempted=[bool]$ProbeTun
+ scopedDcoTunHttpsVerified=$tunAccepted
  ownerHostTouched=$false
  productionBackendChanged=$false
  failure=$failureShort

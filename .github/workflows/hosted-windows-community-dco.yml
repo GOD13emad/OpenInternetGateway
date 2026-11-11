@@ -5,6 +5,8 @@ on:
     paths:
       - '.github/workflows/hosted-windows-community-dco.yml'
       - 'app/tests/windows-community-dco-driver-smoke.ps1'
+      - 'app/tests/windows-community-dco-tunnel-qa.py'
+      - 'app/tests/windows-community-dco-driver-safety.test.js'
 
 permissions:
   contents: read
@@ -30,5 +32,41 @@ jobs:
         with:
           name: windows-community-dco-driver-lifecycle-receipt
           path: ${{ runner.temp }}/oig-dco-driver-lifecycle.json
+          if-no-files-found: warn
+          retention-days: 7
+
+  # Independent disposable VM: the signed-driver lifecycle job must first PASS.
+  # Scoped /32 egress via ovpn-dco; does NOT change the default gateway.
+  dco-tunnel:
+    needs: dco-driver
+    if: ${{ github.event.pull_request.head.repo.full_name == github.repository && github.head_ref == 'qa/v2.5.20-operator-safety-20261019' }}
+    runs-on: windows-2025
+    timeout-minutes: 18
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.14'
+      - name: Parse Python scoped data-plane probe before any driver changes
+        shell: pwsh
+        run: |
+          python -c "import ast,pathlib; ast.parse(pathlib.Path('app/tests/windows-community-dco-tunnel-qa.py').read_text())"
+          if ($LASTEXITCODE -ne 0) { throw 'DCO_SCOPED_PYTHON_SYNTAX_INVALID' }
+      - name: OpenVPN Community DCO owned scoped TUN HTTPS with bounded rollback
+        shell: pwsh
+        timeout-minutes: 14
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & ./app/tests/windows-community-dco-driver-smoke.ps1 -ProbeTun -Receipt (Join-Path $env:RUNNER_TEMP 'oig-dco-tunnel-driver-lifecycle.json')
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: windows-community-dco-scoped-tunnel-receipts
+          path: |
+            ${{ runner.temp }}/oig-dco-scoped-tunnel.json
+            ${{ runner.temp }}/oig-dco-tunnel-driver-lifecycle.json
           if-no-files-found: warn
           retention-days: 7

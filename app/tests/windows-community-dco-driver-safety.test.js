@@ -40,3 +40,22 @@ test('ovpn-dco test pins signed vendor source and uninstalls only its own adapte
   assert.match(script, /signed\[0\]\.IsSigned/);
   assert.doesNotMatch(script, /DCO_PNP_HARDWARE_ID_MISMATCH/);
 });
+
+test('scoped DCO tunneled HTTPS is opt-in, runner-only, and owns just a /32 probe route', () => {
+  const probe = fs.readFileSync(path.join(tests, 'windows-community-dco-tunnel-qa.py'), 'utf8');
+  for (const marker of [
+    'HOSTED_WINDOWS_TUN_ONLY', 'RUNNER_ENVIRONMENT', 'GITHUB_HEAD_REF',
+    'OIG_HOSTED_DCO_DATA_QA', 'TUN_SCRATCH_NOT_PRIVATE_RUNNER_TEMP',
+    'OPENVPN_PE_PIN_MISMATCH', 'route-nopull', 'route-noexec',
+    'remote-cert-tls server', 'verify-x509-name ', 'api.ipify.org',
+    'New-NetRoute', 'Remove-NetRoute', 'sourceBoundHttpsOverVpn',
+    'vpnProcessStopped', 'fullDeviceOrKillSwitchProven'
+  ]) assert.ok(probe.includes(marker), 'missing bounded DCO probe: ' + marker);
+  assert.match(workflow, /dco-tunnel:/);
+  assert.match(workflow, /needs: dco-driver/);
+  assert.match(script, /\[switch\]\$ProbeTun/);
+  assert.match(script, /scopedDcoTunHttpsVerified/);
+  assert.match(script, /OIG_HOSTED_DCO_DATA_QA/);
+  assert.doesNotMatch(probe, /redirect-gateway def1/);
+  assert.doesNotMatch(probe, /Set-DnsClientServerAddress|0\.0\.0\.0\/0.*New-NetRoute/);
+});
