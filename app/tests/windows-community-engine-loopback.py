@@ -184,8 +184,30 @@ def test_case(root, common, ca, pairs, mode):
                                " | ".join(log_contents(server_raw).splitlines()[-12:]) +
                                "; SERVER: " + " | ".join(log_contents(server_log).splitlines()[-8:]))
         with connect_management(mgmt_port, client, client_log, server_log) as sock:
-            sock.sendall(b"hold release\n")
+            # OpenVPN 2.7 can accept a management TCP connection before its
+            # initial HOLD event. Issuing release before observing HOLD is a
+            # race on Windows: the command is logged but the client stays held.
             collected = ""
+            ready_by = time.monotonic() + 6
+            while time.monotonic() < ready_by:
+                try:
+                    chunk = sock.recv(4096)
+                    if chunk:
+                        collected += chunk.decode("utf-8", errors="replace")
+                        if len(collected) > 32000:
+                            raise RuntimeError("unexpected management handshake length")
+                        if ">HOLD:" in collected:
+                            break
+                    elif client.poll() is not None:
+                        break
+                except socket.timeout:
+                    pass
+            if ">HOLD:" not in collected:
+                raise RuntimeError(mode + ": management HOLD notification missing; client: " +
+                                   " | ".join(log_contents(client_log).splitlines()[-8:]) +
+                                   "; server: " + " | ".join(log_contents(server_log).splitlines()[-8:]) +
+                                   "; management: " + repr(collected[-500:]))
+            sock.sendall(b"hold release\n")
             deadline = time.monotonic() + 14
             while time.monotonic() < deadline:
                 try:
@@ -230,8 +252,14 @@ def test_case(root, common, ca, pairs, mode):
                                    "; CLIENT_RAW: " + " | ".join(log_contents(client_raw).splitlines()[-8:]))
         elif mode == "bad-cn":
             if initialized or "VERIFY X509NAME ERROR" not in logs:
-                raise RuntimeError(mode + ": untrusted name not rejected; " +
-                                   " | ".join(logs.splitlines()[-5:]))
+                raise RuntimeError(mode + ": untrusted name not rejected; client: " +
+                                   " | ".join(logs.splitlines()[-12:]) +
+                                   "; server: " + " | ".join(srv.splitlines()[-12:]) +
+                                   "; client_raw: " + " | ".join(log_contents(client_raw).splitlines()[-8:]) +
+                                   "; server_raw: " + " | ".join(log_contents(server_raw).splitlines()[-8:]) +
+                                   "; management: " + repr(collected[-500:]) +
+                                   "; client_exit=" + str(client.poll()) +
+                                   "; server_exit=" + str(server.poll()))
         elif mode == "bad-password":
             if initialized or not ("AUTH_FAILED" in logs or saw_auth_rejection or
                                    "AUTH_FAILED" in srv):
