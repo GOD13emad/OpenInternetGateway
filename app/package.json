@@ -98,7 +98,15 @@
     "deb": {
       "afterInstall": "build/linux-after-install.sh",
       "depends": [
-        "default",
+        "libgtk-3-0",
+        "libnotify4",
+        "libnss3",
+        "libxss1",
+        "libxtst6",
+        "xdg-utils",
+        "libatspi2.0-0",
+        "libuuid1",
+        "libsecret-1-0",
         "network-manager",
         "network-manager-openvpn",
         "openvpn (>= 2.6)",

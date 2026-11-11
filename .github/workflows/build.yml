@@ -187,8 +187,12 @@ jobs:
           test -s "$deb" && test -x "$setup"
           bash "$setup" --verify-only
           depends="$(dpkg-deb -f "$deb" Depends)"
+          if grep -Eq "(^|, )default(,|$)" <<< "$depends"; then
+            echo "Invalid literal default package in Debian dependencies" >&2
+            exit 1
+          fi
           for package in network-manager network-manager-openvpn openvpn python3 curl iproute2 systemd ca-certificates libgtk-3-0 libnss3; do
-            grep -Eq "(^|, )$package([ (]|$)" <<< "$depends" || {
+            grep -Eq "(^|, )$package([ ,(]|$)" <<< "$depends" || {
               echo "Required native dependency missing in Debian package: $package" >&2
               exit 1
             }
@@ -207,6 +211,61 @@ jobs:
           sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends xvfb xauth xdotool wmctrl x11-utils openbox tint2 dbus-x11 libgtk-3-0 libnss3 libasound2t64 libgbm1
           version="$(node -p 'require("./package.json").version')"
           bash tools/qaLinuxHostedWindowLifecycle.sh "dist/OpenInternetGateway-${version}-amd64.deb"
+      - name: Install, verify, and purge one-file Linux setup on disposable hosted runner
+        if: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.head_ref == 'qa/v2.5.20-operator-safety-20261019' }}
+        shell: bash
+        timeout-minutes: 10
+        run: |
+          set -euo pipefail
+          [[ "${RUNNER_ENVIRONMENT:-}" == github-hosted &&
+             "${GITHUB_REPOSITORY:-}" == GOD13emad/OpenInternetGateway &&
+             -n "${GITHUB_RUN_ID:-}" && "$(id -u)" -ne 0 ]] || {
+            echo 'HOSTED_RUNNER_REQUIRED' >&2
+            exit 71
+          }
+          command -v script >/dev/null
+          [[ -z "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ]] || {
+            echo 'UNEXPECTED_DESKTOP_SESSION' >&2
+            exit 72
+          }
+          version="$(node -p 'require("./package.json").version')"
+          setup="$PWD/dist/OpenInternetGateway-Linux-Setup-${version}-amd64.run"
+          test -x "$setup"
+          installed() {
+            [[ "$(dpkg-query -W -f='${Status}' open-internet-gateway 2>/dev/null || true)" == "install ok installed" ]]
+          }
+          if installed; then
+            echo 'REFUSING_TO_REPLACE_PREEXISTING_PACKAGE' >&2
+            exit 73
+          fi
+          cleanup() {
+            rc=$?
+            trap - EXIT
+            if installed; then
+              sudo env DEBIAN_FRONTEND=noninteractive apt-get purge --yes --no-install-recommends -- open-internet-gateway || rc=74
+            fi
+            exit "$rc"
+          }
+          trap cleanup EXIT
+          printf -v quoted 'bash %q' "$setup"
+          output="$(script -q -e -c "timeout 240s $quoted" /dev/null)"
+          printf '%s\n' "$output"
+          grep -Fq 'OIG_LINUX_ONECLICK_INSTALLED_NO_DISPLAY' <<< "$output"
+          installed
+          dpkg --verify open-internet-gateway
+          test -x /opt/open-internet-gateway/open-internet-gateway
+          test -f /usr/share/applications/OpenInternetGateway.desktop
+          for required in network-manager network-manager-openvpn openvpn; do
+            dpkg-query -W -f='${Status}' "$required" | grep -qx 'install ok installed'
+          done
+          echo 'HOSTED_LINUX_ONEFILE_REAL_INSTALL_AND_DEPENDENCIES_PASS'
+          sudo env DEBIAN_FRONTEND=noninteractive apt-get purge --yes --no-install-recommends -- open-internet-gateway
+          if installed; then
+            echo 'HOSTED_LINUX_ONEFILE_PURGE_FAILED' >&2
+            exit 75
+          fi
+          test ! -e /opt/open-internet-gateway/open-internet-gateway
+          echo 'HOSTED_LINUX_ONEFILE_UNINSTALL_PASS'
       - uses: actions/upload-artifact@v7
         if: always()
         with:

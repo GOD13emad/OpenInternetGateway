@@ -54,7 +54,11 @@ test('Windows first-launch setup is interactive and explicitly excluded from pas
 test('Linux Debian packaging keeps Electron dependencies and adds native OpenVPN prerequisites', () => {
   const pkg = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf8'));
   const deps = pkg.build.deb.depends;
-  assert.ok(deps.includes('default'), 'Do not remove Chromium/Electron dependencies');
+  assert.ok(!deps.includes('default'), 'Literal default is not a Debian package dependency');
+  for (const name of ['libgtk-3-0', 'libnotify4', 'libnss3', 'libxss1',
+    'libxtst6', 'xdg-utils', 'libatspi2.0-0', 'libuuid1', 'libsecret-1-0']) {
+    assert.ok(deps.includes(name), 'Missing Chromium/Electron dependency: ' + name);
+  }
   for (const name of ['network-manager','network-manager-openvpn','openvpn (>= 2.6)',
     'python3','curl','iproute2','systemd','ca-certificates']) {
     assert.ok(deps.includes(name), name + ' must be an apt dependency');
