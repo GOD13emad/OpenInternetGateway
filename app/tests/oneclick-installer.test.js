@@ -172,3 +172,22 @@ test('Linux one-file builder verifies real embedded DEB and refuses tampering or
   assert.match(refused.stderr, /An active NetworkManager VPN exists/);
   assert.equal(fs.existsSync(sentinel), false, 'Never invoke apt/elevation during active VPN');
 });
+
+
+test('Linux single-file installer acceptance launches the same packaged dashboard source as Windows', () => {
+  const pkg = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf8'));
+  const workflow = fs.readFileSync(path.join(__dirname, '../../.github/workflows/build.yml'), 'utf8');
+  const lifecycle = fs.readFileSync(path.join(__dirname, '../tools/qaLinuxHostedWindowLifecycle.sh'), 'utf8');
+  assert.ok(pkg.build.files.includes('src/**/*'), 'One UI source tree must package on both OS targets');
+  assert.ok(pkg.build.win.extraResources.some(x => x.from === 'common'));
+  assert.ok(pkg.build.linux.extraResources.some(x => x.from === 'common'));
+  assert.match(workflow, /OIG_QA_EXPECTED_VERSION="\$version" bash tools\/qaLinuxHostedWindowLifecycle\.sh --installed/);
+  assert.match(workflow, /HOSTED_LINUX_ONEFILE_REAL_INSTALLED_DASHBOARD_LIFECYCLE_PASS/);
+  assert.match(workflow, /oig-linux-onefile-installed-lifecycle-receipt\.json/);
+  assert.match(lifecycle, /OIG_QA_X11_INSTALLED=1/);
+  assert.match(lifecycle, /dpkg-query -W -f='\$\{Version\}' open-internet-gateway/);
+  assert.match(lifecycle, /Exec=\/opt\/open-internet-gateway\/open-internet-gateway %U/);
+  assert.match(lifecycle, /oneFileAptInstalled/);
+  assert.match(lifecycle, /NATIVE_QUIT_NO_ACTIVE_VPN_WITH_READONLY_EMPTY_NM_PASS/);
+  assert.doesNotMatch(lifecycle, /nmcli connection (up|down|modify|delete)/);
+});

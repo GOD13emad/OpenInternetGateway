@@ -123,8 +123,13 @@ if [[ "${OIG_QA_X11_CHILD:-0}" == 1 ]]; then
   echo 'NATIVE_QUIT_NO_ACTIVE_VPN_WITH_READONLY_EMPTY_NM_PASS=true'
   python3 - "$window" "$reopenedWindow" <<'PY'
 import datetime,hashlib,json,os,pathlib,sys
-p=pathlib.Path(os.environ['RUNNER_TEMP'])/'oig-linux-window-lifecycle-receipt.json'
-d={'head':os.environ['GITHUB_SHA'],'scope':'Disposable hosted Ubuntu, real packaged DEB with 4755 Chromium sandbox, Xvfb/Openbox/tint2, private read-only empty-NetworkManager fixture; actual connected VPN rollback tested separately, no owner GUI/VPN','windowIdBeforeClose':sys.argv[1],'windowIdAfterReopen':sys.argv[2],'nativeCloseRemovedVisibleDashboard':True,'mainRemainedRunning':True,'secondInstanceReopenedDashboard':True,'quitExitedZero':True,'desiredOff':True,'emptyNmFixtureReadOnly':True,'actualVpnDisconnectExercised':False,'sandboxEnabled':True,'pass':True,'utc':datetime.datetime.now(datetime.timezone.utc).isoformat()}
+installed=os.environ.get('OIG_QA_X11_INSTALLED')=='1'
+name='oig-linux-onefile-installed-lifecycle-receipt.json' if installed else 'oig-linux-window-lifecycle-receipt.json'
+p=pathlib.Path(os.environ['RUNNER_TEMP'])/name
+scope=('Actual one-file apt-installed /opt executable, real 4755 sandbox, '
+       if installed else 'Packaged DEB offline extraction, real 4755 sandbox, ')
+scope+='Xvfb/Openbox/tint2, isolated home and read-only NetworkManager fixture; no live VPN activation or owner state'
+d={'head':os.environ['GITHUB_SHA'],'scope':scope,'oneFileAptInstalled':installed,'windowIdBeforeClose':sys.argv[1],'windowIdAfterReopen':sys.argv[2],'nativeCloseRemovedVisibleDashboard':True,'mainRemainedRunning':True,'secondInstanceReopenedDashboard':True,'quitExitedZero':True,'desiredOff':True,'emptyNmFixtureReadOnly':True,'actualVpnDisconnectExercised':False,'sandboxEnabled':True,'pass':True,'utc':datetime.datetime.now(datetime.timezone.utc).isoformat()}
 p.write_text(json.dumps(d,sort_keys=True,indent=2)+'\n')
 print('LINUX_HOSTED_PACKAGED_WINDOW_LIFECYCLE_PASS=true')
 print('RECEIPT_SHA256='+hashlib.sha256(p.read_bytes()).hexdigest())
@@ -132,19 +137,34 @@ PY
   exit 0
 fi
 
-[[ $# -eq 1 && -f "$1" && "$1" == *.deb ]] || exit 84
+[[ $# -eq 1 && ( ( -f "$1" && "$1" == *.deb ) || "$1" == '--installed' ) ]] || exit 84
+if [[ "$1" == '--installed' ]]; then
+  [[ "${OIG_QA_EXPECTED_VERSION:-}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || exit 84
+  [[ "$(dpkg-query -W -f='${Status}' open-internet-gateway 2>/dev/null || :)" == 'install ok installed' ]] || exit 84
+  [[ "$(dpkg-query -W -f='${Version}' open-internet-gateway 2>/dev/null || :)" == "$OIG_QA_EXPECTED_VERSION" ]] || exit 84
+fi
 work="$(mktemp -d "${RUNNER_TEMP:?}/oig-linux-x11-${GITHUB_RUN_ID}-XXXXXXXX")"
 umask 077
 mkdir -p "$work/bin" "$work/image" "$work/home/.config" "$work/home/.cache" "$work/home/.local/share/OpenInternetGateway/state" "$work/home/.local/state" "$work/runtime"
 chmod 700 "$work/home" "$work/runtime"
 printf 'off\n' >"$work/home/.local/share/OpenInternetGateway/state/desired-state"
-dpkg-deb -x "$1" "$work/image"
-exe="$work/image/opt/open-internet-gateway/open-internet-gateway"
-helper="$work/image/opt/open-internet-gateway/chrome-sandbox"
+if [[ "$1" == '--installed' ]]; then
+  export OIG_QA_X11_INSTALLED=1
+  exe="/opt/open-internet-gateway/open-internet-gateway"
+  helper="/opt/open-internet-gateway/chrome-sandbox"
+  desktop="/usr/share/applications/OpenInternetGateway.desktop"
+  [[ -f "$desktop" && ! -L "$desktop" ]] || exit 85
+  grep -Fqx 'Exec=/opt/open-internet-gateway/open-internet-gateway %U' "$desktop" || exit 85
+else
+  export OIG_QA_X11_INSTALLED=0
+  dpkg-deb -x "$1" "$work/image"
+  exe="$work/image/opt/open-internet-gateway/open-internet-gateway"
+  helper="$work/image/opt/open-internet-gateway/chrome-sandbox"
+  # Offline archive test: simulate only the SUID helper inside isolated CI scratch.
+  sudo chown root:root "$helper"
+  sudo chmod 4755 "$helper"
+fi
 [[ -x "$exe" && -f "$helper" && ! -L "$helper" ]] || exit 85
-# Simulate only the DEB's root-owned SUID helper in private CI scratch.
-sudo chown root:root "$helper"
-sudo chmod 4755 "$helper"
 [[ "$(stat -Lc '%u:%g:%a' "$helper")" == 0:0:4755 ]] || exit 86
 # The separately-tested provider data plane needs a real NetworkManager;
 # this window-lifecycle test only covers Quit while no OIG VPN was ever started.

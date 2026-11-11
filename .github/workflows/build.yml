@@ -277,6 +277,20 @@ jobs:
             dpkg-query -W -f='${Status}' "$required" | grep -qx 'install ok installed'
           done
           echo 'HOSTED_LINUX_ONEFILE_REAL_INSTALL_AND_DEPENDENCIES_PASS'
+          # Black-box acceptance of the SAME installed /opt executable produced
+          # by the one-file installer, not just a separately extracted DEB.
+          # Xvfb, desktop and D-Bus are private; NetworkManager is read-only
+          # mocked and no provider VPN or user desktop is touched.
+          OIG_QA_EXPECTED_VERSION="$version" bash tools/qaLinuxHostedWindowLifecycle.sh --installed
+          test -s "$RUNNER_TEMP/oig-linux-onefile-installed-lifecycle-receipt.json"
+          python3 - "$RUNNER_TEMP/oig-linux-onefile-installed-lifecycle-receipt.json" <<'PY'
+          import json,sys
+          d=json.load(open(sys.argv[1],encoding='utf-8'))
+          assert d.get('pass') is True and d.get('oneFileAptInstalled') is True
+          assert d.get('sandboxEnabled') is True and d.get('quitExitedZero') is True
+          assert d.get('emptyNmFixtureReadOnly') is True and d.get('actualVpnDisconnectExercised') is False
+          print('HOSTED_LINUX_ONEFILE_REAL_INSTALLED_DASHBOARD_LIFECYCLE_PASS')
+          PY
           sudo env DEBIAN_FRONTEND=noninteractive apt-get purge --yes --no-install-recommends -- open-internet-gateway
           if installed; then
             echo 'HOSTED_LINUX_ONEFILE_PURGE_FAILED' >&2
@@ -288,7 +302,9 @@ jobs:
         if: always()
         with:
           name: linux-window-lifecycle-receipt
-          path: ${{ runner.temp }}/oig-linux-window-lifecycle-receipt.json
+          path: |
+            ${{ runner.temp }}/oig-linux-window-lifecycle-receipt.json
+            ${{ runner.temp }}/oig-linux-onefile-installed-lifecycle-receipt.json
           if-no-files-found: warn
   tls-loopback:
     name: Native OpenVPN TLS loopback (no TUN)
