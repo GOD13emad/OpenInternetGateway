@@ -6,6 +6,7 @@ on:
       - '.github/workflows/hosted-windows-community-dco.yml'
       - 'app/tests/windows-community-dco-driver-smoke.ps1'
       - 'app/tests/windows-community-dco-tunnel-qa.py'
+      - 'app/tests/windows-community-dco-fullroute-qa.py'
       - 'app/tests/windows-community-dco-driver-safety.test.js'
 
 permissions:
@@ -68,5 +69,41 @@ jobs:
           path: |
             ${{ runner.temp }}/oig-dco-scoped-tunnel.json
             ${{ runner.temp }}/oig-dco-tunnel-driver-lifecycle.json
+          if-no-files-found: warn
+          retention-days: 7
+
+  # A distinct disposable Windows VM, after the real scoped TUN gate passes.
+  # IPv4 default routing only; not an IPv6/DNS or kill-switch claim.
+  dco-ipv4-fullroute:
+    needs: dco-tunnel
+    if: ${{ github.event.pull_request.head.repo.full_name == github.repository && github.head_ref == 'qa/v2.5.20-operator-safety-20261019' }}
+    runs-on: windows-2025
+    timeout-minutes: 18
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.14'
+      - name: Validate full-route QA syntax before any network changes
+        shell: pwsh
+        run: |
+          python -c "import ast,pathlib; ast.parse(pathlib.Path('app/tests/windows-community-dco-fullroute-qa.py').read_text())"
+          if ($LASTEXITCODE -ne 0) { throw 'FULL_IPV4_ROUTE_QA_SYNTAX_INVALID' }
+      - name: Temporary OpenVPN Community DCO IPv4 full-route and owned rollback
+        shell: pwsh
+        timeout-minutes: 14
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & ./app/tests/windows-community-dco-driver-smoke.ps1 -ProbeFullIpv4 -Receipt (Join-Path $env:RUNNER_TEMP 'oig-dco-fullroute-driver-lifecycle.json')
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: windows-community-dco-ipv4-fullroute-receipts
+          path: |
+            ${{ runner.temp }}/oig-dco-fullroute-ipv4.json
+            ${{ runner.temp }}/oig-dco-fullroute-driver-lifecycle.json
           if-no-files-found: warn
           retention-days: 7

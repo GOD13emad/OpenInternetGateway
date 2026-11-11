@@ -64,3 +64,25 @@ test('scoped DCO tunneled HTTPS is opt-in, runner-only, and owns just a /32 prob
   assert.doesNotMatch(probe, /redirect-gateway def1/);
   assert.doesNotMatch(probe, /Set-DnsClientServerAddress|0\.0\.0\.0\/0.*New-NetRoute/);
 });
+
+test('IPv4 default-route QA is isolated, guarded, and does NOT claim DNS/IPv6/kill-switch acceptance', () => {
+  const probe = fs.readFileSync(
+    path.join(tests, 'windows-community-dco-fullroute-qa.py'), 'utf8');
+  for (const marker of [
+    'OIG_HOSTED_DCO_FULL_IPV4_QA',
+    'PREEXISTING_SPLIT_DEFAULT_REFUSE_TO_TOUCH',
+    'redirect-gateway def1 block-local',
+    '0.0.0.0/1', '128.0.0.0/1',
+    'PROVIDER_CA', 'verify-x509-name ',
+    'ownedRoutesRemoved', 'vpnProcessStopped',
+    'hostRoutesRestored', 'hostDnsRestored',
+    'ipv6LeakProtectionProven', 'dnsLeakProtectionProven',
+    'killSwitchProven', 'fullDeviceAccepted'
+  ]) assert.ok(probe.includes(marker), 'missing IPv4 fullroute QA guard: ' + marker);
+  assert.match(workflow, /dco-ipv4-fullroute:/);
+  assert.match(workflow, /needs: dco-tunnel/);
+  assert.match(script, /\[switch\]\$ProbeFullIpv4/);
+  assert.match(script, /fullIpv4RouteProbeAccepted/);
+  assert.match(script, /CANNOT_COMBINE_SCOPED_AND_FULLROUTE_QA/);
+  assert.doesNotMatch(probe, /New-NetFirewallRule|Set-NetFirewallProfile/);
+});

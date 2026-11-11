@@ -1,7 +1,7 @@
 # Hosted Windows ONLY: pinned vendor MSI, ovpn-dco adapter, owned teardown.
 # No VPN connect, default route, DNS, user credential or product-engine change.
 [CmdletBinding()]
-param([string]$Receipt='', [switch]$ProbeTun)
+param([string]$Receipt='', [switch]$ProbeTun, [switch]$ProbeFullIpv4)
 $ErrorActionPreference='Stop'
 Set-StrictMode -Version Latest
 foreach($pair in @(
@@ -20,6 +20,7 @@ if(-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrat
  throw 'DISPOSABLE_RUNNER_ADMIN_REQUIRED'
 }
 if(-not $env:RUNNER_TEMP){throw 'RUNNER_TEMP_NOT_SET'}
+if($ProbeTun -and $ProbeFullIpv4){throw 'CANNOT_COMBINE_SCOPED_AND_FULLROUTE_QA'}
 if(-not $Receipt){$Receipt=Join-Path $env:RUNNER_TEMP 'oig-dco-driver-lifecycle.json'}
 if((Split-Path -Parent $Receipt) -cne $env:RUNNER_TEMP -or (Test-Path -LiteralPath $Receipt)){
  throw 'RECEIPT_NOT_PRIVATE_OR_EXISTS'
@@ -79,7 +80,9 @@ $installAttempted=$false;$installed=$false;$ownedGuid='';$ownedCreated=$false
 $adapterCreateAttempted=$false
 $driverSigned=$false;$adapterVerified=$false;$removed=$false;$uninstalled=$false
 $tunAccepted=$false
+$fullIpv4Accepted=$false
 $tunReceipt=Join-Path $env:RUNNER_TEMP 'oig-dco-scoped-tunnel.json'
+$fullIpv4Receipt=Join-Path $env:RUNNER_TEMP 'oig-dco-fullroute-ipv4.json'
 $networkRestored=$false;$servicesRestored=$false;$driverStoreRestored=$false;$failure=''
 try {
  Invoke-WebRequest -Uri $msiUrl -OutFile $msi -TimeoutSec 90 -MaximumRedirection 0 -ErrorAction Stop | Out-Null
@@ -159,6 +162,35 @@ try {
   }
   $tunAccepted=$true
  }
+ if($ProbeFullIpv4){
+  if(Test-Path -LiteralPath $fullIpv4Receipt){throw 'FULL_IPV4_RECEIPT_EXISTS'}
+  $python=(Get-Command python.exe -ErrorAction Stop).Source
+  $probe=Join-Path $PSScriptRoot 'windows-community-dco-fullroute-qa.py'
+  if(-not(Test-Path -LiteralPath $probe -PathType Leaf)){
+   throw 'FULL_IPV4_QA_SCRIPT_MISSING'
+  }
+  try {
+   $env:OIG_HOSTED_DCO_DATA_QA='1'
+   $env:OIG_HOSTED_DCO_FULL_IPV4_QA='1'
+   & $python -B $probe --root $work --openvpn $installedExe --adapter $alias --receipt $fullIpv4Receipt
+   if($LASTEXITCODE -ne 0){throw 'FULL_IPV4_NATIVE_PROBE_FAILED'}
+  }finally{
+   Remove-Item Env:\OIG_HOSTED_DCO_FULL_IPV4_QA -ErrorAction SilentlyContinue
+   Remove-Item Env:\OIG_HOSTED_DCO_DATA_QA -ErrorAction SilentlyContinue
+  }
+  $e=Get-Content -LiteralPath $fullIpv4Receipt -Raw | ConvertFrom-Json
+  if($e.schema -cne 'oig-hosted-windows-community-dco-ipv4-fullroute-v1' -or
+     -not $e.pass -or -not $e.pinnedPeerVerified -or
+     -not $e.dcoRoutePairActive -or -not $e.publicIpv4ViaVpnVerified -or
+     -not $e.ownedRoutesRemoved -or -not $e.vpnProcessStopped -or
+     -not $e.hostRoutesRestored -or -not $e.hostDnsRestored -or
+     $e.ipv6LeakProtectionProven -or $e.dnsLeakProtectionProven -or
+     $e.killSwitchProven -or $e.fullDeviceAccepted -or
+     $e.productionEngineChanged -or $e.ownerHostTouched){
+   throw 'FULL_IPV4_QA_RECEIPT_NOT_ACCEPTED'
+  }
+  $fullIpv4Accepted=$true
+ }
 
 }catch{
  $failure=[string]$_.Exception.Message
@@ -209,6 +241,10 @@ $pass=($installed -and $adapterVerified -and $driverSigned -and $removed -and
        $uninstalled -and $networkRestored -and $servicesRestored -and
        $driverStoreRestored -and -not $failure)
 $tunSha=''
+$fullIpv4Sha=''
+if($ProbeFullIpv4 -and (Test-Path -LiteralPath $fullIpv4Receipt)){
+ $fullIpv4Sha=(Get-FileHash -LiteralPath $fullIpv4Receipt -Algorithm SHA256).Hash.ToLowerInvariant()
+}
 if($ProbeTun -and (Test-Path -LiteralPath $tunReceipt)){
  $tunSha=(Get-FileHash -LiteralPath $tunReceipt -Algorithm SHA256).Hash.ToLowerInvariant()
 }
@@ -228,8 +264,10 @@ $report=[ordered]@{
  driverStorePackagesRestored=$driverStoreRestored
  fullDeviceVpnTested=$false
  scopedDcoTunReceiptSHA256=$tunSha
- externalVpnConnected=$tunAccepted
- externalVpnConnectionAttempted=[bool]$ProbeTun
+ fullIpv4RouteProbeAccepted=$fullIpv4Accepted
+ fullIpv4RouteReceiptSHA256=$fullIpv4Sha
+ externalVpnConnected=($tunAccepted -or $fullIpv4Accepted)
+ externalVpnConnectionAttempted=([bool]$ProbeTun -or [bool]$ProbeFullIpv4)
  scopedDcoTunHttpsVerified=$tunAccepted
  ownerHostTouched=$false
  productionBackendChanged=$false
