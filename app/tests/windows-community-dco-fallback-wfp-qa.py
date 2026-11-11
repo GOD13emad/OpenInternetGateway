@@ -65,11 +65,20 @@ def physical_nic():
         "-ErrorAction Stop;"
         "$p=Get-NetFirewallProfile -Name $np.NetworkCategory -ErrorAction Stop;"
         "if(-not $p.Enabled){throw 'FIREWALL_PROFILE_NOT_ENABLED'};"
+        "$v4=@(Get-NetIPAddress -InterfaceIndex $r.InterfaceIndex "
+        "-AddressFamily IPv4 -ErrorAction Stop | Where-Object {"
+        "$_.IPAddress -notlike '169.254.*' -and "
+        "$_.IPAddress -ne '127.0.0.1' -and -not $_.SkipAsSource});"
+        "if($v4.Count -ne 1){throw 'AMBIGUOUS_PHYSICAL_IPV4_SOURCE'};"
         "@{alias=[string]$a.Name;index=[int]$a.ifIndex;"
+        "source=[string]$v4[0].IPAddress;"
         "category=[string]$np.NetworkCategory} | ConvertTo-Json -Compress")
     data = json.loads(raw)
     if not data["alias"] or int(data["index"]) <= 0:
         raise RuntimeError("UNTRUSTED_PHYSICAL_NIC")
+    source = ipaddress.IPv4Address(data["source"])
+    if source.is_unspecified or source.is_loopback or source.is_link_local:
+        raise RuntimeError("UNTRUSTED_PHYSICAL_SOURCE_IPV4")
     if data["category"] not in ("Public", "Private", "DomainAuthenticated"):
         raise RuntimeError("UNSUPPORTED_PHYSICAL_NIC_PROFILE")
     return data
@@ -87,9 +96,13 @@ def rule_present(name):
               "' -ErrorAction SilentlyContinue).Count") == "1"
 
 
-def add_rule(name, nic_alias, destination, curl):
-    # Permit only one explicitly named rule, scoped to one program, NIC, IPv4
-    # destination and TCP/443, on disposable runner; no blanket deny.
+def add_rule(name, nic_alias, physical_source, destination, curl):
+    # Match the original physical IPv4 source as well as the NIC. The Windows
+    # firewall interface filter alone may match encapsulated VPN traffic.
+    # A DCO tunnel IPv4 uses a different local address, so must remain
+    # reachable; after tunnel loss, the physical source remains denied.
+    # This is one executable/endpoint ONLY, never a global kill-switch.
+    ipaddress.IPv4Address(physical_source)
     for value in (name, nic_alias, str(curl)):
         if "'" in value:
             raise RuntimeError("WFP_ARGUMENT_NOT_SAFE")
@@ -98,6 +111,7 @@ def add_rule(name, nic_alias, destination, curl):
         "' -DisplayName '" + name + "' -Direction Outbound -Action Block "
         "-Enabled True -Profile Any -Program '" + str(curl) +
         "' -InterfaceAlias '" + nic_alias +
+        "' -LocalAddress '" + physical_source +
         "' -RemoteAddress '" + destination +
         "' -Protocol TCP -RemotePort 443 -ErrorAction Stop | Out-Null",
         timeout=25)
@@ -105,7 +119,7 @@ def add_rule(name, nic_alias, destination, curl):
         raise RuntimeError("OWNED_FIREWALL_RULE_MISSING")
 
 
-def rule_contract(name, nic_alias, destination, curl):
+def rule_contract(name, nic_alias, physical_source, destination, curl):
     # Independent verification of all rule filters on the current host.
     result = json.loads(ps(
         "$r=Get-NetFirewallRule -Name '" + name + "' -ErrorAction Stop;"
@@ -116,10 +130,13 @@ def rule_contract(name, nic_alias, destination, curl):
         "@{count=@($r).Count;action=[string]$r.Action;"
         "enabled=[string]$r.Enabled;direction=[string]$r.Direction;"
         "program=[string]$a.Program;aliases=@($i.InterfaceAlias);"
+        "localAddress=@($d.LocalAddress);"
         "remoteAddress=@($d.RemoteAddress);protocol=[string]$p.Protocol;"
         "remotePort=@($p.RemotePort)}|ConvertTo-Json -Compress"))
     aliases = result["aliases"]
     aliases = aliases if isinstance(aliases, list) else [aliases]
+    local = result["localAddress"]
+    local = local if isinstance(local, list) else [local]
     remote = result["remoteAddress"]
     remote = remote if isinstance(remote, list) else [remote]
     ports = result["remotePort"]
@@ -129,7 +146,8 @@ def rule_contract(name, nic_alias, destination, curl):
         and result["direction"] == "Outbound"
         and result["enabled"] == "True"
         and str(result["program"]).lower() == str(curl).lower()
-        and aliases == [nic_alias] and remote == [destination]
+        and aliases == [nic_alias] and local == [physical_source]
+        and remote == [destination]
         and str(result["protocol"]) in ("TCP", "6")
         and [str(x) for x in ports] == ["443"])
 
@@ -220,6 +238,7 @@ def main(args):
         "officialProfileSha256": sha, "publicCredentialUpdated": updated,
         "pinnedPeerVerified": False, "dcoRoutePairActive": False,
         "wfpRuleFilterVerified": False, "directBlockedBeforeVpn": False,
+        "physicalIpv4DistinctFromDco": False,
         "httpsOverVpnAllowed": False, "ownedTunnelStopped": False,
         "directFallbackBlockedAfterDrop": False,
         "directEgressRestoredAfterRuleRemoval": False,
@@ -234,9 +253,9 @@ def main(args):
     index = None
     failure = ""
     try:
-        add_rule(name, nic["alias"], target, curl)
+        add_rule(name, nic["alias"], nic["source"], target, curl)
         report["wfpRuleFilterVerified"] = rule_contract(
-            name, nic["alias"], target, curl)
+            name, nic["alias"], nic["source"], target, curl)
         if not report["wfpRuleFilterVerified"]:
             raise RuntimeError("WFP_RULE_FILTER_CONTRACT_NOT_PROVEN")
         # Firewall must actively block direct HTTPS before opening VPN.
@@ -267,6 +286,11 @@ def main(args):
             time.sleep(0.4)
         if not report["pinnedPeerVerified"]:
             raise RuntimeError("TUNNEL_SETUP_TIMEOUT")
+        tunnel_ipv4 = scoped.interface_ip(args.adapter)
+        report["physicalIpv4DistinctFromDco"] = bool(
+            tunnel_ipv4 and tunnel_ipv4 != nic["source"])
+        if not report["physicalIpv4DistinctFromDco"]:
+            raise RuntimeError("PHYSICAL_SOURCE_NOT_DISTINCT_FROM_TUNNEL")
         until = time.monotonic() + 14
         while time.monotonic() < until:
             if all(fullroute.route_indices(p) == [index]
@@ -349,6 +373,7 @@ def main(args):
         must = (
             "pinnedPeerVerified", "dcoRoutePairActive",
             "wfpRuleFilterVerified", "directBlockedBeforeVpn",
+            "physicalIpv4DistinctFromDco",
             "httpsOverVpnAllowed", "ownedTunnelStopped",
             "directFallbackBlockedAfterDrop",
             "directEgressRestoredAfterRuleRemoval",

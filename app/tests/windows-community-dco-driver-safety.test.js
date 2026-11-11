@@ -127,6 +127,7 @@ test('disposable DCO scoped WFP fallback QA never claims a system kill switch', 
     'PREEXISTING_FULLROUTE_POLICY_REFUSED',
     'OIG-QA-FALLBACK-', 'New-NetFirewallRule',
     'Remove-NetFirewallRule', '-InterfaceAlias', '-Program',
+    '-LocalAddress', 'physicalIpv4DistinctFromDco',
     '-RemoteAddress', '-RemotePort 443', '-Protocol TCP',
     'Get-NetFirewallApplicationFilter', 'Get-NetFirewallInterfaceFilter',
     'Get-NetFirewallAddressFilter', 'Get-NetFirewallPortFilter',
@@ -137,6 +138,8 @@ test('disposable DCO scoped WFP fallback QA never claims a system kill switch', 
     'systemDnsLeakProtectionProven', 'ownerHostTouched'
   ]) assert.ok(p.includes(marker), 'missing scoped kill-policy marker: ' + marker);
   assert.match(p, /fullroute\.scoped\s*=\s*scoped/);
+  assert.match(p, /local == \[physical_source\]/);
+  assert.match(p, /Get-NetIPAddress -InterfaceIndex/);
   assert.match(workflow, /dco-scoped-wfp-fallback:/);
   assert.match(workflow, /needs: dco-dualstack-dns-policy/);
   assert.match(script, /\[switch\]\$ProbeFallback/);
