@@ -146,11 +146,19 @@ test('disposable DCO native WFP packet filter retains narrow scope and never cla
   assert.match(p, /singleOwnedOpenvpnProcessStarted/);
   const tunnelStart = p.indexOf('proc = subprocess.Popen(');
   const preRuleHttps = p.indexOf('no_wfp_public = curl_probe(');
-  const armRule = p.indexOf('add_rule(name, nic["index"], target, curl)');
+  const armRule = p.indexOf('add_rule(name, nic["index"], target, curl, provider_ipv4)');
   assert.ok(tunnelStart >= 0 && preRuleHttps > tunnelStart &&
     armRule > preRuleHttps,
     'same-process unfiltered VPN HTTPS must precede WFP rule installation');
   assert.doesNotMatch(p, /coldFullRouteVerifiedBeforeAnyWfp/);
+  const providerResolution = p.indexOf('provider_ipv4 = frozenset(');
+  const vpnChildStart = p.indexOf('        proc = subprocess.Popen(');
+  assert.ok(providerResolution > 0 && vpnChildStart > providerResolution,
+    'provider DNS must be resolved before connecting the VPN');
+  const armBody = p.slice(p.indexOf('def add_rule('), p.indexOf('def rule_contract('));
+  assert.doesNotMatch(armBody, /gethostbyname|getaddrinfo/,
+    'WFP arming must not depend on DNS after the VPN is up');
+  assert.match(armBody, /PROVIDER_ADDRESSES_NOT_PINNED_PRE_TUNNEL/);
   assert.match(p, /wfpRuleReinstalledAfterDiagnostic/);
   assert.match(p, /fullRouteUnchangedByDiagnostic/);
   assert.match(p, /try:\s+remove_exact_rule\(name\)/);

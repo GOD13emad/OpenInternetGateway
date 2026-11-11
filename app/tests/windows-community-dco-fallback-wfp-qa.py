@@ -129,7 +129,7 @@ def rule_present(name):
         _packet_exe, _packet_filter_id, _packet_index, _packet_destination)
 
 
-def add_rule(name, ifindex, destination, curl):
+def add_rule(name, ifindex, destination, curl, provider_ipv4):
     global _packet_process, _packet_filter_id
     global _packet_index, _packet_destination, _packet_name, _packet_exe
     if _packet_process is not None:
@@ -140,7 +140,12 @@ def add_rule(name, ifindex, destination, curl):
     target = str(ipaddress.IPv4Address(destination))
     # The exact target must differ from the pinned VPN outer endpoint
     # (the filter must never prevent the encrypted provider transport).
-    if target in socket.gethostbyname_ex(fullroute.PROVIDER_HOST)[2]:
+    # DNS may be unavailable once the VPN is connected. Never resolve
+    # the provider while arming a firewall rule: validate the immutable,
+    # pre-VPN resolved provider addresses before spawning the VPN child.
+    if not provider_ipv4 or not isinstance(provider_ipv4, frozenset):
+        raise RuntimeError("PROVIDER_ADDRESSES_NOT_PINNED_PRE_TUNNEL")
+    if target in provider_ipv4:
         raise RuntimeError("WFP_TARGET_COLLIDES_WITH_PROVIDER")
     proc = subprocess.Popen(
         [str(exe), "arm", str(ifindex), target],
@@ -253,6 +258,13 @@ def main(args):
     if rule_present(name):
         raise RuntimeError("PREEXISTING_NAMED_FIREWALL_RULE_REFUSED")
     target = str(ipaddress.IPv4Address(socket.gethostbyname(scoped.PROBE_HOST)))
+    # Resolve candidate outer VPN IPv4 addresses while direct DNS still
+    # works. Firewall-arming must not depend on DNS inside the VPN tunnel.
+    provider_ipv4 = frozenset(
+        str(ipaddress.IPv4Address(address))
+        for address in socket.gethostbyname_ex(fullroute.PROVIDER_HOST)[2])
+    if not provider_ipv4 or target in provider_ipv4:
+        raise RuntimeError("PROVIDER_RESOLUTION_COLLISION_OR_EMPTY")
     if curl_probe(curl, target) is None:
         raise RuntimeError("NO_POSITIVE_DIRECT_HTTPS_BASELINE")
     original_network = scoped.host_snapshot()
@@ -376,7 +388,7 @@ def main(args):
                 curl_probe(curl, target, 12, source=tunnel_ipv4) is not None)
             raise RuntimeError("VPN_HTTPS_FAILED_WITH_NO_ADDITIONAL_WFP_RULE")
         # Arm narrowly scoped WFP on the same already-working VPN session.
-        add_rule(name, nic["index"], target, curl)
+        add_rule(name, nic["index"], target, curl, provider_ipv4)
         report["wfpRuleFilterVerified"] = rule_contract(
             name, nic["index"], target, curl)
         report["packetLayerFilterVerified"] = report["wfpRuleFilterVerified"]
@@ -407,7 +419,7 @@ def main(args):
             finally:
                 # Must restore the exact prior block even if diagnostic fails.
                 if not rule_present(name):
-                    add_rule(name, nic["index"], target, curl)
+                    add_rule(name, nic["index"], target, curl, provider_ipv4)
                 report["wfpRuleReinstalledAfterDiagnostic"] = rule_contract(
                     name, nic["index"], target, curl)
             if not report["wfpRuleReinstalledAfterDiagnostic"]:
