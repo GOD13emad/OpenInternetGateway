@@ -93,7 +93,7 @@ test('Windows unknown status fails closed and an already verified OIG-managed tu
   b.platform = 'win32';
   b.backendRoot = path.join(__dirname, 'no-network-operations');
   let mode = 'unknown', guards = 0, mutations = 0;
-  const healthy = {connected: true, engine: 'HeadlessConnector'};
+  const healthy = {connected: true, engine: 'HeadlessConnector', managedInterfaceIndex: 42};
   b._windows = async action => {
     if (action === 'status') {
       if (mode === 'unknown') throw new Error('STATUS_NOT_AVAILABLE');
@@ -103,10 +103,13 @@ test('Windows unknown status fails closed and an already verified OIG-managed tu
     mutations++;
     return {ok: true, status: healthy};
   };
-  b._assertWindowsIndependentVpnInactive = async () => {
+  b._assertWindowsIndependentVpnInactive = async ownedIndex => {
     guards++;
-    if (mode === 'unknown') throw new Error('Independent VPN state unknown');
-    throw new Error('GUARD_SHOULD_NOT_RUN_FOR_VERIFIED_OWN_TUNNEL');
+    if (mode === 'unknown') {
+      assert.equal(ownedIndex, 0);
+      throw new Error('Independent VPN state unknown');
+    }
+    assert.equal(ownedIndex, 42, 'Only the OIG-managed interface may be excluded');
   };
   b.prepareWindowsInstallerPrerequisites = async () => ({openVpnConnect:{ready:true}});
   b.benchmarkAllFast = async () => ({});
@@ -115,7 +118,74 @@ test('Windows unknown status fails closed and an already verified OIG-managed tu
   mode = 'own-verified';
   const result = await b.action('connect');
   assert.equal(result.status.connected, true);
-  assert.equal(guards, 1);
+  assert.equal(guards, 2);
   assert.equal(mutations, 1);
   assert.equal(b.gatewayActionCount, 0);
+});
+
+
+test('privileged Windows scheduled recovery and bootstrap check independent VPN before mutating connector', () => {
+  const headless = fs.readFileSync(path.join(root, 'backend/windows/scripts/Headless-Control.ps1'), 'utf8');
+  const ensure = fs.readFileSync(path.join(root, 'backend/windows/scripts/Ensure-OpenInternet.ps1'), 'utf8');
+  const src = fs.readFileSync(guard, 'utf8');
+  assert.match(src, /Get-VpnConnection -AllUserConnection -ErrorAction Stop/);
+  assert.match(src, /OwnedInterfaceIndex/);
+  assert.match(headless, /function Assert-OigNoIndependentVpn/);
+  assert.match(headless, /function Get-OigOwnedInterfaceIndex/);
+  assert.match(headless, /Guard-IndependentVpn\.ps1/);
+  const firstConnect = headless.indexOf("if($Action -eq 'Connect'){Assert-OigNoIndependentVpn");
+  const savedDesired = headless.indexOf("Save-Desired 'on'", firstConnect);
+  const afterDesired = headless.indexOf(' Assert-OigNoIndependentVpn\n Assert-OpenVpnGuiClosed');
+  const serviceChange = headless.indexOf(' Ensure-ServiceInstalled', afterDesired);
+  assert.ok(firstConnect >= 0 && firstConnect < savedDesired && savedDesired < afterDesired &&
+    afterDesired < serviceChange);
+  assert.match(ensure, /function Assert-OigSafeToBootstrap/);
+  assert.equal((ensure.match(/Assert-OigSafeToBootstrap\n/g) || []).length, 2);
+  const firstBoot = ensure.indexOf("Bootstrap-HeadlessConnector.ps1')");
+  assert.ok(ensure.indexOf('Assert-OigSafeToBootstrap', ensure.indexOf('if(Test-Path $exactRequest)')) < firstBoot);
+  assert.match(backendSource, /managedInterfaceIndex=/);
+  assert.match(backendSource, /_assertWindowsIndependentVpnInactive\(ownedInterfaceIndex\)/);
+});
+
+test('native Windows synthetic VPN coexistence guard respects own index but never hides foreign VPNs', {
+  skip: process.platform !== 'win32'
+}, () => {
+  for (const [mode, expected] of [
+    ['clean', 0], ['own', 0], ['native', 17], ['global', 17],
+    ['other', 17], ['split', 17], ['unknown', 18]
+  ]) {
+    const script = [
+      '$ErrorActionPreference="Stop"',
+      '$env:OIG_NATIVE_GUARD_CASE=' + "'" + mode + "'",
+      'function Get-VpnConnection {',
+      ' param([switch]$AllUserConnection,$ErrorAction)',
+      ' if($env:OIG_NATIVE_GUARD_CASE -eq "native" -and -not $AllUserConnection){return [pscustomobject]@{ConnectionStatus="Connected"}}',
+      ' if($env:OIG_NATIVE_GUARD_CASE -eq "global" -and $AllUserConnection){return [pscustomobject]@{ConnectionStatus="Connected"}}',
+      '}',
+      'function Get-NetAdapter {',
+      ' param($ErrorAction)',
+      ' $case=$env:OIG_NATIVE_GUARD_CASE',
+      ' if($case -in @("own","other","split")){',
+      '  [pscustomobject]@{Status="Up";Name="OIG OpenVPN";InterfaceDescription="TAP";ifIndex=42}',
+      ' }',
+      ' if($case -eq "other"){[pscustomobject]@{Status="Up";Name="foreign OpenVPN";InterfaceDescription="TAP";ifIndex=99}}',
+      '}',
+      'function Get-NetRoute {',
+      ' param($ErrorAction)',
+      ' $case=$env:OIG_NATIVE_GUARD_CASE',
+      ' if($case -eq "unknown"){throw "SYNTHETIC_UNKNOWN_NETWORK"}',
+      ' if($case -in @("own","other","split")){',
+      '  [pscustomobject]@{DestinationPrefix="0.0.0.0/1";InterfaceIndex=42}',
+      '  [pscustomobject]@{DestinationPrefix="128.0.0.0/1";InterfaceIndex=42}',
+      ' }',
+      ' if($case -eq "split"){[pscustomobject]@{DestinationPrefix="::/1";InterfaceIndex=99}}',
+      '}',
+      '& ' + "'" + guard.replace(/'/g, "''") + "'" + ' -OwnedInterfaceIndex 42'
+    ].join('\n');
+    const out = spawnSync('pwsh', ['-NoProfile', '-NonInteractive', '-Command', script],
+      {encoding: 'utf8', timeout: 12000, windowsHide: true});
+    if (out.error) throw out.error;
+    assert.equal(out.status, expected, mode + ': ' + (out.stderr || ''));
+    assert.equal((out.stdout || '').trim(), '', mode);
+  }
 });

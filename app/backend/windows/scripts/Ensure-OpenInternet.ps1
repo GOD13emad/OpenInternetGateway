@@ -20,6 +20,16 @@ function Assert-OigOpenVpnGuiClosed {
    throw 'OpenVPN Connect GUI is already running; headless connector bootstrap was refused. Close the independent app and click Connect again.'
  }
 }
+function Assert-OigSafeToBootstrap {
+ $guard=Join-Path $PSScriptRoot 'Guard-IndependentVpn.ps1'
+ if(-not(Test-Path -LiteralPath $guard)){throw 'Independent VPN safety guard is missing.'}
+ $pwsh=Join-Path $PSHOME 'pwsh.exe'
+ if(-not(Test-Path -LiteralPath $pwsh)){throw 'PowerShell safety observer is missing.'}
+ & $pwsh -NoProfile -NonInteractive -File $guard
+ $code=$LASTEXITCODE
+ if($code -eq 17){throw 'Independent VPN is active; refusing connector bootstrap.'}
+ if($code -ne 0){throw 'Independent VPN state unknown; refusing connector bootstrap.'}
+}
 function Test-Admin {
  $id=[Security.Principal.WindowsIdentity]::GetCurrent()
  $p=New-Object Security.Principal.WindowsPrincipal($id)
@@ -109,6 +119,7 @@ try{
    $svc=Get-Service OVPNConnectorService -ErrorAction SilentlyContinue
    $ready=Test-Path (Join-Path $Root 'state\headless-bootstrap.ready')
    if(-not $svc -or -not $ready){
+     Assert-OigSafeToBootstrap
      Assert-OigOpenVpnGuiClosed
      & (Join-Path $PSScriptRoot 'Bootstrap-HeadlessConnector.ps1')
    }
@@ -119,6 +130,7 @@ try{
  $svc=Get-Service OVPNConnectorService -ErrorAction SilentlyContinue
  $ready=Test-Path (Join-Path $Root 'state\headless-bootstrap.ready')
  if(-not $svc -or -not $ready){
+   Assert-OigSafeToBootstrap
    Assert-OigOpenVpnGuiClosed
    & (Join-Path $PSScriptRoot 'Bootstrap-HeadlessConnector.ps1')
    # Continue into Ensure immediately; the periodic recovery interval is too

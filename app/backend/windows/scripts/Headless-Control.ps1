@@ -93,6 +93,32 @@ function Wait-Health([bool]$Want,[int]$Seconds,[string]$ExpectedCountry=''){
  }while((Get-Date)-lt $until)
  return (Get-Health $ExpectedCountry)
 }
+# Privileged Auto-Recovery enforces the same foreign-VPN check as the UI.
+function Get-OigOwnedInterfaceIndex {
+ $svc=Get-Service $service -ErrorAction SilentlyContinue
+ if(-not $svc -or $svc.Status -ne 'Running'){return 0}
+ if(-not(Test-Path -LiteralPath $stateFile)){return 0}
+ try{
+  $owned=Get-Content -LiteralPath $stateFile -Raw -Encoding UTF8|ConvertFrom-Json
+  if([string]$owned.engine -ne 'OVPNConnectorService' -or
+     [string]$owned.sha256 -notmatch '^[a-fA-F0-9]{64}$'){return 0}
+  $routes=@(Get-NetRoute -AddressFamily IPv4 -ErrorAction Stop|
+    Where-Object {$_.DestinationPrefix -in @('0.0.0.0/1','128.0.0.0/1')})
+  if(-not(Test-OigFullRoutePair -Routes $routes)){return 0}
+  return [int]$routes[0].InterfaceIndex
+ }catch{return 0}
+}
+function Assert-OigNoIndependentVpn {
+ $guard=Join-Path $PSScriptRoot 'Guard-IndependentVpn.ps1'
+ if(-not(Test-Path -LiteralPath $guard)){throw 'Independent VPN safety observer is missing.'}
+ $pwsh=Join-Path $PSHOME 'pwsh.exe'
+ if(-not(Test-Path -LiteralPath $pwsh)){throw 'PowerShell safety observer is missing.'}
+ $own=Get-OigOwnedInterfaceIndex
+ & $pwsh -NoProfile -NonInteractive -File $guard -OwnedInterfaceIndex $own
+ $code=$LASTEXITCODE
+ if($code -eq 17){throw 'Independent VPN is active; refusing connector changes.'}
+ if($code -ne 0){throw 'Independent VPN state unknown; refusing connector changes.'}
+}
 function Test-DesiredOn {
  if(-not(Test-Path -LiteralPath $desiredFile)){return $false}
  try{return ([string](Get-Content -LiteralPath $desiredFile -Raw|ConvertFrom-Json).desired -eq 'on')}
@@ -467,7 +493,7 @@ try{
    exit 0
  }
 
- if($Action -eq 'Connect'){Save-Desired 'on'}
+ if($Action -eq 'Connect'){Assert-OigNoIndependentVpn;Save-Desired 'on'}
  $desired='off'
  if(Test-Path $desiredFile){try{$desired=[string](Get-Content -Raw $desiredFile|ConvertFrom-Json).desired}catch{}}
  if($desired -ne 'on'){
@@ -477,6 +503,7 @@ try{
    exit 0
  }
 
+ Assert-OigNoIndependentVpn
  Assert-OpenVpnGuiClosed
  try{& (Join-Path $PSScriptRoot 'Config-Factory.ps1') -Action Ensure -MaxAgeHours 8|Out-Null}catch{}
  $pre=Get-Health

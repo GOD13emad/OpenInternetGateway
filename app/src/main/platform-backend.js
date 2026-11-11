@@ -706,13 +706,18 @@ class Backend {
   // The vendor MSI can install services/drivers. Never initiate that native
   // system change while Windows reports any other VPN connection or tunnel.
   // This is an observation only: exit 17=occupied, 18=unable to verify.
-  async _assertWindowsIndependentVpnInactive() {
+  async _assertWindowsIndependentVpnInactive(ownedInterfaceIndex = 0) {
     const script = path.join(this.backendRoot, 'scripts', 'Guard-IndependentVpn.ps1');
     if (!fs.existsSync(script)) {
       throw new Error('Cannot verify independent Windows VPN safety: packaged guard is missing.');
     }
+    if (!Number.isSafeInteger(ownedInterfaceIndex) || ownedInterfaceIndex < 0 ||
+        ownedInterfaceIndex > 2147483647) {
+      throw new Error('Invalid OIG owned interface identity.');
+    }
     const result = await run(this._requireWindowsPwsh(), [
-      '-NoProfile', '-NonInteractive', '-File', script
+      '-NoProfile', '-NonInteractive', '-File', script,
+      '-OwnedInterfaceIndex', String(ownedInterfaceIndex)
     ], { timeout: 15000, allowFailure: true });
     if (result.code === 17) {
       throw new Error('Another Windows VPN or tunnel is active. Prerequisite installation was refused to protect that connection. End the independent session yourself before first-time setup.');
@@ -850,7 +855,7 @@ class Backend {
         "$relay='';$profileIP='';$profileCountry='';$profileSha='';if(Test-Path $state){try{$s=Get-Content -Raw $state|ConvertFrom-Json;$relay=([string]$s.serverIP)+':'+([string]$s.port);$profileIP=[string]$s.observedIP;if(-not $profileIP){$profileIP=[string]$s.serverIP};$profileSha=[string]$s.sha256;$profileCountry=[string]$s.country;if(-not $profileCountry){$profileCountry=[string]$s.configuredCountry}}catch{}}",
         "$managedActive=($svc -and $svc.Status -eq 'Running')",
         "$probeDegraded=$false;if(-not $loc -and $managedActive -and $routePairValid -and $ipv6Safe -and $poison -eq $false -and $profileSha -match '^[a-fA-F0-9]{64}$' -and $relay -and $relay -ne ':' -and $profileCountry){$loc=$profileCountry;if(-not $ip){$ip=$profileIP};$probeDegraded=$true}",
-        "[ordered]@{connected=($desired -eq 'on' -and $routes.Count -ge 2 -and $routePairValid -and $ipv6Safe -and $managedActive -and $profileSha -match '^[a-fA-F0-9]{64}$' -and $relay -and $relay -ne ':' -and $profileCountry -and $loc -eq $profileCountry -and $loc -ne 'IR' -and $poison -eq $false);ip=$ip.Trim();country=$loc.Trim();dns=$dns;poison=$poison;fullRoutes=$(if($routePairValid){2}else{0});ipv6LeakRisk=[bool]($routePairValid -and -not $ipv6Safe);relay=$relay;autoRecovery=[bool]$task;autoRecoveryState=$(if(-not $task){'Missing'}elseif(-not [bool]$task.Settings.Enabled){'Disabled'}else{[string]$task.State});interface=$(if($routePairValid){[string]($routes|Select-Object -First 1 -ExpandProperty InterfaceAlias -ErrorAction SilentlyContinue)}else{''});engine=$(if($svc){'HeadlessConnector'}else{'Missing'});connectorService=$(if($svc){[string]$svc.Status}else{'Missing'});managedTunnelActive=[bool]$managedActive;healthProbeDegraded=[bool]$probeDegraded;desiredState=$desired;failureStreak=$(if($guard){[int]$guard.failureStreak}else{0});rotations24h=$(if($guard){@($guard.rotations).Count}else{0})}|ConvertTo-Json -Compress"
+        "[ordered]@{connected=($desired -eq 'on' -and $routes.Count -ge 2 -and $routePairValid -and $ipv6Safe -and $managedActive -and $profileSha -match '^[a-fA-F0-9]{64}$' -and $relay -and $relay -ne ':' -and $profileCountry -and $loc -eq $profileCountry -and $loc -ne 'IR' -and $poison -eq $false);ip=$ip.Trim();country=$loc.Trim();dns=$dns;poison=$poison;fullRoutes=$(if($routePairValid){2}else{0});ipv6LeakRisk=[bool]($routePairValid -and -not $ipv6Safe);relay=$relay;autoRecovery=[bool]$task;autoRecoveryState=$(if(-not $task){'Missing'}elseif(-not [bool]$task.Settings.Enabled){'Disabled'}else{[string]$task.State});interface=$(if($routePairValid){[string]($routes|Select-Object -First 1 -ExpandProperty InterfaceAlias -ErrorAction SilentlyContinue)}else{''});managedInterfaceIndex=$(if($routePairValid){[int]$routes[0].InterfaceIndex}else{0});engine=$(if($svc){'HeadlessConnector'}else{'Missing'});connectorService=$(if($svc){[string]$svc.Status}else{'Missing'});managedTunnelActive=[bool]$managedActive;healthProbeDegraded=[bool]$probeDegraded;desiredState=$desired;failureStreak=$(if($guard){[int]$guard.failureStreak}else{0});rotations24h=$(if($guard){@($guard.rotations).Count}else{0})}|ConvertTo-Json -Compress"
       ].join(';');
       const r = await run(pwsh, ['-NoProfile','-Command',script], { timeout: 12000 });
       return JSON.parse(r.stdout || '{}');
@@ -2068,13 +2073,19 @@ exit 0
         // First-Connect must not take over an unrelated active VPN just
         // because OpenVPN Connect is already installed. Observe the current
         // OIG-owned state without modifying any routes or services.
-        let existingOigTunnel = false;
+        let ownedInterfaceIndex = 0;
         try {
           const observed = await this._windows('status');
-          existingOigTunnel = observed?.connected === true &&
-            observed?.engine === 'HeadlessConnector';
+          const index = Number(observed?.managedInterfaceIndex || 0);
+          if (observed?.connected === true &&
+              observed?.engine === 'HeadlessConnector' &&
+              Number.isSafeInteger(index) && index > 0) {
+            ownedInterfaceIndex = index;
+          }
         } catch {}
-        if (!existingOigTunnel) await this._assertWindowsIndependentVpnInactive();
+        // Even a healthy OIG session can coexist with an unrelated VPN.
+        // Exclude only the observed OIG-owned interface, never skip the guard.
+        await this._assertWindowsIndependentVpnInactive(ownedInterfaceIndex);
         await this.prepareWindowsInstallerPrerequisites();
       }
       if (action === 'connect-profile') result = await this.connectProfile(options.sha256);

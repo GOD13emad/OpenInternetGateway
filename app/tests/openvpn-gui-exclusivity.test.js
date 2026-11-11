@@ -51,7 +51,7 @@ test('Ensure refuses GUI before bootstrapping the headless connector and cancels
 });
 
 test('elevated action checks GUI before Config Factory, service install, and route mutation',()=>{
-  const actionStart=daemon.indexOf("if($Action -eq 'Connect'){Save-Desired 'on'}");
+  const actionStart=daemon.indexOf("if($Action -eq 'Connect'){Assert-OigNoIndependentVpn;Save-Desired 'on'}");
   const config=daemon.indexOf("Config-Factory.ps1') -Action Ensure",actionStart);
   const service=daemon.indexOf('Ensure-ServiceInstalled',actionStart);
   const firstGuard=daemon.indexOf('Assert-OpenVpnGuiClosed',actionStart);
