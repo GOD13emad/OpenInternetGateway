@@ -156,7 +156,12 @@ def test_case(root, common, ca, pairs, mode):
     server = client = None
     saw_prompt = saw_auth_rejection = False
     try:
-        server = launch(common + [
+        # Native Windows OpenVPN 2.7 checks that a tun-type server declares
+        # --ifconfig even with --dev null. These test-only RFC1918 values are
+        # never applied: common includes --ifconfig-noexec and --route-noexec.
+        server_config = ["--topology", "subnet", "--ifconfig",
+                         "10.253.253.1", "255.255.255.0"] if os.name == "nt" else []
+        server = launch(common + server_config + [
             "--proto", "tcp-server", "--lport", str(port),
             "--tls-server", "--mode", "server", "--dh", "none",
             "--cert", str(pairs["server"][0]), "--key", str(pairs["server"][1]),
