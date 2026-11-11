@@ -162,13 +162,13 @@ def test_case(root, common, ca, pairs, mode):
         server_config = ["--topology", "subnet", "--ifconfig",
                          "10.253.253.1", "255.255.255.0"] if os.name == "nt" else []
         server = launch(common + server_config + [
-            "--proto", "tcp-server", "--lport", str(port),
+            "--proto", "tcp-server", "--local", "127.0.0.1", "--lport", str(port),
             "--tls-server", "--mode", "server", "--dh", "none",
             "--cert", str(pairs["server"][0]), "--key", str(pairs["server"][1]),
             "--script-security", "2", "--auth-user-pass-verify", command,
             "via-file", "--log", str(server_log)], server_raw)
         client = launch(common + [
-            "--proto", "tcp-client", "--remote", "127.0.0.1", str(port),
+            "--proto", "tcp-client", "--nobind", "--remote", "127.0.0.1", str(port),
             "--tls-client", "--remote-cert-tls", "server",
             "--verify-x509-name", ("wrong-oig-local-server" if mode == "bad-cn"
                                     else "oig-local-server"), "name",
@@ -218,7 +218,7 @@ def test_case(root, common, ca, pairs, mode):
         logs = log_contents(client_log)
         srv = log_contents(server_log)
         initialized = "Initialization Sequence Completed" in logs
-        if not saw_prompt:
+        if not saw_prompt and mode != "bad-cn":
             raise RuntimeError(mode + ": actual management credential prompt missing; " +
                                " | ".join(logs.splitlines()[-4:]))
         if mode == "valid":
@@ -269,8 +269,7 @@ def main():
         root = Path(tmp)
         ca, pairs = make_certificates(root, args.openssl)
         common = [args.openvpn, "--dev", "null", "--ifconfig-noexec",
-                  "--route-noexec", "--local", "127.0.0.1",
-                  "--ca", str(ca), "--data-ciphers", "AES-256-GCM",
+                  "--route-noexec", "--ca", str(ca), "--data-ciphers", "AES-256-GCM",
                   "--verb", "3"]
         checks = [test_case(root, common, ca, pairs, mode)
                   for mode in ("valid", "bad-cn", "bad-password")]

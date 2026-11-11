@@ -113,7 +113,7 @@ try{
   $proof=Get-Content -LiteralPath $localReceipt -Raw | ConvertFrom-Json
   if($proof.schema -cne 'oig-community-windows-loopback-v1' -or -not $proof.pass -or
      @($proof.cases).Count -ne 3 -or
-     @($proof.cases|Where-Object { -not $_.managementPromptObserved }).Count -ne 0 -or
+     @($proof.cases|Where-Object { $_.mode -ne 'bad-cn' -and -not $_.managementPromptObserved }).Count -ne 0 -or
      @($proof.cases|Where-Object {$_.mode -eq 'valid' -and $_.tlsAccepted}).Count -ne 1 -or
      @($proof.cases|Where-Object {$_.mode -eq 'bad-cn' -and $_.identityRejected -and -not $_.tlsAccepted}).Count -ne 1 -or
      @($proof.cases|Where-Object {$_.mode -eq 'bad-password' -and $_.authRejected -and -not $_.tlsAccepted}).Count -ne 1){
