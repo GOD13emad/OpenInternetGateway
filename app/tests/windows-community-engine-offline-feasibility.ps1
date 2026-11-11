@@ -1,6 +1,6 @@
-# Disposable runner only: prove that verified OpenVPN Community 2.7.9 for
-# Windows can be invoked headlessly and exposes password-management options.
-# This DOES NOT connect a VPN, install a service, or change owner networks.
+# Disposable runner only: verify pinned native Community OpenVPN 2.7.9,
+# synthetic local TLS/password challenge, and QA app-owned process/management
+# lifecycle. No VPN, TUN, system service, privilege or owner-network change.
 [CmdletBinding()]
 param([string]$Receipt = '')
 $ErrorActionPreference='Stop'
@@ -119,6 +119,32 @@ try{
      @($proof.cases|Where-Object {$_.mode -eq 'bad-password' -and $_.authRejected -and -not $_.tlsAccepted}).Count -ne 1){
     throw 'LOCAL_LOOPBACK_RECEIPT_NEGATIVE_CASE_NOT_ACCEPTED'
   }
+  # Integration gate: own only the newly spawned portable OpenVPN process
+  # and reverse management-client localhost channel. The synthetic password
+  # is provided by stdin to the test-only controller (no credentials file).
+  $node=(Get-Command node.exe -ErrorAction Stop).Source
+  $controllerReceipt=Join-Path $env:RUNNER_TEMP 'oig-community-controller-loopback-receipt.json'
+  if(Test-Path -LiteralPath $controllerReceipt){throw 'OWNED_CONTROLLER_RECEIPT_EXISTS'}
+  & $python -B $localSmoke --openvpn $exe --openssl $openssl[0] --receipt $controllerReceipt --controller-node --node-bin $node
+  if($LASTEXITCODE -ne 0){throw 'OWNED_COMMUNITY_CONTROLLER_LOCAL_TLS_FAILED'}
+  $control=Get-Content -LiteralPath $controllerReceipt -Raw | ConvertFrom-Json
+  if($control.schema -cne 'oig-community-controller-loopback-v1' -or
+     -not $control.pass -or -not $control.appOwnedManagementClientTested -or
+     @($control.cases).Count -ne 3 -or
+     @($control.cases | Where-Object {
+       $_.schema -cne 'oig-community-controller-qa-v1' -or
+       -not $_.managementConnected -or -not $_.managementHoldObserved -or
+       -not $_.managementPromptObserved -or
+       -not $_.ownedProcessStopped -or
+       -not $_.closedManagementListener -or
+       -not $_.devNull -or -not $_.routesNotExecuted -or
+       $_.productionEngineChanged -or $_.independentPublicServerVerified
+     }).Count -ne 0 -or
+     @($control.cases | Where-Object {$_.mode -eq 'valid' -and $_.tlsAccepted -and -not $_.identityRejected -and -not $_.authRejected}).Count -ne 1 -or
+     @($control.cases | Where-Object {$_.mode -eq 'bad-cn' -and $_.identityRejected -and -not $_.tlsAccepted}).Count -ne 1 -or
+     @($control.cases | Where-Object {$_.mode -eq 'bad-password' -and $_.authRejected -and -not $_.tlsAccepted}).Count -ne 1){
+    throw 'OWNED_COMMUNITY_CONTROLLER_RECEIPT_INVALID'
+  }
   $routesAfter=@(Get-NetRoute -AddressFamily IPv4 -ErrorAction SilentlyContinue |
     Where-Object {$_.DestinationPrefix -in @('0.0.0.0/1','128.0.0.0/1')} |
     Sort-Object DestinationPrefix,InterfaceIndex |
@@ -128,7 +154,7 @@ try{
   if([string]$routesBefore -cne [string]$routesAfter){throw 'DISPOSABLE_WINDOWS_ROUTES_CHANGED'}
   if([string]$preExistingService -cne [string]$postService){throw 'OPENVPN_SERVICE_CHANGED_BY_READONLY_PROBE'}
   $result=[ordered]@{
-    schema='oig-windows-community-engine-offline-feasibility-v2'
+    schema='oig-windows-community-engine-offline-feasibility-v3'
     sourceSha=$env:GITHUB_SHA;version=$release
     msiSHA256=$expectedHash;openvpnExeSHA256=$expectedExe
     primarySigningKeyFingerprint=$vendorPrimaryFingerprint
@@ -143,11 +169,14 @@ try{
     productEngineSwitched=$false
     loopbackReceiptSHA256=(Get-FileHash -LiteralPath $localReceipt -Algorithm SHA256).Hash.ToLowerInvariant()
     localSyntheticTlsAndManagementOnly=$true
+    applicationOwnedManagementClientSyntheticOnly=$true
+    controllerReceiptSHA256=(Get-FileHash -LiteralPath $controllerReceipt -Algorithm SHA256).Hash.ToLowerInvariant()
+    ownerNetworkUntouched=$true
     independentlyTrustedRemoteServer=$false
-    result='PASS_LOCAL_SYNTHETIC_TLS_AND_PASSWORD_MANAGEMENT_ONLY'
+    result='PASS_LOCAL_SYNTHETIC_TLS_AND_APP_OWNED_MANAGEMENT_ONLY'
   }
   [IO.File]::WriteAllText($Receipt,($result|ConvertTo-Json -Depth 6),[Text.UTF8Encoding]::new($false))
-  Write-Output 'VERIFIED_OFFICIAL_OPENVPN_2_7_9_WINDOWS_PASSWORD_OPTIONS_PRESENT'
+  Write-Output 'PASS_PINNED_OPENVPN_2_7_9_APP_OWNED_LOCAL_TLS_MANAGEMENT'
 }finally{
   Remove-Item -LiteralPath $archive -Recurse -Force -ErrorAction SilentlyContinue
 }

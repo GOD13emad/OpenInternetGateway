@@ -7,6 +7,7 @@ Run only inside an isolated CI worker; private test keys die with TemporaryDirec
 """
 import argparse
 import json
+import json
 import os
 from pathlib import Path
 import shutil
@@ -110,7 +111,7 @@ def connect_management(port, proc, client_log, server_log):
     raise RuntimeError("local management port was never opened")
 
 
-def test_case(root, common, ca, pairs, mode):
+def test_case(root, common, ca, pairs, mode, controller_node=None, node_bin=None):
     port, mgmt_port = local_port(), local_port()
     # Windows OpenVPN 2.7.9 checks --auth-user-pass-verify as ONE directly
     # executable pathname; an interpreter followed by a script is rejected
@@ -167,6 +168,44 @@ def test_case(root, common, ca, pairs, mode):
             "--cert", str(pairs["server"][0]), "--key", str(pairs["server"][1]),
             "--script-security", "2", "--auth-user-pass-verify", command,
             "via-file", "--log", str(server_log)], server_raw)
+        if controller_node:
+            payload = {
+                "root": str(root), "exe": str(Path(common[0]).resolve()),
+                "ca": str(ca), "cert": str(pairs["client"][0]),
+                "key": str(pairs["client"][1]), "port": port, "mode": mode,
+                "username": "oig_user",
+                "password": "wrong-pass" if mode == "bad-password" else "oig_pass"
+            }
+            # The QA-only app backend owns the OpenVPN child, management TCP
+            # listener, credentials and teardown. Secrets are sent over stdin,
+            # never command-line arguments or a stored credential file.
+            controlled = subprocess.run(
+                [str(node_bin), str(controller_node)],
+                input=json.dumps(payload), capture_output=True, text=True,
+                timeout=27, cwd=str(root))
+            if controlled.returncode != 0:
+                failure = controlled.stderr.strip()[:700]
+                raise RuntimeError(mode + ": QA-owned backend controller failed: " +
+                                   failure + "; SERVER: " +
+                                   " | ".join(log_contents(server_log).splitlines()[-8:]))
+            result = json.loads(controlled.stdout.strip())
+            if (result.get("schema") != "oig-community-controller-qa-v1" or
+                    result.get("mode") != mode or
+                    result.get("ownedProcessStopped") is not True or
+                    result.get("managementHoldObserved") is not True or
+                    result.get("managementPromptObserved") is not True or
+                    result.get("managementConnected") is not True or
+                    result.get("closedManagementListener") is not True):
+                raise RuntimeError(mode + ": QA-owned backend control receipt invalid")
+            expectation = {
+                "valid": (True, False, False),
+                "bad-cn": (False, True, False),
+                "bad-password": (False, False, True)
+            }[mode]
+            if tuple(result.get(k) for k in ("tlsAccepted", "identityRejected",
+                                              "authRejected")) != expectation:
+                raise RuntimeError(mode + ": QA-owned backend TLS/auth fail-closed mismatch")
+            return result
         client = launch(common + [
             "--proto", "tcp-client", "--nobind", "--remote", "127.0.0.1", str(port),
             "--tls-client", "--remote-cert-tls", "server",
@@ -284,6 +323,8 @@ def main():
     parser.add_argument("--openvpn", required=True)
     parser.add_argument("--openssl", required=True)
     parser.add_argument("--receipt", required=True)
+    parser.add_argument("--controller-node", action="store_true")
+    parser.add_argument("--node-bin", default="node")
     args = parser.parse_args()
     if os.environ.get("GITHUB_ACTIONS") != "true" or os.environ.get("RUNNER_ENVIRONMENT") != "github-hosted" or os.environ.get("RUNNER_OS") != "Windows":
         if not (os.environ.get("OIG_LOOPBACK_LOCAL_QA") == "1" and os.name != "nt"):
@@ -299,17 +340,32 @@ def main():
         common = [args.openvpn, "--dev", "null", "--ifconfig-noexec",
                   "--route-noexec", "--ca", str(ca), "--data-ciphers", "AES-256-GCM",
                   "--verb", "3"]
-        checks = [test_case(root, common, ca, pairs, mode)
+        controller_path = (Path(__file__).resolve().parent /
+                           "qa-community-cli-controller.cjs")
+        if args.controller_node:
+            if not controller_path.is_file():
+                raise RuntimeError("QA-owned Windows backend controller missing")
+            node_exe = shutil.which(args.node_bin)
+            if not node_exe:
+                raise RuntimeError("Node runtime unavailable for QA controller")
+        else:
+            node_exe = None
+        checks = [test_case(root, common, ca, pairs, mode,
+                            controller_path if args.controller_node else None,
+                            node_exe)
                   for mode in ("valid", "bad-cn", "bad-password")]
-    result = {"schema": "oig-community-windows-loopback-v1",
+    result = {"schema": ("oig-community-controller-loopback-v1" if args.controller_node
+                         else "oig-community-windows-loopback-v1"),
               "sourceSha": os.environ.get("GITHUB_SHA", ""),
               "localOnly": True, "tunCreated": False,
               "routesOrDnsMutatedByTest": False,
               "serverIdentityIndependentlyVerified": False,
+              "appOwnedManagementClientTested": bool(args.controller_node),
               "cases": checks, "pass": True}
     receipt.write_text(json.dumps(result, indent=2), encoding="utf-8")
-    print("PASS: synthetic Windows OpenVPN management password, pinned TLS, "
-          "bad identity and bad password rejected without TUN")
+    print("PASS: synthetic OpenVPN "+
+          ("app-owned controller" if args.controller_node else "direct CLI") +
+          " management/TLS identity and password cases without TUN")
 
 
 if __name__ == "__main__":
