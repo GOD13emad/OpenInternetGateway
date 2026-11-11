@@ -75,3 +75,100 @@ test('Linux Debian packaging keeps Electron dependencies and adds native OpenVPN
   assert.match(launcher, /Refusing to change system packages during the session/);
   assert.doesNotMatch(launcher, /nmcli connection (up|down|modify)|systemctl (stop|restart)|--no-sandbox/);
 });
+
+
+test('Linux one-file builder verifies real embedded DEB and refuses tampering or active VPN without apt', {
+  skip: process.platform !== 'linux' || process.arch !== 'x64' ||
+    typeof process.getuid !== 'function' || process.getuid() === 0
+}, async (t) => {
+  const os = require('node:os');
+  const { spawnSync } = require('node:child_process');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'oig-oneclick-offline-test-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const call = (cmd, args, options = {}) => spawnSync(cmd, args, {
+    encoding: 'utf8', timeout: 20000, ...options
+  });
+  const tool = call('dpkg-deb', ['--version']);
+  if (tool.error?.code === 'ENOENT') {
+    t.skip('dpkg-deb is unavailable on this non-Debian Linux host');
+    return;
+  }
+  assert.equal(tool.status, 0, tool.stderr);
+  const packageVersion = require('../package.json').version;
+  const source = path.join(root, 'source');
+  const control = path.join(source, 'DEBIAN');
+  const desktop = path.join(source, 'usr/share/applications/OpenInternetGateway.desktop');
+  const icon = path.join(source, 'usr/share/icons/hicolor/512x512/apps/open-internet-gateway.png');
+  const postrm = path.join(control, 'postrm');
+  for (const directory of [control, path.dirname(desktop), path.dirname(icon)]) {
+    fs.mkdirSync(directory, { recursive: true });
+  }
+  fs.chmodSync(source, 0o755);
+  fs.chmodSync(control, 0o755);
+  fs.writeFileSync(path.join(control, 'control'),
+    'Package: open-internet-gateway\nVersion: ' + packageVersion +
+    '\nArchitecture: amd64\nMaintainer: Offline QA <qa@example.invalid>' +
+    '\nDescription: Disposable Debian build-hook fixture\n');
+  fs.writeFileSync(postrm,
+    "#!/bin/sh\nupdate-alternatives --remove 'open-internet-gateway' " +
+    "'/opt/Open Internet Gateway/open-internet-gateway'\n");
+  fs.chmodSync(postrm, 0o755);
+  fs.writeFileSync(desktop, '[Desktop Entry]\nType=Application\nName=Open Internet Gateway\n');
+  fs.writeFileSync(icon, require('node:crypto').randomBytes(12 * 1024));
+  const deb = path.join(root, 'OpenInternetGateway-' + packageVersion + '-amd64.deb');
+  const built = call('dpkg-deb',
+    ['--root-owner-group', '-Zgzip', '-z1', '--build', source, deb]);
+  assert.equal(built.status, 0, built.stderr);
+  const outputs = await require('../tools/afterAllArtifactBuild')({ artifactPaths: [deb] });
+  assert.equal(outputs.length, 1);
+  const setup = outputs[0];
+  assert.equal(fs.statSync(setup).mode & 0o111, 0o111);
+  const verified = call('bash', [setup, '--verify-only']);
+  assert.equal(verified.status, 0, verified.stderr);
+  assert.match(verified.stdout, /OIG_LINUX_ONECLICK_EMBEDDED_DEB_VERIFIED/);
+  const metadata = call('dpkg-deb', ['-f', deb, 'Package', 'Version', 'Architecture']);
+  assert.equal(metadata.status, 0, metadata.stderr);
+  assert.match(metadata.stdout, /open-internet-gateway/);
+  assert.match(metadata.stdout, new RegExp(packageVersion.replace(/\./g, '\\.')));
+  const extracted = path.join(root, 'control-verified');
+  assert.equal(call('dpkg-deb', ['--control', deb, extracted]).status, 0);
+  const finalPostrm = fs.readFileSync(path.join(extracted, 'postrm'), 'utf8');
+  assert.match(finalPostrm, /'\/opt\/open-internet-gateway\/open-internet-gateway'/);
+  assert.doesNotMatch(finalPostrm, /'\/opt\/Open Internet Gateway\/open-internet-gateway'/);
+
+  // One-byte corruption: a valid installer header must NOT bless modified payload bytes.
+  const tampered = path.join(root, 'tampered.run');
+  fs.copyFileSync(setup, tampered);
+  const fd = fs.openSync(tampered, 'r+');
+  try {
+    const offset = fs.statSync(tampered).size - 1;
+    const byte = Buffer.alloc(1);
+    assert.equal(fs.readSync(fd, byte, 0, 1, offset), 1);
+    byte[0] ^= 0xff;
+    assert.equal(fs.writeSync(fd, byte, 0, 1, offset), 1);
+  } finally { fs.closeSync(fd); }
+  const rejected = call('bash', [tampered, '--verify-only']);
+  assert.notEqual(rejected.status, 0);
+  assert.match(rejected.stderr, /Embedded Debian package SHA-256 mismatch/);
+
+  // Only the test's private PATH contains fake executables. No real sudo/apt
+  // request may occur even if a guard regresses.
+  const mock = path.join(root, 'mock-bin');
+  fs.mkdirSync(mock);
+  const sentinel = path.join(root, 'privileged-invocation');
+  for (const name of ['sudo', 'pkexec', 'apt-get']) {
+    const script = path.join(mock, name);
+    fs.writeFileSync(script, '#!/bin/sh\nprintf invoked > "' + sentinel + '"\nexit 91\n');
+    fs.chmodSync(script, 0o700);
+  }
+  const nmcli = path.join(mock, 'nmcli');
+  fs.writeFileSync(nmcli, '#!/bin/sh\nprintf "vpn\\n"\n');
+  fs.chmodSync(nmcli, 0o700);
+  const refused = call('bash', [setup], {
+    env: { ...process.env, PATH: mock + path.delimiter + process.env.PATH,
+      DISPLAY: '', WAYLAND_DISPLAY: '', TMPDIR: root }
+  });
+  assert.notEqual(refused.status, 0);
+  assert.match(refused.stderr, /An active NetworkManager VPN exists/);
+  assert.equal(fs.existsSync(sentinel), false, 'Never invoke apt/elevation during active VPN');
+});
