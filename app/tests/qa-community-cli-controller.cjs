@@ -52,10 +52,25 @@ function boundedInput(data) {
   // with different path casing. Compare real parent identities, not a string
   // formed by path.dirname(), while still requiring a direct Temp child.
   const actualParent = fs.realpathSync(path.dirname(root));
-  if (process.platform === 'win32'
-    ? actualParent.toLowerCase() !== expectedParent.toLowerCase()
-    : actualParent !== expectedParent) {
-    throw new Error('QA_SCRATCH_NOT_SYSTEM_TEMP');
+  const sameCanonical = process.platform === 'win32'
+    ? actualParent.toLowerCase() === expectedParent.toLowerCase()
+    : actualParent === expectedParent;
+  const actualIdentity = fs.statSync(actualParent, {bigint: true});
+  const expectedIdentity = fs.statSync(expectedParent, {bigint: true});
+  // Windows can return two different spelled paths for the same NTFS
+  // directory. A nonzero matching file ID + device ID proves identity
+  // without admitting sibling directories, junctions or arbitrary paths.
+  const samePhysicalDirectory = actualIdentity.ino !== 0n &&
+    actualIdentity.dev === expectedIdentity.dev &&
+    actualIdentity.ino === expectedIdentity.ino;
+  if (!sameCanonical && !samePhysicalDirectory) {
+    const hosted = process.platform === 'win32' &&
+      process.env.RUNNER_ENVIRONMENT === 'github-hosted';
+    throw new Error('QA_SCRATCH_NOT_SYSTEM_TEMP' +
+      (hosted ? ('_expected=' + JSON.stringify(expectedParent) +
+        '_actual=' + JSON.stringify(actualParent) +
+        '_dev=' + String(actualIdentity.dev) + '/' + String(expectedIdentity.dev) +
+        '_ino=' + String(actualIdentity.ino) + '/' + String(expectedIdentity.ino)) : ''));
   }
   if (!MODES.has(data.mode)) throw new Error('INVALID_QA_MODE');
   if (!Number.isInteger(data.port) || data.port < 1 || data.port > 65535) {
