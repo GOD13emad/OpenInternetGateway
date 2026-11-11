@@ -375,6 +375,10 @@ if __name__ == "__main__":
         directory = Path(__file__).resolve().parent
         scoped = load_module(directory / "windows-community-dco-tunnel-qa.py")
         fullroute = load_module(directory / "windows-community-dco-fullroute-qa.py")
+        # Imported fullroute helper functions depend on their module-global
+        # scoped harness (normally set only by that script's __main__).
+        # Bind the exact same QA guard object before route preflight.
+        fullroute.scoped = scoped
         main(args)
     except Exception as exc:
         print("FAIL_DCO_FALLBACK_" + type(exc).__name__ + "_" +

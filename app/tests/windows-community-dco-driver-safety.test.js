@@ -136,6 +136,7 @@ test('disposable DCO scoped WFP fallback QA never claims a system kill switch', 
     'hostDnsRestored', 'globalKillSwitchProven', 'ipv6LeakProtectionProven',
     'systemDnsLeakProtectionProven', 'ownerHostTouched'
   ]) assert.ok(p.includes(marker), 'missing scoped kill-policy marker: ' + marker);
+  assert.match(p, /fullroute\.scoped\s*=\s*scoped/);
   assert.match(workflow, /dco-scoped-wfp-fallback:/);
   assert.match(workflow, /needs: dco-dualstack-dns-policy/);
   assert.match(script, /\[switch\]\$ProbeFallback/);
