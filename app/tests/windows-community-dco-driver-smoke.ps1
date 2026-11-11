@@ -1,7 +1,7 @@
 # Hosted Windows ONLY: pinned vendor MSI, ovpn-dco adapter, owned teardown.
 # No VPN connect, default route, DNS, user credential or product-engine change.
 [CmdletBinding()]
-param([string]$Receipt='', [switch]$ProbeTun, [switch]$ProbeFullIpv4)
+param([string]$Receipt='', [switch]$ProbeTun, [switch]$ProbeFullIpv4, [switch]$ProbeLeakPolicy)
 $ErrorActionPreference='Stop'
 Set-StrictMode -Version Latest
 foreach($pair in @(
@@ -20,7 +20,7 @@ if(-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrat
  throw 'DISPOSABLE_RUNNER_ADMIN_REQUIRED'
 }
 if(-not $env:RUNNER_TEMP){throw 'RUNNER_TEMP_NOT_SET'}
-if($ProbeTun -and $ProbeFullIpv4){throw 'CANNOT_COMBINE_SCOPED_AND_FULLROUTE_QA'}
+if(([int]$ProbeTun + [int]$ProbeFullIpv4 + [int]$ProbeLeakPolicy) -gt 1){throw 'CANNOT_COMBINE_DISPOSABLE_DCO_QA_MODES'}
 if(-not $Receipt){$Receipt=Join-Path $env:RUNNER_TEMP 'oig-dco-driver-lifecycle.json'}
 if((Split-Path -Parent $Receipt) -cne $env:RUNNER_TEMP -or (Test-Path -LiteralPath $Receipt)){
  throw 'RECEIPT_NOT_PRIVATE_OR_EXISTS'
@@ -81,6 +81,8 @@ $adapterCreateAttempted=$false
 $driverSigned=$false;$adapterVerified=$false;$removed=$false;$uninstalled=$false
 $tunAccepted=$false
 $fullIpv4Accepted=$false
+$leakPolicyAccepted=$false
+$leakPolicyReceipt=Join-Path $env:RUNNER_TEMP 'oig-dco-leak-policy.json'
 $tunReceipt=Join-Path $env:RUNNER_TEMP 'oig-dco-scoped-tunnel.json'
 $fullIpv4Receipt=Join-Path $env:RUNNER_TEMP 'oig-dco-fullroute-ipv4.json'
 $networkRestored=$false;$servicesRestored=$false;$driverStoreRestored=$false;$failure=''
@@ -191,6 +193,35 @@ try {
   }
   $fullIpv4Accepted=$true
  }
+ if($ProbeLeakPolicy){
+  if(Test-Path -LiteralPath $leakPolicyReceipt){throw 'DCO_LEAK_POLICY_RECEIPT_EXISTS'}
+  $python=(Get-Command python.exe -ErrorAction Stop).Source
+  $probe=Join-Path $PSScriptRoot 'windows-community-dco-dualstack-dns-policy-qa.py'
+  if(-not(Test-Path -LiteralPath $probe -PathType Leaf)){throw 'DCO_LEAK_POLICY_SCRIPT_MISSING'}
+  try{
+   $env:OIG_HOSTED_DCO_DATA_QA='1'
+   $env:OIG_HOSTED_DCO_LEAK_POLICY_QA='1'
+   & $python -B $probe --root $work --openvpn $installedExe --adapter $alias --receipt $leakPolicyReceipt
+   if($LASTEXITCODE -ne 0){throw 'DCO_LEAK_POLICY_NATIVE_PROBE_FAILED'}
+  }finally{
+   Remove-Item Env:\OIG_HOSTED_DCO_LEAK_POLICY_QA -ErrorAction SilentlyContinue
+   Remove-Item Env:\OIG_HOSTED_DCO_DATA_QA -ErrorAction SilentlyContinue
+  }
+  $e=Get-Content -LiteralPath $leakPolicyReceipt -Raw | ConvertFrom-Json
+  if($e.schema -cne 'oig-hosted-windows-community-dco-dualstack-dns-policy-v1' -or
+     -not $e.pass -or -not $e.pinnedPeerVerified -or
+     -not $e.ipv4RoutePairActive -or -not $e.ipv6GlobalRoutePairOnDco -or
+     -not $e.sourceBoundHttpsOverVpn -or -not $e.dnsResponseOverTun -or
+     -not $e.ownedRoutesRemoved -or -not $e.vpnProcessStopped -or
+     -not $e.hostRoutesRestored -or -not $e.hostDnsRestored -or
+     ($e.dnsPhysicalBaselineEligible -and -not $e.dnsLeakProtectionProven) -or
+     ($e.ipv6PublicBaselineEligible -and -not $e.ipv6LeakProtectionProven) -or
+     $e.killSwitchProven -or $e.fullDeviceAccepted -or
+     $e.ownerHostTouched -or $e.productionBackendChanged){
+   throw 'DCO_LEAK_POLICY_RECEIPT_NOT_ACCEPTED'
+  }
+  $leakPolicyAccepted=$true
+ }
 
 }catch{
  $failure=[string]$_.Exception.Message
@@ -242,6 +273,10 @@ $pass=($installed -and $adapterVerified -and $driverSigned -and $removed -and
        $driverStoreRestored -and -not $failure)
 $tunSha=''
 $fullIpv4Sha=''
+$leakPolicySha=''
+if($ProbeLeakPolicy -and (Test-Path -LiteralPath $leakPolicyReceipt)){
+ $leakPolicySha=(Get-FileHash -LiteralPath $leakPolicyReceipt -Algorithm SHA256).Hash.ToLowerInvariant()
+}
 if($ProbeFullIpv4 -and (Test-Path -LiteralPath $fullIpv4Receipt)){
  $fullIpv4Sha=(Get-FileHash -LiteralPath $fullIpv4Receipt -Algorithm SHA256).Hash.ToLowerInvariant()
 }
@@ -266,8 +301,10 @@ $report=[ordered]@{
  scopedDcoTunReceiptSHA256=$tunSha
  fullIpv4RouteProbeAccepted=$fullIpv4Accepted
  fullIpv4RouteReceiptSHA256=$fullIpv4Sha
- externalVpnConnected=($tunAccepted -or $fullIpv4Accepted)
- externalVpnConnectionAttempted=([bool]$ProbeTun -or [bool]$ProbeFullIpv4)
+ dualstackDnsPolicyQaAccepted=$leakPolicyAccepted
+ dualstackDnsPolicyReceiptSHA256=$leakPolicySha
+ externalVpnConnected=($tunAccepted -or $fullIpv4Accepted -or $leakPolicyAccepted)
+ externalVpnConnectionAttempted=([bool]$ProbeTun -or [bool]$ProbeFullIpv4 -or [bool]$ProbeLeakPolicy)
  scopedDcoTunHttpsVerified=$tunAccepted
  ownerHostTouched=$false
  productionBackendChanged=$false

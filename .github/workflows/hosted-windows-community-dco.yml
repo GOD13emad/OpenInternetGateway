@@ -7,6 +7,7 @@ on:
       - 'app/tests/windows-community-dco-driver-smoke.ps1'
       - 'app/tests/windows-community-dco-tunnel-qa.py'
       - 'app/tests/windows-community-dco-fullroute-qa.py'
+      - 'app/tests/windows-community-dco-dualstack-dns-policy-qa.py'
       - 'app/tests/windows-community-dco-driver-safety.test.js'
 
 permissions:
@@ -105,5 +106,42 @@ jobs:
           path: |
             ${{ runner.temp }}/oig-dco-fullroute-ipv4.json
             ${{ runner.temp }}/oig-dco-fullroute-driver-lifecycle.json
+          if-no-files-found: warn
+          retention-days: 7
+
+  # Independent disposable Windows VM: IPv6 global-route policy + WFP DNS
+  # observation, with baseline eligibility recorded. No kill-switch claim.
+  dco-dualstack-dns-policy:
+    needs: dco-ipv4-fullroute
+    if: ${{ github.event.pull_request.head.repo.full_name == github.repository && github.head_ref == 'qa/v2.5.20-operator-safety-20261019' }}
+    runs-on: windows-2025
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.14'
+      - name: Validate IPv6 and WFP DNS policy QA before network changes
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          python -c "import ast,pathlib; ast.parse(pathlib.Path('app/tests/windows-community-dco-dualstack-dns-policy-qa.py').read_text())"
+          if($LASTEXITCODE -ne 0){throw 'DCO_DUALSTACK_DNS_POLICY_SYNTAX_INVALID'}
+      - name: Pinned Community DCO IPv6 route and physical-vs-tunnel DNS behavior
+        shell: pwsh
+        timeout-minutes: 16
+        run: |
+          $ErrorActionPreference='Stop'
+          & ./app/tests/windows-community-dco-driver-smoke.ps1 -ProbeLeakPolicy -Receipt (Join-Path $env:RUNNER_TEMP 'oig-dco-leak-policy-driver-lifecycle.json')
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: windows-community-dco-dualstack-dns-policy-receipts
+          path: |
+            ${{ runner.temp }}/oig-dco-leak-policy.json
+            ${{ runner.temp }}/oig-dco-leak-policy-driver-lifecycle.json
           if-no-files-found: warn
           retention-days: 7

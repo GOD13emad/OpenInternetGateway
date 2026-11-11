@@ -33,8 +33,8 @@ test('ovpn-dco test pins signed vendor source and uninstalls only its own adapte
     'TAPCTL_CREATE_FAILED','Get-CimInstance Win32_PnPSignedDriver',
     'IsSigned','PNPDeviceID','delete $rollbackGuid',"Run-Msi '/x' $msi",
     'hostRoutesAndDnsRestored','vendorServicesRemoved',
-    'fullDeviceVpnTested=$false','externalVpnConnected=($tunAccepted -or $fullIpv4Accepted)',
-    'externalVpnConnectionAttempted=([bool]$ProbeTun -or [bool]$ProbeFullIpv4)'
+    'fullDeviceVpnTested=$false','externalVpnConnected=($tunAccepted -or $fullIpv4Accepted -or $leakPolicyAccepted)',
+    'externalVpnConnectionAttempted=([bool]$ProbeTun -or [bool]$ProbeFullIpv4 -or [bool]$ProbeLeakPolicy)'
   ]) assert.ok(script.includes(marker), 'missing bounded lifecycle: '+marker);
   assert.doesNotMatch(script, /Remove-NetRoute|Set-DnsClientServerAddress|Add-NetRoute/);
   assert.match(script, /tapctl list --hwid ovpn-dco/);
@@ -83,6 +83,36 @@ test('IPv4 default-route QA is isolated, guarded, and does NOT claim DNS/IPv6/ki
   assert.match(workflow, /needs: dco-tunnel/);
   assert.match(script, /\[switch\]\$ProbeFullIpv4/);
   assert.match(script, /fullIpv4RouteProbeAccepted/);
-  assert.match(script, /CANNOT_COMBINE_SCOPED_AND_FULLROUTE_QA/);
+  assert.match(script, /CANNOT_COMBINE_DISPOSABLE_DCO_QA_MODES/);
   assert.doesNotMatch(probe, /New-NetFirewallRule|Set-NetFirewallProfile/);
+});
+
+test('DCO IPv6 route and WFP DNS QA refuses owner hosts and never claims untested kill-switch', () => {
+  const p = fs.readFileSync(
+    path.join(tests, 'windows-community-dco-dualstack-dns-policy-qa.py'), 'utf8');
+  for (const marker of [
+    'OIG_HOSTED_DCO_LEAK_POLICY_QA',
+    'HOSTED_DCO_LEAK_POLICY_EXPLICIT_OPT_IN_REQUIRED',
+    'UNEXPECTED_PREEXISTING_IPV4_SPLIT_ROUTE',
+    'UNEXPECTED_PREEXISTING_IPV6_SPLIT_ROUTE',
+    'redirect-gateway def1 ipv6 block-local',
+    'ifconfig-ipv6 fd15:53b6:dead::2/64 fd15:53b6:dead::1',
+    'block-ipv6', 'block-outside-dns',
+    '2000::/4', '3000::/4', 'IPv6',
+    'dns_query(', 'IP_UNICAST_IF', 'dnsPhysicalBaselineEligible',
+    'dnsResponseOverTun', 'physicalDnsBlockedWhileVpn',
+    'ipv6PublicBaselineEligible', 'ipv6PublicEgressDeniedWhileVpn',
+    'dnsLeakProtectionProven', 'ipv6LeakProtectionProven',
+    'killSwitchProven', 'fullDeviceAccepted',
+    'exact_route_cleanup(', 'hostRoutesRestored', 'hostDnsRestored',
+    'productionBackendChanged', 'ownerHostTouched'
+  ]) assert.ok(p.includes(marker), 'missing policy/safety boundary: ' + marker);
+  assert.match(workflow, /dco-dualstack-dns-policy:/);
+  assert.match(workflow, /needs: dco-ipv4-fullroute/);
+  assert.match(workflow, /windows-community-dco-dualstack-dns-policy-qa\.py/);
+  assert.match(script, /\[switch\]\$ProbeLeakPolicy/);
+  assert.match(script, /dualstackDnsPolicyReceiptSHA256/);
+  assert.match(script, /DCO_LEAK_POLICY_RECEIPT_NOT_ACCEPTED/);
+  assert.doesNotMatch(p, /New-NetFirewallRule|Set-NetFirewallProfile/);
+  assert.doesNotMatch(p, /killSwitchProven": True|fullDeviceAccepted": True/);
 });
