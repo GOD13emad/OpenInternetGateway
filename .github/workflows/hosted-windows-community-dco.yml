@@ -1,0 +1,34 @@
+name: Disposable Windows Community ovpn-dco driver lifecycle QA
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/hosted-windows-community-dco.yml'
+      - 'app/tests/windows-community-dco-driver-smoke.ps1'
+
+permissions:
+  contents: read
+
+jobs:
+  dco-driver:
+    if: ${{ github.event.pull_request.head.repo.full_name == github.repository && github.head_ref == 'qa/v2.5.20-operator-safety-20261019' }}
+    runs-on: windows-2025
+    timeout-minutes: 16
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - name: Pinned official Community 2.7.9 ovpn-dco driver install and owned teardown
+        shell: pwsh
+        timeout-minutes: 12
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & ./app/tests/windows-community-dco-driver-smoke.ps1
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: windows-community-dco-driver-lifecycle-receipt
+          path: ${{ runner.temp }}/oig-dco-driver-lifecycle.json
+          if-no-files-found: warn
+          retention-days: 7

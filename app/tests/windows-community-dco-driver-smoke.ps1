@@ -1,0 +1,194 @@
+# Hosted Windows ONLY: pinned vendor MSI, ovpn-dco adapter, owned teardown.
+# No VPN connect, default route, DNS, user credential or product-engine change.
+[CmdletBinding()]
+param([string]$Receipt='')
+$ErrorActionPreference='Stop'
+Set-StrictMode -Version Latest
+foreach($pair in @(
+ @('GITHUB_ACTIONS','true'), @('RUNNER_OS','Windows'),
+ @('RUNNER_ENVIRONMENT','github-hosted'),
+ @('GITHUB_REPOSITORY','GOD13emad/OpenInternetGateway'),
+ @('GITHUB_HEAD_REF','qa/v2.5.20-operator-safety-20261019')
+)){
+ if([Environment]::GetEnvironmentVariable($pair[0]) -cne $pair[1]){
+  throw ('HOSTED_WINDOWS_ONLY_'+$pair[0])
+ }
+}
+if((Get-CimInstance Win32_ComputerSystem).PartOfDomain){throw 'DOMAIN_JOINED_HOST_REFUSED'}
+$principal=[Security.Principal.WindowsPrincipal]::new([Security.Principal.WindowsIdentity]::GetCurrent())
+if(-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)){
+ throw 'DISPOSABLE_RUNNER_ADMIN_REQUIRED'
+}
+if(-not $env:RUNNER_TEMP){throw 'RUNNER_TEMP_NOT_SET'}
+if(-not $Receipt){$Receipt=Join-Path $env:RUNNER_TEMP 'oig-dco-driver-lifecycle.json'}
+if((Split-Path -Parent $Receipt) -cne $env:RUNNER_TEMP -or (Test-Path -LiteralPath $Receipt)){
+ throw 'RECEIPT_NOT_PRIVATE_OR_EXISTS'
+}
+$expectedMsi='47abc38a15c217b848fe099332a8523500fcbf2ebf8a1eaa7d5648c6e75079aa'
+$expectedExe='0b9b5ad60279b912ae826da5e13a57750fdc918d9ec28b73f031aaffef8dd485'
+$msiUrl='https://build.openvpn.net/downloads/releases/OpenVPN-2.7.9-I001-amd64.msi'
+$services=@('OpenVPNService','OpenVPNServiceInteractive','OpenVPNServiceLegacy','OpenVPNServiceUser')
+$installedExe='C:\Program Files\OpenVPN\bin\openvpn.exe'
+$tapctl='C:\Program Files\OpenVPN\bin\tapctl.exe'
+$alias='OIG-QA-DCO-'+$env:GITHUB_RUN_ID
+if($alias -notmatch '^OIG-QA-DCO-[0-9]{7,16}$'){throw 'UNEXPECTED_RUN_ID'}
+if(@(Get-Service -Name $services -ErrorAction SilentlyContinue).Count -gt 0 -or
+   (Test-Path -LiteralPath $installedExe) -or
+   @(Get-NetAdapter -IncludeHidden -ErrorAction SilentlyContinue | Where-Object {
+     $_.InterfaceDescription -match 'OpenVPN|Data Channel Offload|TAP-Windows' -or
+     $_.Name -like 'OIG-QA-DCO-*'
+   }).Count -gt 0){
+ throw 'PREEXISTING_VPN_INSTALL_REFUSED'
+}
+$hostAdapters=@(Get-NetAdapter -ErrorAction Stop | Where-Object {$_.Status -eq 'Up'})
+if($hostAdapters.Count -lt 1){throw 'NO_ACTIVE_HOST_NETWORK'}
+$hostIndices=@($hostAdapters | ForEach-Object {[int]$_.ifIndex})
+function Read-HostNetwork {
+ $routes=@(Get-NetRoute -ErrorAction Stop | Where-Object {
+   $_.DestinationPrefix -in @('0.0.0.0/0','::/0','0.0.0.0/1','128.0.0.0/1','::/1','8000::/1')
+ } | Sort-Object AddressFamily,DestinationPrefix,InterfaceIndex,NextHop |
+ ForEach-Object {"$($_.AddressFamily)|$($_.DestinationPrefix)|$($_.InterfaceIndex)|$($_.NextHop)"})
+ $dns=@(Get-DnsClientServerAddress -ErrorAction Stop |
+  Where-Object {$_.InterfaceIndex -in $hostIndices} |
+  Sort-Object InterfaceIndex,AddressFamily |
+  ForEach-Object {"$($_.InterfaceIndex)|$($_.AddressFamily)|$($_.ServerAddresses -join ',')"})
+ return @{routes=$routes;dns=$dns}
+}
+function Same-List($a,$b) {
+ return ((@($a) | ConvertTo-Json -Compress) -ceq (@($b) | ConvertTo-Json -Compress))
+}
+function Run-Msi([string]$verb,[string]$package) {
+ $args=@($verb,('"' + $package + '"'),'/qn','/norestart')
+ $proc=Start-Process -FilePath msiexec.exe -ArgumentList $args -PassThru -ErrorAction Stop
+ if(-not $proc.WaitForExit(210000)){try{$proc.Kill()}catch{};throw ('MSI_'+$verb+'_TIMEOUT')}
+ if($proc.ExitCode -ne 0){throw ('MSI_'+$verb+'_EXIT_'+$proc.ExitCode)}
+}
+function Read-DcoDriverStore {
+ return @(Get-WindowsDriver -Online -All -ErrorAction Stop |
+  Where-Object {$_.OriginalFileName -match 'ovpn-dco\.inf'} |
+  Sort-Object Driver |
+  ForEach-Object {"$($_.Driver)|$($_.Version)|$($_.OriginalFileName)"})
+}
+$driverStoreBefore=@(Read-DcoDriverStore)
+$before=Read-HostNetwork
+$work=Join-Path $env:RUNNER_TEMP ('oig-dco-driver-'+$env:GITHUB_RUN_ID)
+if(Test-Path -LiteralPath $work){throw 'DCO_SCRATCH_EXISTS'}
+New-Item -ItemType Directory -Path $work -ErrorAction Stop | Out-Null
+$msi=Join-Path $work 'OpenVPN-2.7.9-I001-amd64.msi'
+$installAttempted=$false;$installed=$false;$ownedGuid='';$ownedCreated=$false
+$adapterCreateAttempted=$false
+$driverSigned=$false;$adapterVerified=$false;$removed=$false;$uninstalled=$false
+$networkRestored=$false;$servicesRestored=$false;$driverStoreRestored=$false;$failure=''
+try {
+ Invoke-WebRequest -Uri $msiUrl -OutFile $msi -TimeoutSec 90 -MaximumRedirection 0 -ErrorAction Stop | Out-Null
+ if((Get-FileHash $msi -Algorithm SHA256).Hash.ToLowerInvariant() -cne $expectedMsi){
+  throw 'VENDOR_MSI_SHA256_MISMATCH'
+ }
+ if((Get-Item $msi).Length -ne 5906432){throw 'VENDOR_MSI_SIZE_MISMATCH'}
+ $installAttempted=$true
+ Run-Msi '/i' $msi
+ $installed=$true
+ if(-not(Test-Path -LiteralPath $installedExe -PathType Leaf) -or
+    (Get-FileHash $installedExe -Algorithm SHA256).Hash.ToLowerInvariant() -cne $expectedExe){
+  throw 'INSTALLED_BINARY_PIN_MISMATCH'
+ }
+ if(-not(Test-Path -LiteralPath $tapctl -PathType Leaf)){throw 'TAPCTL_MISSING'}
+ $adapterCreateAttempted=$true
+ $created=@(& $tapctl create --hwid ovpn-dco --name $alias 2>&1)
+ if($LASTEXITCODE -ne 0){throw 'TAPCTL_CREATE_FAILED'}
+ $lineText=[string]::Join(' ',@($created | ForEach-Object {[string]$_}))
+ if($lineText -notmatch '(\{[0-9a-fA-F-]{36}\})'){throw 'OWNED_GUID_MISSING'}
+ $ownedGuid=$Matches[1]
+ $ownedCreated=$true
+ $lines=@(& $tapctl list --hwid ovpn-dco 2>&1)
+ if($LASTEXITCODE -ne 0){throw 'TAPCTL_LIST_FAILED'}
+ $matching=@($lines | ForEach-Object {[string]$_} | Where-Object {
+  $_ -match [regex]::Escape($ownedGuid) -and
+  $_ -match [regex]::Escape($alias) -and $_ -match 'ovpn-dco'
+ })
+ if($matching.Count -ne 1){throw 'OWNED_ADAPTER_NOT_LISTED'}
+ $net=@(Get-NetAdapter -IncludeHidden -ErrorAction SilentlyContinue | Where-Object {
+  $_.InterfaceGuid.ToString().Trim('{}') -ieq $ownedGuid.Trim('{}')
+ })
+ if($net.Count -ne 1){throw 'OWNED_ADAPTER_NOT_VISIBLE_TO_OS'}
+ if($net[0].InterfaceDescription -notmatch 'OpenVPN|Data Channel Offload'){
+  throw 'UNEXPECTED_ADAPTER_DRIVER'
+ }
+ $signed=@(Get-CimInstance Win32_PnPSignedDriver -ErrorAction Stop |
+  Where-Object {($_.DeviceName -eq $net[0].InterfaceDescription -or
+   $_.DeviceID -match 'OVPN-DCO') -and $_.IsSigned -eq $true})
+ if($signed.Count -lt 1){throw 'DCO_SIGNED_DRIVER_NOT_PROVEN'}
+ $driverSigned=$true;$adapterVerified=$true
+ Write-Output 'HOSTED_VENDOR_DCO_ADAPTER_SIGNED_AND_VISIBLE'
+}catch{
+ $failure=[string]$_.Exception.Message
+}finally{
+ if($adapterCreateAttempted -and (Test-Path -LiteralPath $tapctl)){
+  try {
+   $listed=@(& $tapctl list --hwid ovpn-dco 2>&1)
+   if($LASTEXITCODE -ne 0){throw 'OWNED_ADAPTER_ROLLBACK_LIST_FAILED'}
+   $matchesOwned=@($listed | ForEach-Object {[string]$_} |
+     Where-Object {$_ -match [regex]::Escape($alias) -and $_ -match 'ovpn-dco'})
+   if($matchesOwned.Count -gt 1){throw 'AMBIGUOUS_OWNED_ADAPTER_ROLLBACK'}
+   if($matchesOwned.Count -eq 1){
+    $entry=[string]$matchesOwned[0]
+    if($entry -notmatch '(\{[0-9a-fA-F-]{36}\})'){throw 'OWNED_GUID_UNRESOLVED'}
+    $rollbackGuid=$Matches[1]
+    if($ownedCreated -and $rollbackGuid -ine $ownedGuid){
+     throw 'OWNED_ADAPTER_GUID_MISMATCH'
+    }
+    & $tapctl delete $rollbackGuid | Out-Null
+    if($LASTEXITCODE -ne 0){throw 'OWNED_ADAPTER_DELETE_FAILED'}
+   }
+   $afterListing=@(& $tapctl list --hwid ovpn-dco 2>&1)
+   if($LASTEXITCODE -ne 0){throw 'OWNED_ADAPTER_REMOVAL_UNVERIFIABLE'}
+   $left=@($afterListing | Where-Object {[string]$_ -match [regex]::Escape($alias)})
+   $removed=($left.Count -eq 0)
+   if(-not $removed){throw 'OWNED_ADAPTER_STILL_PRESENT'}
+  }catch{$failure+=(';'+[string]$_.Exception.Message)}
+ }
+ if($installAttempted -and (Test-Path -LiteralPath $msi)){
+  try{Run-Msi '/x' $msi; $uninstalled=$true}
+  catch{$failure+=(';'+[string]$_.Exception.Message)}
+ }
+ Start-Sleep -Seconds 2
+ $after=Read-HostNetwork
+ $networkRestored=(Same-List $before.routes $after.routes) -and
+                  (Same-List $before.dns $after.dns)
+ $servicesRestored=(@(Get-Service -Name $services -ErrorAction SilentlyContinue).Count -eq 0)
+ $driverStoreAfter=@(Read-DcoDriverStore)
+ $driverStoreRestored=Same-List $driverStoreBefore $driverStoreAfter
+ if(-not $ownedCreated){
+  $removed=(@(Get-NetAdapter -Name $alias -IncludeHidden -ErrorAction SilentlyContinue).Count -eq 0)
+ }
+ Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue
+}
+$failureShort=''
+if($failure){$failureShort=$failure.Substring(0,[Math]::Min($failure.Length,300))}
+$pass=($installed -and $adapterVerified -and $driverSigned -and $removed -and
+       $uninstalled -and $networkRestored -and $servicesRestored -and
+       $driverStoreRestored -and -not $failure)
+$report=[ordered]@{
+ schema='oig-disposable-windows-dco-driver-lifecycle-v1'
+ sourceSha=$env:GITHUB_SHA
+ pinnedMsiSHA256=$expectedMsi
+ pinnedOpenvpnExeSHA256=$expectedExe
+ driver='ovpn-dco'
+ installedOriginalVendorMsi=$installed
+ createdDedicatedDriverAdapter=$adapterVerified
+ signedDriverVerified=$driverSigned
+ ownedAdapterRemoved=$removed
+ vendorUninstallSucceeded=$uninstalled
+ hostRoutesAndDnsRestored=$networkRestored
+ vendorServicesRemoved=$servicesRestored
+ driverStorePackagesRestored=$driverStoreRestored
+ fullDeviceVpnTested=$false
+ externalVpnConnected=$false
+ ownerHostTouched=$false
+ productionBackendChanged=$false
+ failure=$failureShort
+ pass=$pass
+}
+[IO.File]::WriteAllText($Receipt,($report | ConvertTo-Json -Depth 6),[Text.UTF8Encoding]::new($false))
+if(-not $pass){throw ('DISPOSABLE_DCO_DRIVER_QA_NOT_ACCEPTED_'+$report.failure)}
+Write-Output 'PASS_PINNED_DCO_DRIVER_ADAPTER_INSTALL_AND_ROLLBACK'
