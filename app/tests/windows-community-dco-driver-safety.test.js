@@ -34,7 +34,7 @@ test('ovpn-dco test pins signed vendor source and uninstalls only its own adapte
     'IsSigned','PNPDeviceID','delete $rollbackGuid',"Run-Msi '/x' $msi",
     'hostRoutesAndDnsRestored','vendorServicesRemoved',
     'fullDeviceVpnTested=$false','externalVpnConnected=($tunAccepted -or $fullIpv4Accepted)',
-    'externalVpnConnectionAttempted=[bool]$ProbeTun'
+    'externalVpnConnectionAttempted=([bool]$ProbeTun -or [bool]$ProbeFullIpv4)'
   ]) assert.ok(script.includes(marker), 'missing bounded lifecycle: '+marker);
   assert.doesNotMatch(script, /Remove-NetRoute|Set-DnsClientServerAddress|Add-NetRoute/);
   assert.match(script, /tapctl list --hwid ovpn-dco/);
