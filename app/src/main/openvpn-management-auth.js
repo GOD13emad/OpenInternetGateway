@@ -37,14 +37,20 @@ function createAuthSession({username, password, send, stop, onEvent = () => {}})
   let rejected = false;
   let challenges = 0;
   const emit = label => onEvent(label); // fixed protocol labels, never raw lines
+  const failClosed = label => {
+    // A buffered second management line must never trigger new credential
+    // traffic after the transport has been ordered to stop.
+    credentials = null;
+    stop();
+    emit(label);
+  };
 
   function onLine(line) {
     // During teardown a late management event must never resurrect a
     // credential exchange or throw from an asynchronous socket callback.
     if (!credentials) return;
     if (typeof line !== 'string' || line.length > 16384) {
-      stop();
-      emit('INVALID_MANAGEMENT_EVENT');
+      failClosed('INVALID_MANAGEMENT_EVENT');
       return;
     }
     if (line.startsWith('>HOLD:') && !holdObserved) {
@@ -53,12 +59,18 @@ function createAuthSession({username, password, send, stop, onEvent = () => {}})
       send('hold release\n');
       emit('HOLD_RELEASE_SENT');
     }
-    if (line.startsWith('>PASSWORD:') &&
-        line.includes("Need 'Auth' username/password")) {
+    if (line.startsWith('>PASSWORD:Need')) {
+      // The stock username/password prompt is supported. OpenVPN's SC:
+      // suffix and other password types require different protocols.
+      // Never answer them with the regular password or keep the process
+      // alive to consume a later buffered prompt.
+      if (line !== ">PASSWORD:Need 'Auth' username/password") {
+        failClosed('UNSUPPORTED_MANAGEMENT_PASSWORD_CHALLENGE');
+        return;
+      }
       challenges++;
       if (challenges > 3) {
-        stop();
-        emit('MANAGEMENT_AUTH_CHALLENGE_LIMIT');
+        failClosed('MANAGEMENT_AUTH_CHALLENGE_LIMIT');
         return;
       }
       if (!prompted) {

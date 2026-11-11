@@ -194,3 +194,30 @@ test('native ASAR extraction keeps the host separator for packaged Community pro
     fs.rmSync(temp, {recursive: true, force: true});
   }
 });
+
+
+test('unsupported OpenVPN management password challenges fail closed without releasing credentials', () => {
+  const {createAuthSession} = require('../src/main/openvpn-management-auth');
+  for (const challenge of [
+    ">PASSWORD:Need 'Auth' username/password SC:1,Please enter PIN",
+    ">PASSWORD:Need 'Private Key' password",
+    ">PASSWORD:Need 'Auth' username/password trailing-untrusted-text",
+    ">PASSWORD:Need 'Auth' username/password SC:0,secret challenge"
+  ]) {
+    const sent=[],events=[];
+    let stopped=0;
+    const session=createAuthSession({
+      username:'oig_user',password:'oig_pass',
+      send:frame=>sent.push(frame),
+      stop:()=>stopped++,
+      onEvent:label=>events.push(label)
+    });
+    session.onLine(challenge);
+    session.onLine(">PASSWORD:Need 'Auth' username/password");
+    assert.equal(stopped,1,'Unsupported prompt must stop owned process exactly once');
+    assert.deepEqual(sent,[],'No credentials released for unhandled challenge');
+    assert.equal(session.snapshot().credentialsCleared,true,'Secrets cleared before stopping');
+    assert.deepEqual(events,['UNSUPPORTED_MANAGEMENT_PASSWORD_CHALLENGE'],
+      'Only fixed status labels may enter receipts, not challenge contents');
+  }
+});
