@@ -112,16 +112,43 @@ def connect_management(port, proc, client_log, server_log):
 
 def test_case(root, common, ca, pairs, mode):
     port, mgmt_port = local_port(), local_port()
-    auth = root / "verify-auth.py"
-    auth.write_text(
-        "import pathlib,sys\n"
-        "p=pathlib.Path(sys.argv[-1])\n"
-        "lines=p.read_text(encoding='utf-8').splitlines()\n"
-        "sys.exit(0 if lines[:2]==['oig_user','oig_pass'] else 1)\n",
-        encoding="utf-8")
-    # OpenVPN's script execution passes the temporary username/password file as
-    # the final argument; only synthetic credentials are ever handled.
-    command = '"{}" "{}"'.format(sys.executable, auth)
+    # Windows OpenVPN 2.7.9 checks --auth-user-pass-verify as ONE directly
+    # executable pathname; an interpreter followed by a script is rejected
+    # with Win32 errno 123. Compile a synthetic-only executable in private
+    # runner scratch; do not install it or add anything to system PATH.
+    if os.name == "nt":
+        source = root / "verify-auth.cs"
+        binary = root / "verify-auth.exe"
+        source.write_text(
+            "using System; using System.IO;\n"
+            "public class VerifyAuth { public static int Main(string[] a) {\n"
+            " if(a.Length < 1) return 1;\n"
+            " try { var l=File.ReadAllLines(a[a.Length-1]);\n"
+            " return l.Length >= 2 && l[0] == \"oig_user\" && "
+            "l[1] == \"oig_pass\" ? 0 : 1; }\n"
+            " catch { return 1; } } }\n", encoding="utf-8")
+        system = Path(os.environ.get("SystemRoot", "C:/Windows"))
+        compilers = [system / "Microsoft.NET" / family / "v4.0.30319" / "csc.exe"
+                     for family in ("Framework64", "Framework")]
+        compiler = next((str(p) for p in compilers if p.is_file()), None)
+        if compiler is None:
+            raise RuntimeError("Windows .NET Framework C# compiler not available")
+        execute([compiler, "/nologo", "/target:exe", "/out:" + str(binary),
+                 str(source)], timeout=18)
+        if not binary.is_file():
+            raise RuntimeError("synthetic Windows verifier was not compiled")
+        command = str(binary)
+    else:
+        auth = root / "verify-auth.py"
+        auth.write_text(
+            "import pathlib,sys\n"
+            "p=pathlib.Path(sys.argv[-1])\n"
+            "lines=p.read_text(encoding='utf-8').splitlines()\n"
+            "sys.exit(0 if lines[:2]==['oig_user','oig_pass'] else 1)\n",
+            encoding="utf-8")
+        command = '"{}" "{}"'.format(sys.executable, auth)
+    # OpenVPN appends its temporary username/password file as the final argv.
+    # Only synthetic local test credentials exist in this verification flow.
     server_log = root / (mode + "-server.log")
     client_log = root / (mode + "-client.log")
     server_raw = root / (mode + "-server-startup.log")
