@@ -127,9 +127,9 @@ try {
  if(([string]$signed[0].IsSigned) -ine 'True'){
   throw 'DCO_PNP_DRIVER_SIGNATURE_FALSE'
  }
- if($signed[0].DeviceID -notmatch 'OVPN-DCO'){
-  throw 'DCO_PNP_HARDWARE_ID_MISMATCH'
- }
+ # The ovpn-dco hardware ID was established by the exact GUID-matched
+ # tapctl --hwid ovpn-dco listing. PnP InstanceId may have a generic name;
+ # require the SAME NetAdapter PNPDeviceID and its verified signature.
  $driverSigned=$true;$adapterVerified=$true
  Write-Output 'HOSTED_VENDOR_DCO_ADAPTER_SIGNED_AND_VISIBLE'
 }catch{

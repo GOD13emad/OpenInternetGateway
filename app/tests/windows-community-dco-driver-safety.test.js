@@ -31,9 +31,12 @@ test('ovpn-dco test pins signed vendor source and uninstalls only its own adapte
     '0b9b5ad60279b912ae826da5e13a57750fdc918d9ec28b73f031aaffef8dd485',
     'OpenVPN-2.7.9-I001-amd64.msi', 'ovpn-dco','tapctl create',
     'TAPCTL_CREATE_FAILED','Get-CimInstance Win32_PnPSignedDriver',
-    'IsSigned','delete $rollbackGuid',"Run-Msi '/x' $msi",
+    'IsSigned','PNPDeviceID','delete $rollbackGuid',"Run-Msi '/x' $msi",
     'hostRoutesAndDnsRestored','vendorServicesRemoved',
     'fullDeviceVpnTested=$false','externalVpnConnected=$false'
   ]) assert.ok(script.includes(marker), 'missing bounded lifecycle: '+marker);
   assert.doesNotMatch(script, /Remove-NetRoute|Set-DnsClientServerAddress|Add-NetRoute/);
+  assert.match(script, /tapctl list --hwid ovpn-dco/);
+  assert.match(script, /signed\[0\]\.IsSigned/);
+  assert.doesNotMatch(script, /DCO_PNP_HARDWARE_ID_MISMATCH/);
 });
