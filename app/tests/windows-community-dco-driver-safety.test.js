@@ -141,11 +141,17 @@ test('disposable DCO native WFP packet filter retains narrow scope and never cla
   assert.match(p, /native_inspect\(/);
   assert.match(p, /packetFilterIsDynamic/);
   assert.match(p, /explicitTunSourceCurlAllowedIfFailed/);
+  assert.match(p, /def curl_probe_quorum\(/);
+  assert.match(p, /no_wfp_public = curl_probe_quorum\(/);
+  assert.match(p, /vpn_public = curl_probe_quorum\(/);
+  assert.match(p, /if successes == 2/);
+  assert.match(p, /diagnostic\["successCount"\] = successes/);
+
   assert.match(p, /vpnHttpsAllowedWithRuleTemporarilyRemoved/);
   assert.match(p, /VPN_HTTPS_FAILED_WITH_NO_ADDITIONAL_WFP_RULE/);
   assert.match(p, /singleOwnedOpenvpnProcessStarted/);
   const tunnelStart = p.indexOf('proc = subprocess.Popen(');
-  const preRuleHttps = p.indexOf('no_wfp_public = curl_probe(');
+  const preRuleHttps = p.indexOf('no_wfp_public = curl_probe_quorum(');
   const armRule = p.indexOf('add_rule(name, nic["index"], target, curl, provider_ipv4)');
   assert.ok(tunnelStart >= 0 && preRuleHttps > tunnelStart &&
     armRule > preRuleHttps,

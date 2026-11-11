@@ -242,6 +242,38 @@ def curl_probe(curl, target, timeout=15, source=None, diagnostic=None):
         return None
 
 
+def curl_probe_quorum(curl, target, diagnostic, source=None):
+    """Require two real HTTPS successes within three bounded attempts.
+
+    This separates asynchronous Windows DCO route convergence from a
+    persistently broken VPN data-plane. No WFP rule can be accepted if
+    the same running tunnel fails the unfiltered control arm.
+    Only result codes and success counts leave the disposable VM.
+    """
+    successes = 0
+    last_ip = None
+    attempts = []
+    for index in range(3):
+        sample = {}
+        value = curl_probe(curl, target, timeout=12, source=source,
+                           diagnostic=sample)
+        attempts.append({
+            "exitCode": sample.get("exitCode"),
+            "timedOut": bool(sample.get("timedOut", False)),
+            "invalidResponse": bool(sample.get("unexpectedResponse", False))
+        })
+        if value is not None:
+            successes += 1
+            last_ip = value
+            if successes == 2:
+                break
+        if index < 2:
+            time.sleep(1.5)
+    diagnostic["attempts"] = attempts
+    diagnostic["successCount"] = successes
+    return last_ip if successes >= 2 else None
+
+
 def main(args):
     root, receipt, binary, curl = precise_guard(args)
     provider, helper = scoped.provider_modules()
@@ -379,8 +411,8 @@ def main(args):
         # Control arm: VPN is fully initialized with its IPv4 split-default
         # routes, but there is NO additional WFP filter installed.
         no_wfp_status = {}
-        no_wfp_public = curl_probe(
-            curl, target, 18, diagnostic=no_wfp_status)
+        no_wfp_public = curl_probe_quorum(
+            curl, target, diagnostic=no_wfp_status)
         report["vpnWithoutWfpCurlDiagnostic"] = no_wfp_status
         report["vpnHttpsAllowedWithoutWfp"] = no_wfp_public is not None
         if not report["vpnHttpsAllowedWithoutWfp"]:
@@ -397,7 +429,7 @@ def main(args):
             raise RuntimeError("WFP_FILTER_ARMED_DURING_VPN_NOT_VERIFIED")
         # The exact same curl.exe must still succeed via the DCO interface.
         on_status = {}
-        vpn_public = curl_probe(curl, target, 18, diagnostic=on_status)
+        vpn_public = curl_probe_quorum(curl, target, diagnostic=on_status)
         if vpn_public is None:
             report["wfpOnCurlDiagnostic"] = on_status
             report["explicitTunSourceCurlAllowedIfFailed"] = (
