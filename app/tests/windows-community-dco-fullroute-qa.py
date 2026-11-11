@@ -210,6 +210,25 @@ def main(args):
                 p.unlink(missing_ok=True)
             except Exception as exc:
                 failure += ';SCRATCH_' + type(exc).__name__
+        # Only fixed categories are exported, never raw logs or credentials.
+        # OpenVPN may emit Options error before opening its log; this
+        # classification is useful only when diagnostic text is available.
+        private_log = log.read_text(errors='replace')[-100000:] if log.exists() else ''
+        result['openvpnExitCode'] = proc.poll() if proc else None
+        result['diagnosticSignals'] = {
+            'optionsError': 'Options error:' in private_log,
+            'unknownOption': 'Unrecognized option' in private_log,
+            'driverError': any(x in private_log for x in (
+                'ovpn-dco', 'TUN/TAP', 'DCO device')),
+            'tlsError': 'TLS Error' in private_log,
+            'peerVerifyError': 'VERIFY ERROR' in private_log,
+            'authRejected': 'AUTH_FAILED' in private_log,
+            'dnsConfigError': 'DNS' in private_log and 'error' in private_log.lower(),
+            'routeAddError': any(x in private_log for x in (
+                'ROUTE: route addition failed',
+                'route addition failed', 'route-ipv6 add failed')),
+            'fatalError': 'Exiting due to fatal error' in private_log
+        }
         result['failureCategory'] = failure[:180]
         result['pass'] = not failure and all(result[k] for k in (
             'pinnedPeerVerified', 'dcoRoutePairActive',

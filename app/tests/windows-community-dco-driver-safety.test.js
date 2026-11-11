@@ -33,7 +33,7 @@ test('ovpn-dco test pins signed vendor source and uninstalls only its own adapte
     'TAPCTL_CREATE_FAILED','Get-CimInstance Win32_PnPSignedDriver',
     'IsSigned','PNPDeviceID','delete $rollbackGuid',"Run-Msi '/x' $msi",
     'hostRoutesAndDnsRestored','vendorServicesRemoved',
-    'fullDeviceVpnTested=$false','externalVpnConnected=$tunAccepted',
+    'fullDeviceVpnTested=$false','externalVpnConnected=($tunAccepted -or $fullIpv4Accepted)',
     'externalVpnConnectionAttempted=[bool]$ProbeTun'
   ]) assert.ok(script.includes(marker), 'missing bounded lifecycle: '+marker);
   assert.doesNotMatch(script, /Remove-NetRoute|Set-DnsClientServerAddress|Add-NetRoute/);
@@ -77,7 +77,7 @@ test('IPv4 default-route QA is isolated, guarded, and does NOT claim DNS/IPv6/ki
     'ownedRoutesRemoved', 'vpnProcessStopped',
     'hostRoutesRestored', 'hostDnsRestored',
     'ipv6LeakProtectionProven', 'dnsLeakProtectionProven',
-    'killSwitchProven', 'fullDeviceAccepted'
+    'killSwitchProven', 'fullDeviceAccepted', 'diagnosticSignals'
   ]) assert.ok(probe.includes(marker), 'missing IPv4 fullroute QA guard: ' + marker);
   assert.match(workflow, /dco-ipv4-fullroute:/);
   assert.match(workflow, /needs: dco-tunnel/);
