@@ -38,7 +38,8 @@ test('QA Community controller is excluded from Windows installer and production 
   assert.match(qa, /--management-query-passwords/);
   assert.match(qa, /managementTokenFile/);
   assert.match(qa, /managementPasswordProtected/);
-  assert.match(qa, /--management-forget-disconnect/);
+  assert.doesNotMatch(qa, /--auth-nocache/);
+  assert.doesNotMatch(qa, /'--management-forget-disconnect'/);
   assert.match(qa, /--dev', 'null'/);
   assert.match(qa, /--ifconfig-noexec/);
   assert.match(qa, /--route-noexec/);

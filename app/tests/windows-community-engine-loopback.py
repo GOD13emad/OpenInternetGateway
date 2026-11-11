@@ -184,7 +184,7 @@ def test_case(root, common, ca, pairs, mode, controller_node=None, node_bin=None
                 input=json.dumps(payload), capture_output=True, text=True,
                 timeout=27, cwd=str(root))
             if controlled.returncode != 0:
-                failure = controlled.stderr.strip()[:700]
+                failure = controlled.stderr.strip()[:1800]
                 raise RuntimeError(mode + ": QA-owned backend controller failed: " +
                                    failure + "; SERVER: " +
                                    " | ".join(log_contents(server_log).splitlines()[-8:]))

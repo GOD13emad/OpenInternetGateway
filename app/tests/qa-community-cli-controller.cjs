@@ -184,10 +184,9 @@ async function executeSyntheticLifecycle(data) {
       '--remote', '127.0.0.1', String(a.port), '--tls-client',
       '--remote-cert-tls', 'server', '--verify-x509-name', expectedCN, 'name',
       '--data-ciphers', 'AES-256-GCM', '--auth-user-pass', '--pull',
-      '--auth-retry', 'none', '--auth-nocache',
+      '--auth-retry', 'none',
       '--management', '127.0.0.1', String(managementPort), managementTokenFile,
       '--management-hold', '--management-query-passwords',
-      '--management-forget-disconnect',
       '--connect-retry-max', '1', '--tls-exit',
       '--verb', '3', '--log', logFile
     ];
