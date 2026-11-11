@@ -59,14 +59,16 @@ def local_port():
         return check.getsockname()[1]
 
 
-def launch(argv):
-    options = {"stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL,
-               "stderr": subprocess.DEVNULL}
+def launch(argv, diagnostic_path):
+    options = {"stdin": subprocess.DEVNULL, "stderr": subprocess.STDOUT}
     if os.name == "nt":
         options["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
     else:
         options["start_new_session"] = True
-    return subprocess.Popen(argv, **options)
+    # Keep startup/option errors that happen before --log initialization.
+    # Only synthetic credentials and local test certificates exist here.
+    with diagnostic_path.open("wb") as sink:
+        return subprocess.Popen(argv, stdout=sink, **options)
 
 
 def stop(proc):
@@ -122,6 +124,8 @@ def test_case(root, common, ca, pairs, mode):
     command = '"{}" "{}"'.format(sys.executable, auth)
     server_log = root / (mode + "-server.log")
     client_log = root / (mode + "-client.log")
+    server_raw = root / (mode + "-server-startup.log")
+    client_raw = root / (mode + "-client-startup.log")
     server = client = None
     saw_prompt = saw_auth_rejection = False
     try:
@@ -130,7 +134,7 @@ def test_case(root, common, ca, pairs, mode):
             "--tls-server", "--mode", "server", "--dh", "none",
             "--cert", str(pairs["server"][0]), "--key", str(pairs["server"][1]),
             "--script-security", "2", "--auth-user-pass-verify", command,
-            "via-file", "--log", str(server_log)])
+            "via-file", "--log", str(server_log)], server_raw)
         client = launch(common + [
             "--proto", "tcp-client", "--remote", "127.0.0.1", str(port),
             "--tls-client", "--remote-cert-tls", "server",
@@ -141,7 +145,12 @@ def test_case(root, common, ca, pairs, mode):
             "--management", "127.0.0.1", str(mgmt_port),
             "--management-query-passwords", "--management-hold",
             "--connect-retry-max", "1", "--tls-exit",
-            "--log", str(client_log)])
+            "--log", str(client_log)], client_raw)
+        if server.poll() is not None:
+            raise RuntimeError(mode + ": server exited before local TLS listener; server exit " +
+                               str(server.returncode) + "; SERVER_RAW: " +
+                               " | ".join(log_contents(server_raw).splitlines()[-12:]) +
+                               "; SERVER: " + " | ".join(log_contents(server_log).splitlines()[-8:]))
         with connect_management(mgmt_port, client, client_log, server_log) as sock:
             sock.sendall(b"hold release\n")
             collected = ""
@@ -184,7 +193,9 @@ def test_case(root, common, ca, pairs, mode):
             if not initialized:
                 raise RuntimeError(mode + ": positive authenticated TLS not initialized; " +
                                    " | ".join(logs.splitlines()[-5:]) +
-                                   " SERVER: " + " | ".join(srv.splitlines()[-5:]))
+                                   " SERVER: " + " | ".join(srv.splitlines()[-5:]) +
+                                   "; SERVER_RAW: " + " | ".join(log_contents(server_raw).splitlines()[-8:]) +
+                                   "; CLIENT_RAW: " + " | ".join(log_contents(client_raw).splitlines()[-8:]))
         elif mode == "bad-cn":
             if initialized or "VERIFY X509NAME ERROR" not in logs:
                 raise RuntimeError(mode + ": untrusted name not rejected; " +
@@ -194,7 +205,9 @@ def test_case(root, common, ca, pairs, mode):
                                    "AUTH_FAILED" in srv):
                 raise RuntimeError(mode + ": bad credential not rejected; " +
                                    " | ".join(logs.splitlines()[-6:]) +
-                                   " SERVER: " + " | ".join(srv.splitlines()[-5:]))
+                                   " SERVER: " + " | ".join(srv.splitlines()[-5:]) +
+                                   "; SERVER_RAW: " + " | ".join(log_contents(server_raw).splitlines()[-8:]) +
+                                   "; CLIENT_RAW: " + " | ".join(log_contents(client_raw).splitlines()[-8:]))
         else:
             raise RuntimeError("invalid test case")
         return {"mode": mode, "managementPromptObserved": saw_prompt,
