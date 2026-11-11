@@ -125,8 +125,8 @@ test('Windows unknown status fails closed and an already verified OIG-managed tu
 
 
 test('privileged Windows scheduled recovery and bootstrap check independent VPN before mutating connector', () => {
-  const headless = fs.readFileSync(path.join(root, 'backend/windows/scripts/Headless-Control.ps1'), 'utf8');
-  const ensure = fs.readFileSync(path.join(root, 'backend/windows/scripts/Ensure-OpenInternet.ps1'), 'utf8');
+  const headless = fs.readFileSync(path.join(root, 'backend/windows/scripts/Headless-Control.ps1'), 'utf8').replace(/\r\n/g, '\n');
+  const ensure = fs.readFileSync(path.join(root, 'backend/windows/scripts/Ensure-OpenInternet.ps1'), 'utf8').replace(/\r\n/g, '\n');
   const src = fs.readFileSync(guard, 'utf8');
   assert.match(src, /Get-VpnConnection -AllUserConnection -ErrorAction Stop/);
   assert.match(src, /OwnedInterfaceIndex/);
@@ -180,7 +180,8 @@ test('native Windows synthetic VPN coexistence guard respects own index but neve
       ' }',
       ' if($case -eq "split"){[pscustomobject]@{DestinationPrefix="::/1";InterfaceIndex=99}}',
       '}',
-      '& ' + "'" + guard.replace(/'/g, "''") + "'" + ' -OwnedInterfaceIndex 42'
+      '& ' + "'" + guard.replace(/'/g, "''") + "'" + ' -OwnedInterfaceIndex 42',
+      'exit $LASTEXITCODE'
     ].join('\n');
     const out = spawnSync('pwsh', ['-NoProfile', '-NonInteractive', '-Command', script],
       {encoding: 'utf8', timeout: 12000, windowsHide: true});
