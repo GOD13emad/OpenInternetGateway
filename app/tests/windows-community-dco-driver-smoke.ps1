@@ -249,10 +249,11 @@ try {
    Remove-Item Env:\OIG_HOSTED_DCO_DATA_QA -ErrorAction SilentlyContinue
   }
   $e=Get-Content -LiteralPath $fallbackReceipt -Raw | ConvertFrom-Json
-  if($e.schema -cne 'oig-hosted-windows-community-dco-process-scoped-fallback-v1' -or
+  if($e.schema -cne 'oig-hosted-windows-community-dco-packet-wfp-fallback-v1' -or
      -not $e.pass -or -not $e.pinnedPeerVerified -or
      -not $e.dcoRoutePairActive -or -not $e.wfpRuleFilterVerified -or
-     -not $e.directBlockedBeforeVpn -or -not $e.httpsOverVpnAllowed -or
+     -not $e.packetLayerFilterVerified -or -not $e.ownedPacketWfpFilterRemoved -or
+     -not $e.packetFilterIsDynamic -or -not $e.directBlockedBeforeVpn -or -not $e.httpsOverVpnAllowed -or
      -not $e.ownedTunnelStopped -or -not $e.directFallbackBlockedAfterDrop -or
      -not $e.directEgressRestoredAfterRuleRemoval -or
      -not $e.ownedWfpRuleRemoved -or -not $e.ownedRoutesRemoved -or

@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
-"""Windows hosted DCO fallback-policy QA (NOT a global kill switch).
+"""Windows hosted DCO packet-layer WFP fallback QA (NOT a global kill switch).
 
 Run only inside a disposable GitHub-hosted Windows runner as an opt-in QA job.
-Demonstrate that a narrowly owned WFP rule blocks curl.exe to one pinned HTTPS
-destination over the physical adapter, while the same probe works over DCO.
+Demonstrate a native WFP IPPACKET_V4 dynamic-session rule on one physical
+interface and pinned HTTPS destination while the probe succeeds over DCO.
 After dropping the owned VPN, direct fallback must remain blocked until the
 exact rule is removed, when direct access must be restored.
-No global firewall policy, profiles, IPv6 or user-owned VPN are modified.
+No persistent firewall policy, profile, IPv6 or owner VPN is modified.
+This dynamic-session policy is fail-open if its helper crashes; it cannot
+serve as a production kill switch.
 """
 import argparse
 import hashlib
@@ -91,77 +93,117 @@ def exact_firewall_rule_name():
     return "OIG-QA-FALLBACK-" + run_id
 
 
+# Native WFP packet-layer probe. Unlike the Windows Defender app rule,
+# the filter matches actual outbound NIC and target at IPPACKET_V4.
+# It is dynamic and vanishes on helper exit: this is feasibility QA ONLY.
+_packet_process = None
+_packet_filter_id = None
+_packet_index = None
+_packet_destination = None
+_packet_name = None
+_packet_exe = None
+
+
+def helper_path():
+    path = Path(os.environ.get("OIG_PACKET_WFP_HELPER", "")).resolve(strict=True)
+    root = Path(os.environ["RUNNER_TEMP"]).resolve(strict=True)
+    if path.parent != root or path.name != "oig-dco-packet-wfp-helper.exe":
+        raise RuntimeError("NON_RUNNER_PACKET_WFP_HELPER_REFUSED")
+    if os.environ.get("OIG_HOSTED_DCO_PACKET_QA") != "1":
+        raise RuntimeError("NATIVE_PACKET_QA_OPT_IN_MISSING")
+    return path
+
+
+def native_inspect(exe, filter_id, ifindex, destination):
+    r = subprocess.run(
+        [str(exe), "inspect", str(filter_id), str(ifindex), destination],
+        capture_output=True, text=True, timeout=10)
+    return r.returncode == 0 and r.stdout.strip() == "MATCH"
+
+
 def rule_present(name):
-    return ps("@(Get-NetFirewallRule -Name '" + name +
-              "' -ErrorAction SilentlyContinue).Count") == "1"
+    if _packet_process is None or name != _packet_name:
+        return False
+    if _packet_process.poll() is not None:
+        return False
+    return native_inspect(
+        _packet_exe, _packet_filter_id, _packet_index, _packet_destination)
 
 
-def add_rule(name, physical_source, destination, curl):
-    # Bind to a UNIQUE physical IPv4 source, not an InterfaceAlias filter.
-    # Windows WFP previously blocked the same executable even on DCO when
-    # InterfaceAlias was set, including with this LocalAddress condition.
-    # Physical source + exact program + one target/protocol/port is scoped;
-    # the tunnel gets a different source. This is NOT a global kill-switch.
-    ipaddress.IPv4Address(physical_source)
-    for value in (name, str(curl)):
-        if "'" in value:
-            raise RuntimeError("WFP_ARGUMENT_NOT_SAFE")
-    ps(
-        "New-NetFirewallRule -Name '" + name +
-        "' -DisplayName '" + name + "' -Direction Outbound -Action Block "
-        "-Enabled True -Profile Any -Program '" + str(curl) +
-        "' -LocalAddress '" + physical_source +
-        "' -RemoteAddress '" + destination +
-        "' -Protocol TCP -RemotePort 443 -ErrorAction Stop | Out-Null",
-        timeout=25)
+def add_rule(name, ifindex, destination, curl):
+    global _packet_process, _packet_filter_id
+    global _packet_index, _packet_destination, _packet_name, _packet_exe
+    if _packet_process is not None:
+        raise RuntimeError("PACKET_WFP_ALREADY_ARMED")
+    exe = helper_path()
+    if int(ifindex) < 1:
+        raise RuntimeError("UNOWNED_PHYSICAL_INDEX")
+    target = str(ipaddress.IPv4Address(destination))
+    # The exact target must differ from the pinned VPN outer endpoint
+    # (the filter must never prevent the encrypted provider transport).
+    if target in socket.gethostbyname_ex(fullroute.PROVIDER_HOST)[2]:
+        raise RuntimeError("WFP_TARGET_COLLIDES_WITH_PROVIDER")
+    proc = subprocess.Popen(
+        [str(exe), "arm", str(ifindex), target],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+        text=True, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    import concurrent.futures
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    future = executor.submit(proc.stdout.readline)
+    try:
+        line = future.result(timeout=12)
+    except Exception as exc:
+        proc.kill()
+        proc.wait(timeout=5)
+        raise RuntimeError("NATIVE_WFP_HELPER_DID_NOT_ARM") from exc
+    finally:
+        executor.shutdown(wait=False)
+    if not line.startswith("READY:") or not line[6:].strip().isdigit():
+        if proc.poll() is None:
+            proc.kill()
+        proc.wait(timeout=5)
+        raise RuntimeError("NATIVE_WFP_HELPER_READY_INVALID")
+    filter_id = int(line[6:].strip())
+    _packet_process, _packet_filter_id = proc, filter_id
+    _packet_index, _packet_destination = int(ifindex), target
+    _packet_name, _packet_exe = name, exe
     if not rule_present(name):
-        raise RuntimeError("OWNED_FIREWALL_RULE_MISSING")
+        raise RuntimeError("NATIVE_WFP_PACKET_FILTER_NOT_INSTALLED")
 
 
-def rule_contract(name, physical_source, destination, curl):
-    # Independent verification of all rule filters on the current host.
-    result = json.loads(ps(
-        "$r=Get-NetFirewallRule -Name '" + name + "' -ErrorAction Stop;"
-        "$a=$r|Get-NetFirewallApplicationFilter;"
-        "$i=$r|Get-NetFirewallInterfaceFilter;"
-        "$d=$r|Get-NetFirewallAddressFilter;"
-        "$p=$r|Get-NetFirewallPortFilter;"
-        "@{count=@($r).Count;action=[string]$r.Action;"
-        "enabled=[string]$r.Enabled;direction=[string]$r.Direction;"
-        "program=[string]$a.Program;aliases=@($i.InterfaceAlias);"
-        "localAddress=@($d.LocalAddress);"
-        "remoteAddress=@($d.RemoteAddress);protocol=[string]$p.Protocol;"
-        "remotePort=@($p.RemotePort)}|ConvertTo-Json -Compress"))
-    aliases = result["aliases"]
-    aliases = aliases if isinstance(aliases, list) else [aliases]
-    # An interface alias filter can unexpectedly select the VPN path too.
-    # The only accepted rule is the provider-default ANY interface with an
-    # exact physical IPv4 LocalAddress (never an unconstrained source).
-    alias_names = [str(x).strip().lower() for x in aliases if x is not None]
-    any_interface = alias_names in (["any"], ["*"], [])
-    local = result["localAddress"]
-    local = local if isinstance(local, list) else [local]
-    remote = result["remoteAddress"]
-    remote = remote if isinstance(remote, list) else [remote]
-    ports = result["remotePort"]
-    ports = ports if isinstance(ports, list) else [ports]
-    return bool(
-        result["count"] == 1 and result["action"] == "Block"
-        and result["direction"] == "Outbound"
-        and result["enabled"] == "True"
-        and str(result["program"]).lower() == str(curl).lower()
-        and any_interface and local == [physical_source]
-        and remote == [destination]
-        and str(result["protocol"]) in ("TCP", "6")
-        and [str(x) for x in ports] == ["443"])
+def rule_contract(name, ifindex, destination, curl):
+    return (name == _packet_name and int(ifindex) == _packet_index and
+            destination == _packet_destination and rule_present(name))
 
 
 def remove_exact_rule(name):
-    if rule_present(name):
-        ps("Remove-NetFirewallRule -Name '" + name +
-           "' -Confirm:$false -ErrorAction Stop")
-    if rule_present(name):
-        raise RuntimeError("OWNED_FIREWALL_RULE_STILL_PRESENT")
+    global _packet_process, _packet_filter_id, _packet_index
+    global _packet_destination, _packet_name, _packet_exe
+    if _packet_process is None:
+        return
+    if name != _packet_name:
+        raise RuntimeError("UNOWNED_PACKET_FILTER_REMOVE_REFUSED")
+    proc, exe, fid, index, target = (
+        _packet_process, _packet_exe, _packet_filter_id,
+        _packet_index, _packet_destination)
+    try:
+        if proc.poll() is None:
+            stdout, _ = proc.communicate(input="STOP\n", timeout=12)
+            if proc.returncode != 0 or "REMOVED" not in stdout:
+                raise RuntimeError("PACKET_FILTER_STOP_NOT_CONFIRMED")
+        if native_inspect(exe, fid, index, target):
+            raise RuntimeError("WFP_PACKET_FILTER_PERSISTED")
+    finally:
+        # Even on native error, terminate only the exact owned helper child.
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait(timeout=5)
+        _packet_process = None
+        _packet_filter_id = None
+        _packet_index = None
+        _packet_destination = None
+        _packet_name = None
+        _packet_exe = None
 
 
 def curl_probe(curl, target, timeout=15, source=None, diagnostic=None):
@@ -248,12 +290,15 @@ def main(args):
         'log "' + private_log.as_posix() + '"', ""
     ]))
     report = {
-        "schema": "oig-hosted-windows-community-dco-process-scoped-fallback-v1",
+        "schema": "oig-hosted-windows-community-dco-packet-wfp-fallback-v1",
         "sourceSha": os.environ["GITHUB_SHA"],
-        "scope": "one curl.exe, physical NIC, IPv4 destination, TCP 443; not system kill-switch",
+        "scope": "native dynamic WFP outbound IPv4 packet filter on one physical NIC and IP target; not persistent kill switch",
         "officialProfileSha256": sha, "publicCredentialUpdated": updated,
         "pinnedPeerVerified": False, "dcoRoutePairActive": False,
-        "wfpRuleFilterVerified": False, "directBlockedBeforeVpn": False,
+        "wfpRuleFilterVerified": False, "packetLayerFilterVerified": False,
+        "packetFilterIsDynamic": True,
+        "ownedPacketWfpFilterRemoved": False,
+        "directBlockedBeforeVpn": False,
         "physicalIpv4DistinctFromDco": False,
         "explicitTunSourceCurlAllowedIfFailed": None,
         "wfpOnCurlDiagnostic": None,
@@ -275,9 +320,10 @@ def main(args):
     index = None
     failure = ""
     try:
-        add_rule(name, nic["source"], target, curl)
+        add_rule(name, nic["index"], target, curl)
         report["wfpRuleFilterVerified"] = rule_contract(
-            name, nic["source"], target, curl)
+            name, nic["index"], target, curl)
+        report["packetLayerFilterVerified"] = report["wfpRuleFilterVerified"]
         if not report["wfpRuleFilterVerified"]:
             raise RuntimeError("WFP_RULE_FILTER_CONTRACT_NOT_PROVEN")
         # Firewall must actively block direct HTTPS before opening VPN.
@@ -346,9 +392,9 @@ def main(args):
             finally:
                 # Must restore the exact prior block even if diagnostic fails.
                 if not rule_present(name):
-                    add_rule(name, nic["source"], target, curl)
+                    add_rule(name, nic["index"], target, curl)
                 report["wfpRuleReinstalledAfterDiagnostic"] = rule_contract(
-                    name, nic["source"], target, curl)
+                    name, nic["index"], target, curl)
             if not report["wfpRuleReinstalledAfterDiagnostic"]:
                 raise RuntimeError("OWNED_WFP_RULE_NOT_RESTORED_AFTER_AB")
             raise RuntimeError("VPN_PATH_DENIED_WITH_WFP_AB_DIAGNOSTICS")
@@ -401,6 +447,7 @@ def main(args):
         try:
             remove_exact_rule(name)
             report["ownedWfpRuleRemoved"] = True
+            report["ownedPacketWfpFilterRemoved"] = True
         except Exception as exc:
             failure += ";FIREWALL_" + type(exc).__name__
         try:
@@ -420,7 +467,8 @@ def main(args):
         report["failureCategory"] = failure[:200]
         must = (
             "pinnedPeerVerified", "dcoRoutePairActive",
-            "wfpRuleFilterVerified", "directBlockedBeforeVpn",
+            "wfpRuleFilterVerified", "packetLayerFilterVerified",
+            "ownedPacketWfpFilterRemoved", "directBlockedBeforeVpn",
             "physicalIpv4DistinctFromDco",
             "httpsOverVpnAllowed", "ownedTunnelStopped",
             "directFallbackBlockedAfterDrop",

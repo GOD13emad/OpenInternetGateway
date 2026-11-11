@@ -119,18 +119,17 @@ test('DCO IPv6 route and WFP DNS QA refuses owner hosts and never claims unteste
   assert.doesNotMatch(p, /killSwitchProven": True|fullDeviceAccepted": True/);
 });
 
-test('disposable DCO scoped WFP fallback QA never claims a system kill switch', () => {
+test('disposable DCO native WFP packet filter retains narrow scope and never claims a system kill switch', () => {
   const p = fs.readFileSync(
     path.join(tests, 'windows-community-dco-fallback-wfp-qa.py'), 'utf8');
   for (const marker of [
     'FALLBACK_QA_NOT_OPTED_IN', 'OIG_HOSTED_DCO_FALLBACK_QA',
     'PREEXISTING_FULLROUTE_POLICY_REFUSED',
-    'OIG-QA-FALLBACK-', 'New-NetFirewallRule',
-    'Remove-NetFirewallRule', '-LocalAddress', '-Program',
-    '-LocalAddress', 'physicalIpv4DistinctFromDco',
-    '-RemoteAddress', '-RemotePort 443', '-Protocol TCP',
-    'Get-NetFirewallApplicationFilter', 'Get-NetFirewallInterfaceFilter',
-    'Get-NetFirewallAddressFilter', 'Get-NetFirewallPortFilter',
+    'OIG-QA-FALLBACK-', 'native_inspect',
+    'OIG_HOSTED_DCO_PACKET_QA', 'OIG_PACKET_WFP_HELPER',
+    'packetLayerFilterVerified', 'packetFilterIsDynamic',
+    'ownedPacketWfpFilterRemoved', 'physicalIpv4DistinctFromDco',
+    'NATIVE_WFP_PACKET_FILTER_NOT_INSTALLED', 'Get-NetIPAddress -InterfaceIndex',
     'directBlockedBeforeVpn', 'httpsOverVpnAllowed', 'ownedTunnelStopped',
     'directFallbackBlockedAfterDrop', 'directEgressRestoredAfterRuleRemoval',
     'ownedWfpRuleRemoved', 'ownedRoutesRemoved', 'hostRoutesRestored',
@@ -138,24 +137,38 @@ test('disposable DCO scoped WFP fallback QA never claims a system kill switch', 
     'systemDnsLeakProtectionProven', 'ownerHostTouched'
   ]) assert.ok(p.includes(marker), 'missing scoped kill-policy marker: ' + marker);
   assert.match(p, /fullroute\.scoped\s*=\s*scoped/);
-  assert.match(p, /local == \[physical_source\]/);
-  assert.match(p, /any_interface and local == /);
+  assert.match(p, /native_inspect\(/);
+  assert.match(p, /packetFilterIsDynamic/);
   assert.match(p, /explicitTunSourceCurlAllowedIfFailed/);
   assert.match(p, /vpnHttpsAllowedWithRuleTemporarilyRemoved/);
   assert.match(p, /wfpRuleReinstalledAfterDiagnostic/);
   assert.match(p, /fullRouteUnchangedByDiagnostic/);
   assert.match(p, /try:\s+remove_exact_rule\(name\)/);
   assert.match(p, /if not rule_present\(name\):\s+add_rule/);
-  assert.ok(!p.includes("' -InterfaceAlias '"));
+  assert.ok(!p.includes("New-NetFirewallRule"));
+  assert.ok(!p.includes("Set-NetFirewallProfile"));
   assert.match(p, /Get-NetIPAddress -InterfaceIndex/);
   assert.match(workflow, /dco-scoped-wfp-fallback:/);
-  // The per-process WFP proof has its own pinned peer and route checks;
-  // it can run independently of IPv6/DNS policy once vendor DCO is verified.
+  // The dynamic IPPACKET_V4 filter checks a single physical interface and
+  // destination; it is NOT proof of a persistent or global kill switch.
   assert.match(workflow, /needs: dco-driver/);
   assert.match(script, /\[switch\]\$ProbeFallback/);
   assert.match(script, /OIG_HOSTED_DCO_FALLBACK_QA/);
   assert.match(script, /scopedWfpRuleRestored|scopedWfpFallbackProbeAccepted/);
-  assert.match(script, /Remove-NetFirewallRule -Name \$fallbackRuleName/);
+  const native = fs.readFileSync(
+    path.join(tests, 'windows-community-dco-packet-wfp-helper.cpp'), 'utf8');
+  for (const marker of [
+    'FWPM_LAYER_OUTBOUND_IPPACKET_V4',
+    'FWPM_CONDITION_INTERFACE_INDEX', 'FWPM_CONDITION_IP_REMOTE_ADDRESS',
+    'FWPM_SESSION_FLAG_DYNAMIC', 'FWP_ACTION_BLOCK',
+    'FwpmFilterGetById0', 'FwpmFilterAdd0', 'FwpmFilterDeleteById0',
+    'FwpmSubLayerDeleteByKey0', 'FwpmEngineClose0',
+    'OIG_HOSTED_DCO_PACKET_QA', 'RUNNER_ENVIRONMENT',
+    'GITHUB_HEAD_REF'
+  ]) assert.ok(native.includes(marker), 'missing WFP native safety contract: ' + marker);
+  assert.match(workflow, /MSVC_BUILD_TOOLS_MISSING/);
+  assert.match(workflow, /WFP_PACKET_QA_MSVC_BUILD_FAILED/);
+  assert.match(workflow, /OIG_PACKET_WFP_HELPER/);
   assert.doesNotMatch(p, /Set-NetFirewallProfile|Remove-NetFirewallRule -All/);
   assert.doesNotMatch(p, /globalKillSwitchProven": True/);
 });

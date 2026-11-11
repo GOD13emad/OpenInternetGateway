@@ -9,6 +9,7 @@ on:
       - 'app/tests/windows-community-dco-fullroute-qa.py'
       - 'app/tests/windows-community-dco-dualstack-dns-policy-qa.py'
       - 'app/tests/windows-community-dco-fallback-wfp-qa.py'
+      - 'app/tests/windows-community-dco-packet-wfp-helper.cpp'
       - 'app/tests/windows-community-dco-driver-safety.test.js'
 
 permissions:
@@ -147,8 +148,8 @@ jobs:
           if-no-files-found: warn
           retention-days: 7
 
-  # Separate disposable Windows VM. Scoped WFP rule to one curl.exe, one
-  # physical NIC and one HTTPS target; DOES NOT prove a global kill switch.
+  # Separate disposable Windows VM. Native WFP dynamic IPPACKET_V4 filter
+  # on one physical NIC and one HTTPS target; NOT a global kill switch.
   dco-scoped-wfp-fallback:
     needs: dco-driver
     if: ${{ github.event.pull_request.head.repo.full_name == github.repository && github.head_ref == 'qa/v2.5.20-operator-safety-20261019' }}
@@ -168,12 +169,36 @@ jobs:
           $ErrorActionPreference='Stop'
           python -c "import ast,pathlib; ast.parse(pathlib.Path('app/tests/windows-community-dco-fallback-wfp-qa.py').read_text())"
           if($LASTEXITCODE -ne 0){throw 'WFP_FALLBACK_PYTHON_SYNTAX_INVALID'}
-      - name: Verify per-program physical egress block persists after VPN drop
+      - name: Build QA-only WFP packet-layer filter with installed signed MSVC toolchain
+        shell: pwsh
+        timeout-minutes: 3
+        run: |
+          $ErrorActionPreference='Stop'
+          $vswhere=Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+          if(-not(Test-Path -LiteralPath $vswhere)){throw 'MSVC_VSWHERE_MISSING'}
+          $vs=(& $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath | Select-Object -First 1)
+          if(-not $vs){throw 'MSVC_BUILD_TOOLS_MISSING'}
+          $vcvars=Join-Path $vs 'VC\Auxiliary\Build\vcvars64.bat'
+          if(-not(Test-Path -LiteralPath $vcvars)){throw 'MSVC_VCVARS_MISSING'}
+          $src=(Resolve-Path 'app/tests/windows-community-dco-packet-wfp-helper.cpp').Path
+          $out=Join-Path $env:RUNNER_TEMP 'oig-dco-packet-wfp-helper.exe'
+          if(Test-Path -LiteralPath $out){throw 'WFP_QA_BINARY_ALREADY_EXISTS'}
+          $compile='call "' + $vcvars + '" >nul && cl.exe /nologo /EHsc /std:c++17 /W4 "' + $src + '" /link /OUT:"' + $out + '" Fwpuclnt.lib Ws2_32.lib Rpcrt4.lib'
+          & cmd.exe /D /S /C $compile
+          if($LASTEXITCODE -ne 0 -or -not(Test-Path -LiteralPath $out)){throw 'WFP_PACKET_QA_MSVC_BUILD_FAILED'}
+      - name: Verify native per-interface WFP packet block and DCO fallback
         shell: pwsh
         timeout-minutes: 16
         run: |
           $ErrorActionPreference='Stop'
-          & ./app/tests/windows-community-dco-driver-smoke.ps1 -ProbeFallback -Receipt (Join-Path $env:RUNNER_TEMP 'oig-dco-fallback-driver-lifecycle.json')
+          $env:OIG_PACKET_WFP_HELPER=Join-Path $env:RUNNER_TEMP 'oig-dco-packet-wfp-helper.exe'
+          $env:OIG_HOSTED_DCO_PACKET_QA='1'
+          try{
+            & ./app/tests/windows-community-dco-driver-smoke.ps1 -ProbeFallback -Receipt (Join-Path $env:RUNNER_TEMP 'oig-dco-fallback-driver-lifecycle.json')
+          }finally{
+            Remove-Item Env:\OIG_PACKET_WFP_HELPER -ErrorAction SilentlyContinue
+            Remove-Item Env:\OIG_HOSTED_DCO_PACKET_QA -ErrorAction SilentlyContinue
+          }
       - uses: actions/upload-artifact@v7
         if: always()
         with:
