@@ -126,7 +126,7 @@ test('disposable DCO scoped WFP fallback QA never claims a system kill switch', 
     'FALLBACK_QA_NOT_OPTED_IN', 'OIG_HOSTED_DCO_FALLBACK_QA',
     'PREEXISTING_FULLROUTE_POLICY_REFUSED',
     'OIG-QA-FALLBACK-', 'New-NetFirewallRule',
-    'Remove-NetFirewallRule', '-InterfaceAlias', '-Program',
+    'Remove-NetFirewallRule', '-LocalAddress', '-Program',
     '-LocalAddress', 'physicalIpv4DistinctFromDco',
     '-RemoteAddress', '-RemotePort 443', '-Protocol TCP',
     'Get-NetFirewallApplicationFilter', 'Get-NetFirewallInterfaceFilter',
@@ -139,9 +139,14 @@ test('disposable DCO scoped WFP fallback QA never claims a system kill switch', 
   ]) assert.ok(p.includes(marker), 'missing scoped kill-policy marker: ' + marker);
   assert.match(p, /fullroute\.scoped\s*=\s*scoped/);
   assert.match(p, /local == \[physical_source\]/);
+  assert.match(p, /any_interface and local == /);
+  assert.match(p, /explicitTunSourceCurlAllowedIfFailed/);
+  assert.ok(!p.includes("' -InterfaceAlias '"));
   assert.match(p, /Get-NetIPAddress -InterfaceIndex/);
   assert.match(workflow, /dco-scoped-wfp-fallback:/);
-  assert.match(workflow, /needs: dco-dualstack-dns-policy/);
+  // The per-process WFP proof has its own pinned peer and route checks;
+  // it can run independently of IPv6/DNS policy once vendor DCO is verified.
+  assert.match(workflow, /needs: dco-driver/);
   assert.match(script, /\[switch\]\$ProbeFallback/);
   assert.match(script, /OIG_HOSTED_DCO_FALLBACK_QA/);
   assert.match(script, /scopedWfpRuleRestored|scopedWfpFallbackProbeAccepted/);

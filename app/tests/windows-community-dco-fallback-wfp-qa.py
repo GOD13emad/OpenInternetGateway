@@ -96,21 +96,20 @@ def rule_present(name):
               "' -ErrorAction SilentlyContinue).Count") == "1"
 
 
-def add_rule(name, nic_alias, physical_source, destination, curl):
-    # Match the original physical IPv4 source as well as the NIC. The Windows
-    # firewall interface filter alone may match encapsulated VPN traffic.
-    # A DCO tunnel IPv4 uses a different local address, so must remain
-    # reachable; after tunnel loss, the physical source remains denied.
-    # This is one executable/endpoint ONLY, never a global kill-switch.
+def add_rule(name, physical_source, destination, curl):
+    # Bind to a UNIQUE physical IPv4 source, not an InterfaceAlias filter.
+    # Windows WFP previously blocked the same executable even on DCO when
+    # InterfaceAlias was set, including with this LocalAddress condition.
+    # Physical source + exact program + one target/protocol/port is scoped;
+    # the tunnel gets a different source. This is NOT a global kill-switch.
     ipaddress.IPv4Address(physical_source)
-    for value in (name, nic_alias, str(curl)):
+    for value in (name, str(curl)):
         if "'" in value:
             raise RuntimeError("WFP_ARGUMENT_NOT_SAFE")
     ps(
         "New-NetFirewallRule -Name '" + name +
         "' -DisplayName '" + name + "' -Direction Outbound -Action Block "
         "-Enabled True -Profile Any -Program '" + str(curl) +
-        "' -InterfaceAlias '" + nic_alias +
         "' -LocalAddress '" + physical_source +
         "' -RemoteAddress '" + destination +
         "' -Protocol TCP -RemotePort 443 -ErrorAction Stop | Out-Null",
@@ -119,7 +118,7 @@ def add_rule(name, nic_alias, physical_source, destination, curl):
         raise RuntimeError("OWNED_FIREWALL_RULE_MISSING")
 
 
-def rule_contract(name, nic_alias, physical_source, destination, curl):
+def rule_contract(name, physical_source, destination, curl):
     # Independent verification of all rule filters on the current host.
     result = json.loads(ps(
         "$r=Get-NetFirewallRule -Name '" + name + "' -ErrorAction Stop;"
@@ -135,6 +134,11 @@ def rule_contract(name, nic_alias, physical_source, destination, curl):
         "remotePort=@($p.RemotePort)}|ConvertTo-Json -Compress"))
     aliases = result["aliases"]
     aliases = aliases if isinstance(aliases, list) else [aliases]
+    # An interface alias filter can unexpectedly select the VPN path too.
+    # The only accepted rule is the provider-default ANY interface with an
+    # exact physical IPv4 LocalAddress (never an unconstrained source).
+    alias_names = [str(x).strip().lower() for x in aliases if x is not None]
+    any_interface = alias_names in (["any"], ["*"], [])
     local = result["localAddress"]
     local = local if isinstance(local, list) else [local]
     remote = result["remoteAddress"]
@@ -146,7 +150,7 @@ def rule_contract(name, nic_alias, physical_source, destination, curl):
         and result["direction"] == "Outbound"
         and result["enabled"] == "True"
         and str(result["program"]).lower() == str(curl).lower()
-        and aliases == [nic_alias] and local == [physical_source]
+        and any_interface and local == [physical_source]
         and remote == [destination]
         and str(result["protocol"]) in ("TCP", "6")
         and [str(x) for x in ports] == ["443"])
@@ -160,12 +164,17 @@ def remove_exact_rule(name):
         raise RuntimeError("OWNED_FIREWALL_RULE_STILL_PRESENT")
 
 
-def curl_probe(curl, target, timeout=15):
+def curl_probe(curl, target, timeout=15, source=None):
+    # Explicit source-bound probe is diagnostic ONLY after a failed regular
+    # HTTPS attempt; it must never turn a failure into acceptance.
+    bind = []
+    if source is not None:
+        bind = ["--interface", str(ipaddress.IPv4Address(source))]
     cmd = [
         str(curl), "--ipv4", "--noproxy", "*", "--fail", "--silent",
         "--show-error", "--connect-timeout", "5", "--max-time",
         str(timeout), "--resolve", scoped.PROBE_HOST + ":443:" + target,
-        "https://" + scoped.PROBE_HOST
+        *bind, "https://" + scoped.PROBE_HOST
     ]
     try:
         p = subprocess.run(cmd, capture_output=True, text=True,
@@ -239,6 +248,7 @@ def main(args):
         "pinnedPeerVerified": False, "dcoRoutePairActive": False,
         "wfpRuleFilterVerified": False, "directBlockedBeforeVpn": False,
         "physicalIpv4DistinctFromDco": False,
+        "explicitTunSourceCurlAllowedIfFailed": None,
         "httpsOverVpnAllowed": False, "ownedTunnelStopped": False,
         "directFallbackBlockedAfterDrop": False,
         "directEgressRestoredAfterRuleRemoval": False,
@@ -253,9 +263,9 @@ def main(args):
     index = None
     failure = ""
     try:
-        add_rule(name, nic["alias"], nic["source"], target, curl)
+        add_rule(name, nic["source"], target, curl)
         report["wfpRuleFilterVerified"] = rule_contract(
-            name, nic["alias"], nic["source"], target, curl)
+            name, nic["source"], target, curl)
         if not report["wfpRuleFilterVerified"]:
             raise RuntimeError("WFP_RULE_FILTER_CONTRACT_NOT_PROVEN")
         # Firewall must actively block direct HTTPS before opening VPN.
@@ -303,6 +313,8 @@ def main(args):
         # The exact same curl.exe is permitted through the DCO interface.
         vpn_public = curl_probe(curl, target, 18)
         if vpn_public is None:
+            report["explicitTunSourceCurlAllowedIfFailed"] = (
+                curl_probe(curl, target, 12, source=tunnel_ipv4) is not None)
             raise RuntimeError("VPN_PATH_DENIED_BY_OWNED_WFP_RULE")
         report["httpsOverVpnAllowed"] = True
         # Simulate tunnel disappearance, retaining the owned WFP rule.
