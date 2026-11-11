@@ -1,7 +1,7 @@
 # Hosted Windows ONLY: pinned vendor MSI, ovpn-dco adapter, owned teardown.
 # No VPN connect, default route, DNS, user credential or product-engine change.
 [CmdletBinding()]
-param([string]$Receipt='', [switch]$ProbeTun, [switch]$ProbeFullIpv4, [switch]$ProbeLeakPolicy)
+param([string]$Receipt='', [switch]$ProbeTun, [switch]$ProbeFullIpv4, [switch]$ProbeLeakPolicy, [switch]$ProbeFallback)
 $ErrorActionPreference='Stop'
 Set-StrictMode -Version Latest
 foreach($pair in @(
@@ -24,6 +24,7 @@ $selectedQaModes=0
 if($ProbeTun){$selectedQaModes+=1}
 if($ProbeFullIpv4){$selectedQaModes+=1}
 if($ProbeLeakPolicy){$selectedQaModes+=1}
+if($ProbeFallback){$selectedQaModes+=1}
 if($selectedQaModes -gt 1){throw 'CANNOT_COMBINE_DISPOSABLE_DCO_QA_MODES'}
 if(-not $Receipt){$Receipt=Join-Path $env:RUNNER_TEMP 'oig-dco-driver-lifecycle.json'}
 if((Split-Path -Parent $Receipt) -cne $env:RUNNER_TEMP -or (Test-Path -LiteralPath $Receipt)){
@@ -86,6 +87,13 @@ $driverSigned=$false;$adapterVerified=$false;$removed=$false;$uninstalled=$false
 $tunAccepted=$false
 $fullIpv4Accepted=$false
 $leakPolicyAccepted=$false
+$fallbackAccepted=$false
+$fallbackWfpRemoved=$true
+$fallbackRuleName='OIG-QA-FALLBACK-'+$env:GITHUB_RUN_ID
+$fallbackReceipt=Join-Path $env:RUNNER_TEMP 'oig-dco-fallback-wfp.json'
+if($ProbeFallback -and @(Get-NetFirewallRule -Name $fallbackRuleName -ErrorAction SilentlyContinue).Count -gt 0){
+ throw 'PREEXISTING_FALLBACK_WFP_RULE_REFUSED'
+}
 $leakPolicyReceipt=Join-Path $env:RUNNER_TEMP 'oig-dco-leak-policy.json'
 $tunReceipt=Join-Path $env:RUNNER_TEMP 'oig-dco-scoped-tunnel.json'
 $fullIpv4Receipt=Join-Path $env:RUNNER_TEMP 'oig-dco-fullroute-ipv4.json'
@@ -226,10 +234,51 @@ try {
   }
   $leakPolicyAccepted=$true
  }
+ if($ProbeFallback){
+  if(Test-Path -LiteralPath $fallbackReceipt){throw 'DCO_FALLBACK_RECEIPT_EXISTS'}
+  $python=(Get-Command python.exe -ErrorAction Stop).Source
+  $probe=Join-Path $PSScriptRoot 'windows-community-dco-fallback-wfp-qa.py'
+  if(-not(Test-Path -LiteralPath $probe -PathType Leaf)){throw 'DCO_FALLBACK_PROBE_MISSING'}
+  try{
+   $env:OIG_HOSTED_DCO_DATA_QA='1'
+   $env:OIG_HOSTED_DCO_FALLBACK_QA='1'
+   & $python -B $probe --root $work --openvpn $installedExe --adapter $alias --receipt $fallbackReceipt
+   if($LASTEXITCODE -ne 0){throw 'DCO_FALLBACK_NATIVE_PROBE_FAILED'}
+  }finally{
+   Remove-Item Env:\OIG_HOSTED_DCO_FALLBACK_QA -ErrorAction SilentlyContinue
+   Remove-Item Env:\OIG_HOSTED_DCO_DATA_QA -ErrorAction SilentlyContinue
+  }
+  $e=Get-Content -LiteralPath $fallbackReceipt -Raw | ConvertFrom-Json
+  if($e.schema -cne 'oig-hosted-windows-community-dco-process-scoped-fallback-v1' -or
+     -not $e.pass -or -not $e.pinnedPeerVerified -or
+     -not $e.dcoRoutePairActive -or -not $e.wfpRuleFilterVerified -or
+     -not $e.directBlockedBeforeVpn -or -not $e.httpsOverVpnAllowed -or
+     -not $e.ownedTunnelStopped -or -not $e.directFallbackBlockedAfterDrop -or
+     -not $e.directEgressRestoredAfterRuleRemoval -or
+     -not $e.ownedWfpRuleRemoved -or -not $e.ownedRoutesRemoved -or
+     -not $e.hostRoutesRestored -or -not $e.hostDnsRestored -or
+     $e.globalKillSwitchProven -or $e.ipv6LeakProtectionProven -or
+     $e.systemDnsLeakProtectionProven -or
+     $e.ownerHostTouched -or $e.productionEngineChanged){
+   throw 'DCO_FALLBACK_RECEIPT_NOT_ACCEPTED'
+  }
+  $fallbackAccepted=$true
+ }
 
 }catch{
  $failure=[string]$_.Exception.Message
 }finally{
+ if($ProbeFallback){
+  try{
+   $found=@(Get-NetFirewallRule -Name $fallbackRuleName -ErrorAction SilentlyContinue)
+   if($found.Count -gt 0){
+    if($found.Count -ne 1){throw 'AMBIGUOUS_OWNED_WFP_RULE'}
+    Remove-NetFirewallRule -Name $fallbackRuleName -Confirm:$false -ErrorAction Stop
+   }
+   $fallbackWfpRemoved=(@(Get-NetFirewallRule -Name $fallbackRuleName -ErrorAction SilentlyContinue).Count -eq 0)
+   if(-not $fallbackWfpRemoved){throw 'OWNED_WFP_RULE_PERSISTED'}
+  }catch{$fallbackWfpRemoved=$false;$failure+=(';'+[string]$_.Exception.Message)}
+ }
  if($adapterCreateAttempted -and (Test-Path -LiteralPath $tapctl)){
   try {
    $listed=@(& $tapctl list --hwid ovpn-dco 2>&1)
@@ -274,9 +323,13 @@ $failureShort=''
 if($failure){$failureShort=$failure.Substring(0,[Math]::Min($failure.Length,300))}
 $pass=($installed -and $adapterVerified -and $driverSigned -and $removed -and
        $uninstalled -and $networkRestored -and $servicesRestored -and
-       $driverStoreRestored -and -not $failure)
+       $driverStoreRestored -and $fallbackWfpRemoved -and -not $failure)
 $tunSha=''
 $fullIpv4Sha=''
+$fallbackSha=''
+if($ProbeFallback -and (Test-Path -LiteralPath $fallbackReceipt)){
+ $fallbackSha=(Get-FileHash -LiteralPath $fallbackReceipt -Algorithm SHA256).Hash.ToLowerInvariant()
+}
 $leakPolicySha=''
 if($ProbeLeakPolicy -and (Test-Path -LiteralPath $leakPolicyReceipt)){
  $leakPolicySha=(Get-FileHash -LiteralPath $leakPolicyReceipt -Algorithm SHA256).Hash.ToLowerInvariant()
@@ -307,8 +360,11 @@ $report=[ordered]@{
  fullIpv4RouteReceiptSHA256=$fullIpv4Sha
  dualstackDnsPolicyQaAccepted=$leakPolicyAccepted
  dualstackDnsPolicyReceiptSHA256=$leakPolicySha
- externalVpnConnected=($tunAccepted -or $fullIpv4Accepted -or $leakPolicyAccepted)
- externalVpnConnectionAttempted=([bool]$ProbeTun -or [bool]$ProbeFullIpv4 -or [bool]$ProbeLeakPolicy)
+ scopedWfpFallbackProbeAccepted=$fallbackAccepted
+ scopedWfpFallbackReceiptSHA256=$fallbackSha
+ scopedWfpRuleRestored=$fallbackWfpRemoved
+ externalVpnConnected=($tunAccepted -or $fullIpv4Accepted -or $leakPolicyAccepted -or $fallbackAccepted)
+ externalVpnConnectionAttempted=([bool]$ProbeTun -or [bool]$ProbeFullIpv4 -or [bool]$ProbeLeakPolicy -or [bool]$ProbeFallback)
  scopedDcoTunHttpsVerified=$tunAccepted
  ownerHostTouched=$false
  productionBackendChanged=$false

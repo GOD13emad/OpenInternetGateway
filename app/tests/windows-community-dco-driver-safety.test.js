@@ -33,8 +33,8 @@ test('ovpn-dco test pins signed vendor source and uninstalls only its own adapte
     'TAPCTL_CREATE_FAILED','Get-CimInstance Win32_PnPSignedDriver',
     'IsSigned','PNPDeviceID','delete $rollbackGuid',"Run-Msi '/x' $msi",
     'hostRoutesAndDnsRestored','vendorServicesRemoved',
-    'fullDeviceVpnTested=$false','externalVpnConnected=($tunAccepted -or $fullIpv4Accepted -or $leakPolicyAccepted)',
-    'externalVpnConnectionAttempted=([bool]$ProbeTun -or [bool]$ProbeFullIpv4 -or [bool]$ProbeLeakPolicy)'
+    'fullDeviceVpnTested=$false','externalVpnConnected=($tunAccepted -or $fullIpv4Accepted -or $leakPolicyAccepted -or $fallbackAccepted)',
+    'externalVpnConnectionAttempted=([bool]$ProbeTun -or [bool]$ProbeFullIpv4 -or [bool]$ProbeLeakPolicy -or [bool]$ProbeFallback)'
   ]) assert.ok(script.includes(marker), 'missing bounded lifecycle: '+marker);
   assert.doesNotMatch(script, /Remove-NetRoute|Set-DnsClientServerAddress|Add-NetRoute/);
   assert.match(script, /tapctl list --hwid ovpn-dco/);
@@ -117,4 +117,31 @@ test('DCO IPv6 route and WFP DNS QA refuses owner hosts and never claims unteste
   assert.match(script, /DCO_LEAK_POLICY_RECEIPT_NOT_ACCEPTED/);
   assert.doesNotMatch(p, /New-NetFirewallRule|Set-NetFirewallProfile/);
   assert.doesNotMatch(p, /killSwitchProven": True|fullDeviceAccepted": True/);
+});
+
+test('disposable DCO scoped WFP fallback QA never claims a system kill switch', () => {
+  const p = fs.readFileSync(
+    path.join(tests, 'windows-community-dco-fallback-wfp-qa.py'), 'utf8');
+  for (const marker of [
+    'FALLBACK_QA_NOT_OPTED_IN', 'OIG_HOSTED_DCO_FALLBACK_QA',
+    'PREEXISTING_FULLROUTE_POLICY_REFUSED',
+    'OIG-QA-FALLBACK-', 'New-NetFirewallRule',
+    'Remove-NetFirewallRule', '-InterfaceAlias', '-Program',
+    '-RemoteAddress', '-RemotePort 443', '-Protocol TCP',
+    'Get-NetFirewallApplicationFilter', 'Get-NetFirewallInterfaceFilter',
+    'Get-NetFirewallAddressFilter', 'Get-NetFirewallPortFilter',
+    'directBlockedBeforeVpn', 'httpsOverVpnAllowed', 'ownedTunnelStopped',
+    'directFallbackBlockedAfterDrop', 'directEgressRestoredAfterRuleRemoval',
+    'ownedWfpRuleRemoved', 'ownedRoutesRemoved', 'hostRoutesRestored',
+    'hostDnsRestored', 'globalKillSwitchProven', 'ipv6LeakProtectionProven',
+    'systemDnsLeakProtectionProven', 'ownerHostTouched'
+  ]) assert.ok(p.includes(marker), 'missing scoped kill-policy marker: ' + marker);
+  assert.match(workflow, /dco-scoped-wfp-fallback:/);
+  assert.match(workflow, /needs: dco-dualstack-dns-policy/);
+  assert.match(script, /\[switch\]\$ProbeFallback/);
+  assert.match(script, /OIG_HOSTED_DCO_FALLBACK_QA/);
+  assert.match(script, /scopedWfpRuleRestored|scopedWfpFallbackProbeAccepted/);
+  assert.match(script, /Remove-NetFirewallRule -Name \$fallbackRuleName/);
+  assert.doesNotMatch(p, /Set-NetFirewallProfile|Remove-NetFirewallRule -All/);
+  assert.doesNotMatch(p, /globalKillSwitchProven": True/);
 });

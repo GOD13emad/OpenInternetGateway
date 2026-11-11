@@ -8,6 +8,7 @@ on:
       - 'app/tests/windows-community-dco-tunnel-qa.py'
       - 'app/tests/windows-community-dco-fullroute-qa.py'
       - 'app/tests/windows-community-dco-dualstack-dns-policy-qa.py'
+      - 'app/tests/windows-community-dco-fallback-wfp-qa.py'
       - 'app/tests/windows-community-dco-driver-safety.test.js'
 
 permissions:
@@ -143,5 +144,42 @@ jobs:
           path: |
             ${{ runner.temp }}/oig-dco-leak-policy.json
             ${{ runner.temp }}/oig-dco-leak-policy-driver-lifecycle.json
+          if-no-files-found: warn
+          retention-days: 7
+
+  # Separate disposable Windows VM. Scoped WFP rule to one curl.exe, one
+  # physical NIC and one HTTPS target; DOES NOT prove a global kill switch.
+  dco-scoped-wfp-fallback:
+    needs: dco-dualstack-dns-policy
+    if: ${{ github.event.pull_request.head.repo.full_name == github.repository && github.head_ref == 'qa/v2.5.20-operator-safety-20261019' }}
+    runs-on: windows-2025
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.14'
+      - name: Validate scoped WFP fallback QA before any network changes
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          python -c "import ast,pathlib; ast.parse(pathlib.Path('app/tests/windows-community-dco-fallback-wfp-qa.py').read_text())"
+          if($LASTEXITCODE -ne 0){throw 'WFP_FALLBACK_PYTHON_SYNTAX_INVALID'}
+      - name: Verify per-program physical egress block persists after VPN drop
+        shell: pwsh
+        timeout-minutes: 16
+        run: |
+          $ErrorActionPreference='Stop'
+          & ./app/tests/windows-community-dco-driver-smoke.ps1 -ProbeFallback -Receipt (Join-Path $env:RUNNER_TEMP 'oig-dco-fallback-driver-lifecycle.json')
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: windows-community-dco-scoped-wfp-fallback-receipts
+          path: |
+            ${{ runner.temp }}/oig-dco-fallback-wfp.json
+            ${{ runner.temp }}/oig-dco-fallback-driver-lifecycle.json
           if-no-files-found: warn
           retention-days: 7

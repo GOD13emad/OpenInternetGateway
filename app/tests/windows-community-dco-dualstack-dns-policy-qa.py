@@ -326,7 +326,10 @@ def main(args):
                 "DCO device failed", "TUN/TAP device failed")),
             "ipv6RouteError": ("route-ipv6 add failed" in data or
                                "ERROR: IPv6 route" in data),
-            "dnsWfpError": ("block-outside-dns" in data and "error" in data.lower()),
+            "dnsWfpError": any(
+                "block-outside-dns" in line.lower() and
+                any(marker in line.lower() for marker in ("error", "failed", "not supported"))
+                for line in data.splitlines()),
             "tlsError": "TLS Error" in data,
             "authFailed": "AUTH_FAILED" in data,
             "fatalError": "Exiting due to fatal error" in data
