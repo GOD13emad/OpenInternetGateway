@@ -2065,6 +2065,16 @@ exit 0
       this.emit({ type: 'busy', action, busy: true });
       let result;
       if (this.platform === 'win32' && (action === 'connect' || action === 'connect-profile')) {
+        // First-Connect must not take over an unrelated active VPN just
+        // because OpenVPN Connect is already installed. Observe the current
+        // OIG-owned state without modifying any routes or services.
+        let existingOigTunnel = false;
+        try {
+          const observed = await this._windows('status');
+          existingOigTunnel = observed?.connected === true &&
+            observed?.engine === 'HeadlessConnector';
+        } catch {}
+        if (!existingOigTunnel) await this._assertWindowsIndependentVpnInactive();
         await this.prepareWindowsInstallerPrerequisites();
       }
       if (action === 'connect-profile') result = await this.connectProfile(options.sha256);

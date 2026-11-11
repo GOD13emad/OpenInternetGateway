@@ -61,3 +61,61 @@ test('native Windows independent VPN observation succeeds or explicitly refuses 
   assert.equal((p.stdout || '').trim(), '');
   assert.equal((p.stderr || '').trim(), '');
 });
+
+
+test('Windows first-Connect and exact-profile connect refuse competing VPN before prerequisite or route mutation', async () => {
+  const b = new Backend({version: '2.5.20', appPath: root, resourcesPath: root});
+  b.platform = 'win32';
+  b.backendRoot = path.join(__dirname, 'no-network-operations');
+  let guards = 0, preparations = 0, attempts = 0;
+  b._windows = async action => {
+    if (action === 'status') return {connected: false, engine: 'HeadlessConnector'};
+    attempts++;
+    throw new Error('UNEXPECTED_NETWORK_MUTATION:' + action);
+  };
+  b._assertWindowsIndependentVpnInactive = async () => {
+    guards++;
+    throw new Error('Independent Windows VPN is already active.');
+  };
+  b.prepareWindowsInstallerPrerequisites = async () => {preparations++;};
+  for (const action of ['connect', 'connect-profile']) {
+    await assert.rejects(b.action(action, {sha256: 'a'.repeat(64)}),
+      /Independent Windows VPN is already active/);
+  }
+  assert.equal(guards, 2);
+  assert.equal(preparations, 0);
+  assert.equal(attempts, 0);
+  assert.equal(b.gatewayActionCount, 0);
+});
+
+test('Windows unknown status fails closed and an already verified OIG-managed tunnel avoids false takeover refusal', async () => {
+  const b = new Backend({version: '2.5.20', appPath: root, resourcesPath: root});
+  b.platform = 'win32';
+  b.backendRoot = path.join(__dirname, 'no-network-operations');
+  let mode = 'unknown', guards = 0, mutations = 0;
+  const healthy = {connected: true, engine: 'HeadlessConnector'};
+  b._windows = async action => {
+    if (action === 'status') {
+      if (mode === 'unknown') throw new Error('STATUS_NOT_AVAILABLE');
+      return healthy;
+    }
+    if (action !== 'connect') throw new Error('Unexpected action');
+    mutations++;
+    return {ok: true, status: healthy};
+  };
+  b._assertWindowsIndependentVpnInactive = async () => {
+    guards++;
+    if (mode === 'unknown') throw new Error('Independent VPN state unknown');
+    throw new Error('GUARD_SHOULD_NOT_RUN_FOR_VERIFIED_OWN_TUNNEL');
+  };
+  b.prepareWindowsInstallerPrerequisites = async () => ({openVpnConnect:{ready:true}});
+  b.benchmarkAllFast = async () => ({});
+  await assert.rejects(b.action('connect'), /Independent VPN state unknown/);
+  assert.equal(mutations, 0);
+  mode = 'own-verified';
+  const result = await b.action('connect');
+  assert.equal(result.status.connected, true);
+  assert.equal(guards, 1);
+  assert.equal(mutations, 1);
+  assert.equal(b.gatewayActionCount, 0);
+});
