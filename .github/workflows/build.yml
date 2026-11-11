@@ -198,6 +198,21 @@ jobs:
             }
           done
           echo 'Linux one-file setup checksum and native dependency metadata PASS'
+      - name: Validate actual offline Debian package layout without apt
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(node -p 'require("./package.json").version')"
+          bash tools/qaLinuxOfflineDebLayout.sh "dist/OpenInternetGateway-$version-amd64.deb" "dist/OpenInternetGateway-Linux-Setup-$version-amd64.run" "$version"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: linux-packages
+          path: |
+            app/dist/*.AppImage
+            app/dist/*.deb
+            app/dist/*.run
+          if-no-files-found: error
+          retention-days: 7
       - name: Prefer official Ubuntu archive on disposable hosted Linux
         shell: bash
         run: bash tools/prepareHostedUbuntuApt.sh
@@ -275,14 +290,6 @@ jobs:
           name: linux-window-lifecycle-receipt
           path: ${{ runner.temp }}/oig-linux-window-lifecycle-receipt.json
           if-no-files-found: warn
-      - uses: actions/upload-artifact@v7
-        with:
-          name: linux-packages
-          path: |
-            app/dist/*.AppImage
-            app/dist/*.deb
-            app/dist/*.run
-
   tls-loopback:
     name: Native OpenVPN TLS loopback (no TUN)
     runs-on: ubuntu-24.04

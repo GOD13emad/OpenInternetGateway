@@ -58,6 +58,7 @@ app/tools/*
 !app/tools/qaWindowsInstalledTray.ps1
 !app/tools/qaWindowsHostedUpdateApply.ps1
 !app/tools/qaLinuxHostedWindowLifecycle.sh
+!app/tools/qaLinuxOfflineDebLayout.sh
 !app/tools/prepareHostedUbuntuApt.sh
 
 # Electron archives and local build helpers
