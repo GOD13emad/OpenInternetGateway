@@ -195,7 +195,9 @@ def test_case(root, common, ca, pairs, mode, controller_node=None, node_bin=None
                     result.get("managementHoldObserved") is not True or
                     result.get("managementPromptObserved") is not True or
                     result.get("managementConnected") is not True or
-                    result.get("closedManagementListener") is not True):
+                    result.get("closedManagementListener") is not True or
+                    result.get("managementPasswordProtected") is not True or
+                    result.get("managementTokenErased") is not True):
                 raise RuntimeError(mode + ": QA-owned backend control receipt invalid")
             expectation = {
                 "valid": (True, False, False),

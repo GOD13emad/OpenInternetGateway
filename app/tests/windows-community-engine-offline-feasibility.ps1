@@ -120,8 +120,9 @@ try{
     throw 'LOCAL_LOOPBACK_RECEIPT_NEGATIVE_CASE_NOT_ACCEPTED'
   }
   # Integration gate: own only the newly spawned portable OpenVPN process
-  # and reverse management-client localhost channel. The synthetic password
-  # is provided by stdin to the test-only controller (no credentials file).
+  # and password-protected localhost management channel. The synthetic VPN
+  # credentials arrive by stdin; only a throwaway management token is filed
+  # in private QA scratch, then removed during rollback.
   $node=(Get-Command node.exe -ErrorAction Stop).Source
   $controllerReceipt=Join-Path $env:RUNNER_TEMP 'oig-community-controller-loopback-receipt.json'
   if(Test-Path -LiteralPath $controllerReceipt){throw 'OWNED_CONTROLLER_RECEIPT_EXISTS'}
@@ -137,6 +138,8 @@ try{
        -not $_.managementPromptObserved -or
        -not $_.ownedProcessStopped -or
        -not $_.closedManagementListener -or
+       -not $_.managementPasswordProtected -or
+       -not $_.managementTokenErased -or
        -not $_.devNull -or -not $_.routesNotExecuted -or
        $_.productionEngineChanged -or $_.independentPublicServerVerified
      }).Count -ne 0 -or

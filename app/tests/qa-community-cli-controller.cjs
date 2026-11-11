@@ -91,8 +91,11 @@ function waitForProcessExit(child, milliseconds) {
 
 async function executeSyntheticLifecycle(data) {
   const a = boundedInput(data);
-  const server = net.createServer();
   let socket = null;
+  let managementTokenFile = '';
+  let managementPort = 0;
+  let managementToken = '';
+  let portClosedAfterTeardown = false;
   let child = null;
   let managementConnected = false;
   let sawHold = false, prompted = false, rejectedViaManagement = false;
@@ -126,11 +129,11 @@ async function executeSyntheticLifecycle(data) {
       append('AUTH_REJECTED_MANAGEMENT');
     }
   };
-  server.on('connection', accepted => {
-    if (socket) { accepted.destroy(); return; }
+  const attachManagement = accepted => {
     if (accepted.remoteAddress !== '127.0.0.1' &&
         accepted.remoteAddress !== '::ffff:127.0.0.1') {
-      accepted.destroy(); return;
+      accepted.destroy();
+      throw new Error('NONLOCAL_QA_MANAGEMENT_CONNECTION');
     }
     managementConnected = true;
     socket = accepted;
@@ -148,20 +151,31 @@ async function executeSyntheticLifecycle(data) {
       if (pending.length > 16384) socket.destroy();
     });
     socket.on('error', () => {});
-    append('MANAGEMENT_CONNECTED');
-  });
-  server.on('error', () => {});
+    // The random management password is used only on loopback, distinct from
+    // the synthetic VPN account password, and is never written to receipts.
+    socket.write(managementToken + '\n');
+    managementToken = '';
+    append('MANAGEMENT_AUTHENTICATED_CHANNEL_INITIATED');
+  };
   let final = null;
   let processStopped = false;
   try {
+    const portReservation = net.createServer();
     await new Promise((resolve, reject) => {
-      server.once('error', reject);
-      server.listen(0, '127.0.0.1', () => {
-        server.off('error', reject);
+      portReservation.once('error', reject);
+      portReservation.listen(0, '127.0.0.1', () => {
+        portReservation.off('error', reject);
         resolve();
       });
     });
-    const managementPort = server.address().port;
+    managementPort = portReservation.address().port;
+    await new Promise(resolve => portReservation.close(resolve));
+    managementTokenFile = path.join(a.root, a.mode + '-management-token.txt');
+    managementToken = crypto.randomBytes(32).toString('hex');
+    // Unlike the VPN credentials, this is a throwaway random management
+    // challenge for the disposable runner. It is never logged or shipped.
+    fs.writeFileSync(managementTokenFile, managementToken + '\n',
+      {flag: 'wx', mode: 0o600});
     const expectedCN = a.mode === 'bad-cn' ? 'wrong-oig-local-server' : 'oig-local-server';
     const argv = [
       '--dev', 'null', '--ifconfig-noexec', '--route-noexec',
@@ -171,9 +185,9 @@ async function executeSyntheticLifecycle(data) {
       '--remote-cert-tls', 'server', '--verify-x509-name', expectedCN, 'name',
       '--data-ciphers', 'AES-256-GCM', '--auth-user-pass', '--pull',
       '--auth-retry', 'none', '--auth-nocache',
-      '--management', '127.0.0.1', String(managementPort),
-      '--management-client', '--management-hold',
-      '--management-query-passwords', '--management-forget-disconnect',
+      '--management', '127.0.0.1', String(managementPort), managementTokenFile,
+      '--management-hold', '--management-query-passwords',
+      '--management-forget-disconnect',
       '--connect-retry-max', '1', '--tls-exit',
       '--verb', '3', '--log', logFile
     ];
@@ -184,6 +198,31 @@ async function executeSyntheticLifecycle(data) {
     });
     child.on('error', () => { append('OWNED_PROCESS_START_ERROR'); });
     append('OWNED_CLIENT_STARTED');
+    const readyBy = Date.now() + 7500;
+    // The controller connects to its own newly started process only. The
+    // ephemeral TCP management password is mandatory; no unauthenticated
+    // management socket is exposed, even on localhost.
+    while (Date.now() < readyBy && !socket) {
+      if (child.exitCode !== null || child.signalCode !== null) break;
+      try {
+        const connected = await new Promise((resolve, reject) => {
+          const candidate = net.createConnection({
+            host: '127.0.0.1', port: managementPort
+          });
+          candidate.setTimeout(400, () => candidate.destroy(new Error('CONNECT_TIMEOUT')));
+          candidate.once('connect', () => {
+            candidate.setTimeout(0);
+            resolve(candidate);
+          });
+          candidate.once('error', reject);
+        });
+        attachManagement(connected);
+        break;
+      } catch {
+        await pause(100);
+      }
+    }
+    if (!socket) throw new Error('OWNED_MANAGEMENT_LISTENER_UNREACHABLE');
     const until = Date.now() + 16500;
     while (Date.now() < until) {
       const log = getLog(logFile);
@@ -237,13 +276,24 @@ async function executeSyntheticLifecycle(data) {
       }
     }
     if (socket) socket.destroy();
-    await new Promise(resolve => {
-      if (!server.listening) return resolve();
-      server.close(() => resolve());
-    });
+    if (managementTokenFile) {
+      try { fs.unlinkSync(managementTokenFile); } catch {}
+    }
+    if (processStopped && managementPort) {
+      portClosedAfterTeardown = await new Promise(resolve => {
+        const probe = net.createConnection({host: '127.0.0.1', port: managementPort});
+        probe.setTimeout(400, () => probe.destroy());
+        probe.once('connect', () => { probe.destroy(); resolve(false); });
+        probe.once('error', () => resolve(true));
+        probe.once('close', () => resolve(true));
+      });
+    }
     disposed = true;
   }
-  if (!processStopped || !disposed) throw new Error('OWNED_CLIENT_NOT_CLEANLY_STOPPED');
+  if (!processStopped || !disposed || !portClosedAfterTeardown ||
+      (managementTokenFile && fs.existsSync(managementTokenFile))) {
+    throw new Error('OWNED_CLIENT_OR_MANAGEMENT_TOKEN_NOT_CLEANED');
+  }
   if (!managementConnected || !sawHold || !prompted) {
     throw new Error('MANAGEMENT_LIFECYCLE_INCOMPLETE');
   }
@@ -251,7 +301,8 @@ async function executeSyntheticLifecycle(data) {
     schema: 'oig-community-controller-qa-v1', mode: a.mode,
     managementConnected, managementHoldObserved: sawHold,
     managementPromptObserved: prompted, ownedProcessStopped: processStopped,
-    closedManagementListener: !server.listening,
+    closedManagementListener: portClosedAfterTeardown,
+    managementPasswordProtected: true, managementTokenErased: true,
     tlsAccepted: final.tlsAccepted,
     identityRejected: final.identityRejected,
     authRejected: final.authRejected,

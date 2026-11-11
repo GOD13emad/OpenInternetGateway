@@ -34,8 +34,10 @@ test('QA Community controller is excluded from Windows installer and production 
   assert.doesNotMatch(backend + shipped, /qa-community-cli-controller/);
   assert.match(shipped, /OVPNConnectorService|ovpnconnector\.exe/);
   const qa = fs.readFileSync(file, 'utf8');
-  assert.match(qa, /--management-client/);
+  assert.doesNotMatch(qa, /'--management-client'/);
   assert.match(qa, /--management-query-passwords/);
+  assert.match(qa, /managementTokenFile/);
+  assert.match(qa, /managementPasswordProtected/);
   assert.match(qa, /--management-forget-disconnect/);
   assert.match(qa, /--dev', 'null'/);
   assert.match(qa, /--ifconfig-noexec/);
