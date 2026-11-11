@@ -114,10 +114,22 @@ try {
  if($net[0].InterfaceDescription -notmatch 'OpenVPN|Data Channel Offload'){
   throw 'UNEXPECTED_ADAPTER_DRIVER'
  }
+ # Win32_PnPSignedDriver.DeviceName is often NOT the adapter description.
+ # Join actual InterfaceGuid -> Win32_NetworkAdapter.GUID -> PNPDeviceID,
+ # then require the corresponding signed PnP driver, not a loosely named one.
+ $nic=@(Get-CimInstance Win32_NetworkAdapter -ErrorAction Stop |
+  Where-Object {$_.GUID -and $_.GUID.ToString().Trim('{}') -ieq $ownedGuid.Trim('{}')})
+ if($nic.Count -ne 1){throw ('DCO_NETADAPTER_PNP_LINK_COUNT_'+$nic.Count)}
+ if(-not $nic[0].PNPDeviceID){throw 'DCO_NETADAPTER_PNP_ID_MISSING'}
  $signed=@(Get-CimInstance Win32_PnPSignedDriver -ErrorAction Stop |
-  Where-Object {($_.DeviceName -eq $net[0].InterfaceDescription -or
-   $_.DeviceID -match 'OVPN-DCO') -and $_.IsSigned -eq $true})
- if($signed.Count -lt 1){throw 'DCO_SIGNED_DRIVER_NOT_PROVEN'}
+  Where-Object {$_.DeviceID -ieq $nic[0].PNPDeviceID})
+ if($signed.Count -ne 1){throw ('DCO_PNP_SIGNED_DRIVER_LINK_COUNT_'+$signed.Count)}
+ if(([string]$signed[0].IsSigned) -ine 'True'){
+  throw 'DCO_PNP_DRIVER_SIGNATURE_FALSE'
+ }
+ if($signed[0].DeviceID -notmatch 'OVPN-DCO'){
+  throw 'DCO_PNP_HARDWARE_ID_MISMATCH'
+ }
  $driverSigned=$true;$adapterVerified=$true
  Write-Output 'HOSTED_VENDOR_DCO_ADAPTER_SIGNED_AND_VISIBLE'
 }catch{
