@@ -1460,6 +1460,74 @@ test('real throughput never persists measurements when VPN source or active rela
   for(const mode of ['stable','source-change','relay-change','disconnect'])await exercise(mode);
 });
 
+test('active download retries once on the same VPN-bound source and never persists failed or rotated results',async()=>{
+  const vm=require('node:vm');
+  const os=require('node:os');
+  const {EventEmitter}=require('node:events');
+  const source=fs.readFileSync(path.join(root,'src/main/platform-backend.js'),'utf8');
+  const sha='d'.repeat(64);
+  let mode='transient', downloadCount=0, uploadCount=0;
+  const mockSpawn=(program,args)=>{
+    assert.equal(program,'curl','Use synthetic curl only: no network or OS service');
+    const child=new EventEmitter();
+    child.stdin=new EventEmitter();child.stdin.end=()=>{};
+    child.stdout=new EventEmitter();child.stderr=new EventEmitter();
+    assert.ok(args.includes('--interface')&&args.includes('host!10.19.0.8'),
+      'Every curl operation must bind to the verified VPN source');
+    const isUpload=args.includes('--data-binary');
+    if(isUpload) uploadCount++;
+    else downloadCount++;
+    const response=isUpload?'200|1|62500':
+      (mode==='all-fail'||downloadCount===1?'503|0.8|0':'200|1|1250000');
+    process.nextTick(()=>{child.stdout.emit('data',Buffer.from(response));child.emit('close',0)});
+    return child;
+  };
+  const mod={exports:{}};
+  vm.runInNewContext(source,{module:mod,exports:mod.exports,process,Buffer,setTimeout,clearTimeout,
+    require:n=>n==='child_process'?{spawn:mockSpawn}:require(n)
+  },{filename:'oig-active-download-retry-synthetic.js'});
+  async function exercise(scenario){
+    mode=scenario;downloadCount=0;uploadCount=0;
+    const temp=fs.mkdtempSync(path.join(os.tmpdir(),'oig-active-download-retry-'));
+    try {
+      const b=new mod.exports({version:'2.5.20',appPath:root,resourcesPath:root,userData:temp});
+      b.platform='win32';b.backendRoot=temp;
+      let statusCalls=0;
+      b.status=async()=>{statusCalls++;return {
+        connected:true,fullRoutes:2,interface:scenario==='source-change'&&statusCalls>1?'changed':'VPN QA',
+        activeSha:sha,country:'US',ip:'198.51.100.77'
+      }};
+      b._activeTunnelCurlArgs=async()=>['-4','--noproxy','*','--interface','host!10.19.0.8'];
+      b.profiles=async()=>({activeSha:sha,profiles:[{
+        active:true,sha256:sha,ip:'203.0.113.18',host:'qa.invalid',country:'US'
+      }]});
+      b._httpsLatencyMs=async()=>20;b._icmpPing=async()=>null;
+      const saved=path.join(temp,'state','connection-benchmarks.json');
+      if(scenario==='all-fail'){
+        await assert.rejects(b.benchmarkActive(),/Real download test.*bounded retry/);
+        assert.equal(downloadCount,2);
+        assert.equal(uploadCount,0,'Never upload after an unverified download');
+        assert.equal(fs.existsSync(saved),false,'Failed transfer must not be persisted');
+      }else if(scenario==='source-change'){
+        await assert.rejects(b.benchmarkActive(),/Tunnel route or active connection changed/);
+        assert.equal(downloadCount,2);
+        assert.equal(fs.existsSync(saved),false,'Changed route must not be attributed to old relay');
+      }else{
+        const res=await b.benchmarkActive();
+        assert.equal(res.ok,true);
+        assert.equal(res.benchmark.downloadAttempts,2);
+        assert.equal(res.benchmark.uploadAttempts,1);
+        assert.equal(res.benchmark.throughputPath,'vpn-source-ip-bound');
+        assert.equal(res.benchmark.downloadBytes,2000000);
+        assert.equal(downloadCount,2);
+        assert.equal(uploadCount,1);
+        assert.equal(JSON.parse(fs.readFileSync(saved,'utf8'))[sha].downloadAttempts,2);
+      }
+    }finally{fs.rmSync(temp,{recursive:true,force:true})}
+  }
+  for(const scenario of ['transient','all-fail','source-change'])await exercise(scenario);
+});
+
 test('Windows packaged capture QA is fail-closed and never writes the real installed backend or registers autostart', async()=>{
   const Backend=require('../src/main/platform-backend');
   const os=require('node:os');

@@ -1536,12 +1536,26 @@ class Backend {
     ]);
 
     const downBytes = 2_000_000;
-    const down = await run('curl', [
-      ...tunnelCurlArgs,'-L','--max-time','12','-sS','-o',sink,'-w','%{http_code}|%{time_total}|%{speed_download}',
+    const downloadArgs = [
+      ...tunnelCurlArgs,'-L','--connect-timeout','8','--max-time','20','-sS','-o',sink,
+      '-w','%{http_code}|%{time_total}|%{speed_download}',
       'https://speed.cloudflare.com/__down?bytes=' + String(downBytes)
-    ], { timeout: 15000, allowFailure: true });
-    const [downCode, downTime, downSpeed] = String(down.stdout || '').trim().split('|');
-    if (downCode !== '200' || !(Number(downSpeed) > 0)) throw new Error('Real download test did not complete successfully.');
+    ];
+    let down;
+    let downloadAttempts = 0;
+    // A public exit relay or Cloudflare may briefly refuse a single HTTPS
+    // transfer. Retry only on the SAME verified VPN-bound source; final
+    // tunnel/interface/relay verification below remains mandatory.
+    for (let attempt = 0; attempt < 2; attempt++) {
+      downloadAttempts++;
+      down = await run('curl', downloadArgs, { timeout: 24000, allowFailure: true });
+      const [code,,speed] = String(down.stdout || '').trim().split('|');
+      if (code === '200' && Number(speed) > 0) break;
+    }
+    const [downCode, downTime, downSpeed] = String(down?.stdout || '').trim().split('|');
+    if (downCode !== '200' || !(Number(downSpeed) > 0)) {
+      throw new Error('Real download test did not complete successfully after a bounded retry.');
+    }
 
     const upBytes = 512_000;
     const tempUpload = path.join(this.backendRoot, 'state', 'benchmark-upload.bin');
@@ -1604,6 +1618,7 @@ class Backend {
       uploadMbps: Math.round(Number(upSpeed) * 8 / 1_000_000 * 100) / 100,
       downloadBytes: downBytes,
       uploadBytes: upBytes,
+      downloadAttempts,
       uploadAttempts,
       downloadSeconds: Number(downTime) || null,
       uploadSeconds: Number(upTime) || null,
