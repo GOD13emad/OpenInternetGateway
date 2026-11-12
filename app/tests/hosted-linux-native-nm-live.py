@@ -15,6 +15,7 @@ import os
 from pathlib import Path
 import re
 import socket
+import stat
 import subprocess
 import sys
 import tempfile
@@ -112,6 +113,9 @@ def main():
     completed = False
     owned_probe_route = None
     owned_underlay_routes = []
+    resolver_file = Path("/etc/resolv.conf")
+    resolver_original = None
+    resolver_changed = False
     try:
         # Host preconditions are checked before any provider secret is fetched.
         if not Path("/dev/net/tun").exists():
@@ -308,6 +312,54 @@ def main():
                             for address in answers)):
                     fail_stage("EXPLICIT_RESOLVER_VIA_TUN_NOT_VERIFIED")
                 out["explicitResolverDnsViaTun"] = True
+                # Docker owns this namespace and its own resolver file. Test
+                # the ordinary OS default DNS path (no "@" server override)
+                # without changing NetworkManager or the runner/owner host.
+                # The original bytes are restored immediately and in finally
+                # on EVERY failure. This is deliberately not a global leak or
+                # kill-switch acceptance claim.
+                stage = "CONTAINER_DEFAULT_DNS_BASELINE"
+                if resolver_file.is_symlink() or not resolver_file.is_file():
+                    fail_stage("CONTAINER_RESOLVER_NOT_REGULAR")
+                meta = resolver_file.stat()
+                if (not stat.S_ISREG(meta.st_mode) or meta.st_uid != 0
+                        or meta.st_nlink != 1 or meta.st_size > 4096):
+                    fail_stage("CONTAINER_RESOLVER_IDENTITY_UNTRUSTED")
+                resolver_original = resolver_file.read_bytes()
+                if not resolver_original or len(resolver_original) > 4096:
+                    fail_stage("CONTAINER_RESOLVER_BASELINE_UNAVAILABLE")
+                isolated_resolver = b"nameserver 1.1.1.1\noptions timeout:3 attempts:1\n"
+                stage = "CONTAINER_DEFAULT_DNS_OVERRIDE"
+                resolver_changed = True
+                with resolver_file.open("wb") as stream:
+                    stream.write(isolated_resolver)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                if resolver_file.read_bytes() != isolated_resolver:
+                    fail_stage("CONTAINER_DEFAULT_RESOLVER_WRITE_UNVERIFIED")
+                path = required(["ip", "-4", "route", "get", "1.1.1.1"], timeout=7)
+                if not re.search(rb"\bdev\s+" + re.escape(tunnel.encode()) + rb"\b", path):
+                    fail_stage("CONTAINER_DEFAULT_RESOLVER_NOT_TUN_BOUND")
+                stage = "CONTAINER_ORDINARY_DEFAULT_DNS"
+                normal = cmd(["dig", "-4", "+time=4", "+tries=1",
+                              "+short", "example.com", "A"], timeout=9)
+                normal_answers = normal.stdout.decode("ascii", "replace").splitlines()
+                if (normal.returncode or len(normal.stdout) > 2048
+                        or not normal_answers or not all(
+                            ipaddress.ip_address(address).version == 4
+                            and ipaddress.ip_address(address).is_global
+                            for address in normal_answers)):
+                    fail_stage("CONTAINER_DEFAULT_DNS_QUERY_NOT_VERIFIED")
+                out["containerDefaultDnsViaTunVerified"] = True
+                stage = "CONTAINER_DEFAULT_RESOLVER_RESTORE"
+                with resolver_file.open("wb") as stream:
+                    stream.write(resolver_original)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                if resolver_file.read_bytes() != resolver_original:
+                    fail_stage("CONTAINER_DEFAULT_RESOLVER_RESTORE_UNVERIFIED")
+                resolver_changed = False
+                out["containerDefaultResolverRestoredExact"] = True
             else:
                 # Scoped mode owns only one temporary /32 route, no default.
                 probe_prefix = probe_ip + "/32"
@@ -407,6 +459,18 @@ def main():
         out["failureStage"] = stage
         out["pass"] = False
     finally:
+        # Revert a partially written resolver even after a failed DNS probe.
+        # Retain a false receipt when restoration cannot be proven.
+        if resolver_changed and resolver_original is not None:
+            try:
+                with resolver_file.open("wb") as stream:
+                    stream.write(resolver_original)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                out["containerDefaultResolverRestoredExact"] = (
+                    resolver_file.read_bytes() == resolver_original)
+            except Exception:
+                out["containerDefaultResolverRestoredExact"] = False
         # All mutations belong only to the new UUID and its unique PEM namespace.
         # On error, leave no active NM VPN while the bounded Docker namespace lives.
         cleanup_ok = True
@@ -463,7 +527,10 @@ def main():
             out["containerNetworkRestored"] = False
         out["pass"] = (completed and authenticated
                        and out.get("tunnelBoundHttpsSucceeded") is True
-                       and (not is_full_ipv4 or out.get("fullIPv4RoutesOwned") is True)
+                       and (not is_full_ipv4 or (
+                           out.get("fullIPv4RoutesOwned") is True
+                           and out.get("containerDefaultDnsViaTunVerified") is True
+                           and out.get("containerDefaultResolverRestoredExact") is True))
                        and out["temporaryProfileAndPEMCleanupVerified"]
                        and out["containerNetworkRestored"])
         put_receipt(out, is_full_ipv4)
