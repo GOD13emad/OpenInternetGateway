@@ -109,6 +109,7 @@ def main():
     uuid = None
     before = None
     authenticated = False
+    completed = False
     owned_probe_route = None
     owned_underlay_routes = []
     try:
@@ -335,10 +336,13 @@ def main():
                           "--write-out", "%{size_download} %{time_total} %{http_code}",
                           "https://speed.cloudflare.com/__down?bytes=1000000"],
                          timeout=35)
+                out["nmDownloadCurlExitCode"] = dl.returncode
                 try:
                     dbytes, dsecs, dstatus = dl.stdout.decode("ascii").strip().split()
                     dbytes, dsecs = float(dbytes), float(dsecs)
-                except (ValueError, UnicodeDecodeError):
+                    out["nmDownloadHttpCode"] = dstatus
+                    out["nmDownloadReceivedBytes"] = int(dbytes)
+                except (ValueError, UnicodeDecodeError, OverflowError):
                     fail_stage("NATIVE_NM_DOWNLOAD_OBSERVATION_INVALID")
                 if dl.returncode or dstatus != "200" or dbytes < 900000 or dsecs <= 0:
                     fail_stage("NATIVE_NM_DOWNLOAD_BYTES_NOT_VERIFIED")
@@ -353,10 +357,13 @@ def main():
                           "--output", "/dev/null",
                           "--write-out", "%{size_upload} %{time_total} %{http_code}",
                           "https://speed.cloudflare.com/__up"], timeout=35)
+                out["nmUploadCurlExitCode"] = ul.returncode
                 try:
                     ubytes, usecs, ustatus = ul.stdout.decode("ascii").strip().split()
                     ubytes, usecs = float(ubytes), float(usecs)
-                except (ValueError, UnicodeDecodeError):
+                    out["nmUploadHttpCode"] = ustatus
+                    out["nmUploadSentBytes"] = int(ubytes)
+                except (ValueError, UnicodeDecodeError, OverflowError):
                     fail_stage("NATIVE_NM_UPLOAD_OBSERVATION_INVALID")
                 if ul.returncode or ustatus != "200" or ubytes < 262144 or usecs <= 0:
                     fail_stage("NATIVE_NM_UPLOAD_BYTES_NOT_VERIFIED")
@@ -370,6 +377,7 @@ def main():
                 out["nativeNmDownloadBytes"] = int(dbytes)
                 out["nativeNmUploadBytes"] = int(ubytes)
                 out["nativeNmMeasuredVpnBoundThroughput"] = True
+            completed = True
     except Exception as exc:
         out["failureClass"] = type(exc).__name__
         out["failureStage"] = stage
@@ -429,7 +437,8 @@ def main():
             out["containerNetworkRestored"] = before is not None and before == snapshot()
         except Exception:
             out["containerNetworkRestored"] = False
-        out["pass"] = (authenticated and out.get("tunnelBoundHttpsSucceeded") is True
+        out["pass"] = (completed and authenticated
+                       and out.get("tunnelBoundHttpsSucceeded") is True
                        and (not is_full_ipv4 or out.get("fullIPv4RoutesOwned") is True)
                        and out["temporaryProfileAndPEMCleanupVerified"]
                        and out["containerNetworkRestored"])
