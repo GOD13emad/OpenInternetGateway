@@ -194,6 +194,10 @@ def trial(profile, ca_sha, peer_cn, seconds, hold):
                 profile, ca_sha, peer_cn, folder, name)
             if imported_name != name:
                 raise TrialError("NetworkManager importer did not preserve the unique QA profile identity")
+            # Resolve the actual native NM inline-PEM directory before arming
+            # rollback; only exact, regular, owned XDG or legacy paths qualify.
+            certificate_directory = str(
+                operator_profile._nm_imported_certificate_directory(uuid, name))
             # Arm the independent timer immediately after import, before trust
             # inspection, profile modification or any connection activation.
             timer = operator_rollback.arm(

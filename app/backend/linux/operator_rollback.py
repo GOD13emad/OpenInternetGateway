@@ -59,10 +59,15 @@ def checked_certificate_directory(value):
     if not data_home.is_absolute():
         raise RollbackError("NetworkManager data home must be absolute")
     expected = data_home / "networkmanagement" / "certificates" / "nm-openvpn"
-    if directory != expected:
-        raise RollbackError("Temporary certificate directory is not the configured XDG NetworkManager path")
-    for item in (data_home, data_home / "networkmanagement",
-                 data_home / "networkmanagement" / "certificates", directory):
+    legacy = Path.home() / ".cert" / "nm-openvpn"
+    if directory == expected:
+        parents = (data_home, data_home / "networkmanagement",
+                   data_home / "networkmanagement" / "certificates", directory)
+    elif directory == legacy:
+        parents = (Path.home() / ".cert", directory)
+    else:
+        raise RollbackError("Temporary certificate directory is not the configured XDG NetworkManager path or approved legacy path")
+    for item in parents:
         if item.is_symlink():
             raise RollbackError("Temporary certificate directory cannot contain symlinks")
         if item.exists():

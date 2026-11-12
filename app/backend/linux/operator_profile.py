@@ -210,14 +210,23 @@ def _nm_vpn_data(uuid):
     return parse_nm_vpn_data(response.stdout.decode(errors="replace"))
 
 
-def _nm_certificate_directory():
+def _nm_certificate_directory(selected=None):
+    """Allow only the two known NM OpenVPN inline-PEM stores, with owner checks."""
     data_home = Path(os.environ.get("XDG_DATA_HOME") or
                      (Path.home() / ".local" / "share"))
-    if not data_home.is_absolute():
+    if not data_home.is_absolute() or not Path.home().is_absolute():
         raise UnsafeProfile("NetworkManager certificate storage must be absolute")
-    directory = data_home / "networkmanagement" / "certificates" / "nm-openvpn"
-    for item in (data_home, data_home / "networkmanagement",
-                 data_home / "networkmanagement" / "certificates", directory):
+    xdg = data_home / "networkmanagement" / "certificates" / "nm-openvpn"
+    legacy = Path.home() / ".cert" / "nm-openvpn"
+    directory = Path(selected) if selected is not None else xdg
+    if directory == xdg:
+        parents = (data_home, data_home / "networkmanagement",
+                   data_home / "networkmanagement" / "certificates", directory)
+    elif directory == legacy:
+        parents = (Path.home() / ".cert", directory)
+    else:
+        raise UnsafeProfile("NetworkManager certificate storage is not an allowed location")
+    for item in parents:
         if item.is_symlink():
             raise UnsafeProfile("NetworkManager certificate storage cannot use symlinks")
         if item.exists():
@@ -226,6 +235,24 @@ def _nm_certificate_directory():
                     or stat.S_IMODE(info.st_mode) & 0o022):
                 raise UnsafeProfile("NetworkManager certificate storage ownership or permissions are unsafe")
     return directory
+
+
+def _nm_imported_certificate_directory(uuid, stem):
+    """Discover storage only from three exact NM-owned file references, never arbitrary paths."""
+    data = _nm_vpn_data(uuid)
+    parents = set()
+    for name in ("ca", "cert", "key"):
+        value = data.get(name)
+        if not value:
+            raise UnsafeProfile("NetworkManager omitted an imported certificate or key")
+        path = Path(value)
+        if (not path.is_absolute() or path.name != f"{stem}-{name}.pem"
+                or path.is_symlink() or not path.is_file()):
+            raise UnsafeProfile("NetworkManager stored identity material outside the unique QA namespace")
+        parents.add(path.parent)
+    if len(parents) != 1:
+        raise UnsafeProfile("NetworkManager stored identity material outside the unique QA namespace")
+    return _nm_certificate_directory(next(iter(parents)))
 
 
 def _inline_identity_blocks(content: bytes):
@@ -262,7 +289,7 @@ def verify_nm_import(uuid, stem, content, remote, protocol, ca_sha, expected_cn)
     if protocol == "udp" and data.get("proto-tcp") == "yes":
         raise UnsafeProfile("NetworkManager changed the selected UDP transport")
 
-    directory = _nm_certificate_directory()
+    directory = _nm_imported_certificate_directory(uuid, stem)
     blocks = _inline_identity_blocks(content)
     paths = {}
     for name in ("ca", "cert", "key"):
@@ -293,11 +320,11 @@ def verify_nm_import(uuid, stem, content, remote, protocol, ca_sha, expected_cn)
             "peerCN": expected_cn, "caDerSha256": ca_sha.lower()}
 
 
-def cleanup_nm_import_artifacts(stem, content):
+def cleanup_nm_import_artifacts(stem, content, certificate_directory=None):
     """Remove only our unique, unreferenced, unopened NM certificate copies."""
     if not re.fullmatch(r"(?:oig-native-[a-f0-9]{24}|OIG-Operator-QA-[a-f0-9]{12})", stem):
         raise UnsafeProfile("Temporary NetworkManager artifact identity is invalid")
-    directory = _nm_certificate_directory()
+    directory = _nm_certificate_directory(certificate_directory)
     blocks = _inline_identity_blocks(content)
     paths = {name: directory / f"{stem}-{name}.pem" for name in ("ca", "cert", "key")}
     if not directory.exists():
@@ -348,6 +375,7 @@ def native_import_check(profile: Path, ca_sha: str, expected_cn: str):
     trust_ok = False
     removed = False
     validation_error = None
+    certificate_directory = None
     with tempfile.TemporaryDirectory(prefix="oig-operator-native-") as td:
         os.chmod(td, 0o700)
         tmp = Path(td) / f"{stem}.ovpn"
@@ -379,6 +407,7 @@ def native_import_check(profile: Path, ca_sha: str, expected_cn: str):
                     raise UnsafeProfile("Refusing to delete an imported profile of unknown type")
                 if imported:
                     try:
+                        certificate_directory = _nm_imported_certificate_directory(matched, stem)
                         verify_nm_import(matched, stem, checked, remote, protocol,
                                          ca_sha, expected_cn)
                         trust_ok = True
@@ -388,7 +417,7 @@ def native_import_check(profile: Path, ca_sha: str, expected_cn: str):
                 removed = deleted.returncode == 0 and matched not in _connection_uuids()
             else:
                 removed = True
-    artifacts_removed = cleanup_nm_import_artifacts(stem, checked)
+    artifacts_removed = cleanup_nm_import_artifacts(stem, checked, certificate_directory)
     if validation_error is not None:
         raise validation_error
     if not imported or not vpn_type_ok or not trust_ok or not removed or not artifacts_removed:
