@@ -148,7 +148,81 @@ NMCONF
   # Only the disposable container progresses to real NM/OpenVPN activation.
   # The native live receipt is deliberately separate from the import receipt.
   python3 -B /work/app/tests/hosted-linux-native-nm-live.py --native-scoped-live
+
+  # Disposable Docker ships a REGULAR /etc/resolv.conf with a foreign
+  # nameserver. systemd-resolved imports that nameserver as Global even when
+  # NM's negative VPN DNS priority suppresses the dummy base DNS. The shipped
+  # fail-closed product guard correctly rejects this fallback. Now separately
+  # exercise the standard resolved stub mode: the resolver must no longer
+  # import the Docker underlay into Global. No host mount/network is used.
+  python3 -B - <<'PYSTUB'
+import os, pathlib, stat
+p=pathlib.Path("/etc/resolv.conf")
+info=p.lstat()
+if (not stat.S_ISREG(info.st_mode) or info.st_uid != 0
+        or info.st_nlink != 1 or info.st_size > 4096):
+    raise SystemExit("REFUSED: disposable resolver file identity changed")
+original=p.read_bytes()
+if not original or b"nameserver " not in original:
+    raise SystemExit("REFUSED: Docker DNS bootstrap baseline missing")
+backup=pathlib.Path("/run/oig-disposable-docker-resolv-original")
+fd=os.open(backup,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
+with os.fdopen(fd,"wb") as f:
+    f.write(original);f.flush();os.fsync(f.fileno())
+with p.open("wb") as f:
+    f.write(b"nameserver 127.0.0.53\n");f.flush();os.fsync(f.fileno())
+if p.read_bytes()!=b"nameserver 127.0.0.53\n":
+    raise SystemExit("REFUSED: Docker-only resolved stub file mismatch")
+print("HOSTED_DISPOSABLE_DOCKER_RESOLVED_STUB_MODE_CONFIGURED")
+PYSTUB
+  # SIGHUP makes the real D-Bus daemon reload its resolver inputs, while
+  # preserving its NM-linked configuration and active Docker base interface.
+  kill -HUP "$resolved_pid"
+  for _ in $(seq 1 15); do
+    if python3 -B - <<'PYCHECK'
+import re,subprocess,sys
+p=subprocess.run(["resolvectl","dns"],capture_output=True,text=True,timeout=6)
+if p.returncode or len(p.stdout)>8192:sys.exit(1)
+for line in p.stdout.splitlines():
+    if line.strip().startswith("Global:") and line.partition(":")[2].strip():
+        sys.exit(1)
+if not re.search(r"Link\s+\d+\s+\(oigqa0\):.*9\.9\.9\.9",p.stdout):
+    sys.exit(1)
+PYCHECK
+    then
+      echo 'HOSTED_DISPOSABLE_RESOLVED_GLOBAL_FALLBACK_REMOVED=PASS'
+      break
+    fi
+    sleep .25
+  done
+  python3 -B - <<'PYCHECK_FINAL'
+import re,subprocess,sys
+p=subprocess.run(["resolvectl","dns"],capture_output=True,text=True,timeout=6)
+assert p.returncode==0
+assert not any(line.strip().startswith("Global:") and line.partition(":")[2].strip()
+               for line in p.stdout.splitlines()),"DOCKER_GLOBAL_DNS_FALLBACK_PERSISTED"
+assert re.search(r"Link\s+\d+\s+\(oigqa0\):.*9\.9\.9\.9",p.stdout),"DOCKER_BASE_NM_DNS_NOT_PRESERVED"
+print("HOSTED_DISPOSABLE_NORMAL_RESOLVED_STUB_INVENTORY_PASS")
+PYCHECK_FINAL
   python3 -B /work/app/tests/hosted-linux-native-nm-live.py --native-fullipv4
+  # Re-enter the original Docker DNS bootstrap mode between independent test
+  # cases. The exact private baseline file is restored only inside --inner.
+  python3 -B - <<'PYRESTORE'
+import os,pathlib,stat
+b=pathlib.Path("/run/oig-disposable-docker-resolv-original")
+i=b.lstat()
+assert stat.S_ISREG(i.st_mode) and i.st_uid==0 and stat.S_IMODE(i.st_mode)==0o600
+assert i.st_size<=4096 and i.st_nlink==1
+raw=b.read_bytes()
+assert raw and b"nameserver " in raw
+p=pathlib.Path("/etc/resolv.conf")
+assert p.read_bytes()==b"nameserver 127.0.0.53\n"
+with p.open("wb") as f:
+    f.write(raw);f.flush();os.fsync(f.fileno())
+assert p.read_bytes()==raw
+print("HOSTED_DOCKER_RESOLVER_BOOTSTRAP_RESTORED_EXACT")
+PYRESTORE
+  kill -HUP "$resolved_pid"
   # Separate proof: a real authenticated OpenVPN TUN is active while its
   # owning process is SIGKILLed. An independent watchdog then executes the
   # unchanged production rollback helper on that exact UUID. This does NOT
