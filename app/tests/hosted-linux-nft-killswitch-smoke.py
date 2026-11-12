@@ -119,14 +119,23 @@ def main():
         # Eight UDP datagrams to a public literal DNS destination: no hostname,
         # no private payload, no tunnel, and no externally delivered packet.
         udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        kernel_denials = 0
         try:
             for _ in range(8):
-                udp.sendto(b"\x00", ("9.9.9.9", 53))
+                try:
+                    udp.sendto(b"\x00", ("9.9.9.9", 53))
+                except PermissionError:
+                    # Some kernels return EPERM synchronously when the nft
+                    # output hook drops a locally generated UDP datagram.
+                    # This is a valid denial, NOT a failure to probe.
+                    kernel_denials += 1
         finally:
             udp.close()
         after = drop_count()
         if after < before + 8:
             raise RuntimeError("KERNEL_DROP_COUNTER_DID_NOT_ADVANCE")
+        out["nftKernelPermissionDenialsObserved"] = kernel_denials
+        out["nftDropCounterDelta"] = after - before
         out["nftKernelRulesLoaded"] = True
         out["physicalDnsEgressDropCounterAdvanced"] = True
         out["ipv6PhysicalAllowRuleAbsent"] = True  # Static inspection only, no IPv6 packet proof.
