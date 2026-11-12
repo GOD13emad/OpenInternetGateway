@@ -252,6 +252,76 @@ def probe_drop_counter(probe, chain):
     return after - before
 
 
+def synthetic_tunnel_transition_probe(backend):
+    """Exercise the kernel's atomic TUN allow -> relock syntax in test netns.
+
+    This is deliberately NOT invoked through the production controller:
+    it has no independent OpenVPN identity evidence and must continue
+    refusing any tunnel-opening request. The test owns a synthetic tun7
+    that is destroyed with the namespace and records no real VPN PASS.
+    """
+    if (os.geteuid() != 0 or
+            os.stat("/proc/self/ns/net").st_ino ==
+            os.stat("/proc/1/ns/net").st_ino or
+            backend.manifest != MANIFEST):
+        raise RuntimeError("REFUSED: synthetic transition outside isolated netns")
+    call([IP, "tuntap", "add", "dev", "tun7", "mode", "tun"])
+    call([IP, "link", "set", "tun7", "up"])
+    names = {x.get("ifname") for x in json.loads(
+        call([IP, "-j", "link", "show"]).stdout)}
+    if names != {"lo", "eth0", "stub0", "tun7"}:
+        raise RuntimeError("UNEXPECTED_TEST_INTERFACES")
+
+    args = (MANIFEST.tunnel, MANIFEST.underlay, MANIFEST.peer_ipv4,
+            MANIFEST.peer_port, MANIFEST.transport)
+
+    def commit_test_transition(allowed):
+        script = plan.render_transition(*args, tunnel_allowed=allowed)
+        with tempfile.TemporaryDirectory(prefix="oig-nft-synthetic-tun-") as tmp:
+            f = Path(tmp) / "transition.nft"
+            fd = os.open(f, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+            with os.fdopen(fd, "w", encoding="utf8") as out:
+                out.write(script)
+                out.flush()
+                os.fsync(out.fileno())
+            call([NFT, "-c", "-f", str(f)])
+            call([NFT, "-f", str(f)])
+
+    commit_test_transition(True)
+    open_rules = backend.rules("output")
+    tunnel_allow = [
+        row for row in open_rules
+        if any(isinstance(expr, dict)
+               and expr.get("match", {}).get("left") ==
+               {"meta": {"key": "oifname"}}
+               and expr.get("match", {}).get("right") == "tun7"
+               for expr in row.get("expr", []))
+        and row.get("expr", [])[-1] == {"accept": None}
+    ]
+    if (len(open_rules) != 5 or len(tunnel_allow) != 1
+            or backend.chain("output") != ("output", "drop", -150)
+            or backend.chain("forward") != ("forward", "drop", -150)):
+        raise RuntimeError("UNVERIFIED_SYNTHETIC_TUNNEL_OPEN")
+    commit_test_transition(False)
+    backend.verify_sole_table()
+    nft_test.verify_locked_nft_rules(
+        MANIFEST, backend.rules("output"), backend.rules("forward")
+    )
+    return {
+        "syntheticTunnelAllowKernelVerified": True,
+        "syntheticTunnelToRelockKernelVerified": True,
+        "syntheticTransitionRelockV4DropDelta": probe_drop_counter(
+            probe_local_v4, "output"
+        ),
+        "syntheticTransitionRelockV6DropDelta": probe_drop_counter(
+            probe_local_v6, "output"
+        ),
+        "syntheticTransitionRelockForwardDropDelta": probe_drop_counter(
+            probe_forwarded_v4, "forward"
+        ),
+    }
+
+
 def main():
     receipt = {
         "schema": SCHEMA, "pass": False,
@@ -271,6 +341,11 @@ def main():
         "initialForwardDropDelta": 0,
         "relockedV4DnsDropDelta": 0,
         "relockedV6DnsDropDelta": 0,
+        "syntheticTunnelAllowKernelVerified": False,
+        "syntheticTunnelToRelockKernelVerified": False,
+        "syntheticTransitionRelockV4DropDelta": 0,
+        "syntheticTransitionRelockV6DropDelta": 0,
+        "syntheticTransitionRelockForwardDropDelta": 0,
     }
     stage = "ISOLATED_PRECONDITIONS"
     try:
@@ -303,16 +378,23 @@ def main():
         stage = "PROBE_RELOCKED_DROPS"
         receipt["relockedV4DnsDropDelta"] = probe_drop_counter(probe_local_v4, "output")
         receipt["relockedV6DnsDropDelta"] = probe_drop_counter(probe_local_v6, "output")
+        stage = "SYNTHETIC_KERNEL_TUNNEL_TRANSITION_AND_RELOCK"
+        receipt.update(synthetic_tunnel_transition_probe(backend))
         receipt["pass"] = (
             receipt["isolatedNetnsVerified"]
             and receipt["kernelInitialLockdownVerified"]
             and receipt["kernelAtomicRelockVerified"]
             and receipt["forwardPolicyDropVerified"]
             and receipt["unverifiedTunnelUnlockDenied"]
+            and receipt["syntheticTunnelAllowKernelVerified"]
+            and receipt["syntheticTunnelToRelockKernelVerified"]
             and all(type(receipt[k]) is int and receipt[k] >= 8 for k in (
                 "initialV4DnsDropDelta", "initialV6DnsDropDelta",
                 "initialForwardDropDelta", "relockedV4DnsDropDelta",
-                "relockedV6DnsDropDelta"
+                "relockedV6DnsDropDelta",
+                "syntheticTransitionRelockV4DropDelta",
+                "syntheticTransitionRelockV6DropDelta",
+                "syntheticTransitionRelockForwardDropDelta"
             ))
         )
     except Exception as exc:
