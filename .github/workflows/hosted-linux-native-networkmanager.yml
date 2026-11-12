@@ -7,6 +7,7 @@ on:
       - 'app/tests/hosted-linux-native-nm.py'
       - 'app/tests/hosted-linux-native-nm.sh'
       - 'app/tests/hosted-linux-native-nm-live.py'
+      - 'app/tests/hosted-linux-nm-active-crash-rollback.py'
       - 'app/tests/hosted-linux-provider-data-plane.py'
       - 'app/backend/linux/operator_profile.py'
       - 'app/backend/linux/operator_full_device.py'
@@ -41,6 +42,7 @@ jobs:
           import ast,pathlib
           ast.parse(pathlib.Path('app/tests/hosted-linux-native-nm.py').read_text())
           ast.parse(pathlib.Path('app/tests/hosted-linux-native-nm-live.py').read_text())
+          ast.parse(pathlib.Path('app/tests/hosted-linux-nm-active-crash-rollback.py').read_text())
           print('DISPOSABLE_NATIVE_NM_IMPORT_AST_PASS')
           PY
           set +e
@@ -62,6 +64,12 @@ jobs:
           set -e
           test "$full_code" -ne 0
           test "$full_result" = "REFUSED: owner host or non-disposable runner"
+          set +e
+          crash_result="$(env -u GITHUB_ACTIONS -u RUNNER_ENVIRONMENT -u GITHUB_REPOSITORY             python3 -B app/tests/hosted-linux-nm-active-crash-rollback.py --supervise 2>&1)"
+          crash_code=$?
+          set -e
+          test "$crash_code" -ne 0
+          test "$crash_result" = "REFUSED: owner host or non-disposable runner"
           echo 'OWNER_HOST_REFUSED=PASS'
       - name: Real OIG NetworkManager import plus scoped live OpenVPN TUN in isolated Docker netns
         shell: bash
@@ -79,5 +87,6 @@ jobs:
             ${{ runner.temp }}/oig-hosted-nm/oig-hosted-native-nm.json
             ${{ runner.temp }}/oig-hosted-nm/oig-hosted-native-nm-live.json
             ${{ runner.temp }}/oig-hosted-nm/oig-hosted-native-nm-fullipv4.json
+            ${{ runner.temp }}/oig-hosted-nm/oig-hosted-active-crash-rollback.json
           if-no-files-found: warn
           retention-days: 7

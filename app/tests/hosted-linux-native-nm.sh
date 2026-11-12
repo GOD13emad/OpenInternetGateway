@@ -87,7 +87,7 @@ NMCONF
     # The container creates its private receipt as 0600/root. Transfer only
     # the artifact's ownership to the runner user for actions/upload-artifact.
     # Never loosen permissions or mount owner-host sensitive directories.
-    for receipt in /out/oig-hosted-native-nm.json /out/oig-hosted-native-nm-live.json /out/oig-hosted-native-nm-fullipv4.json; do
+    for receipt in /out/oig-hosted-native-nm.json /out/oig-hosted-native-nm-live.json /out/oig-hosted-native-nm-fullipv4.json /out/oig-hosted-active-crash-rollback.json; do
       if [[ -f "$receipt" ]]; then
         chown "${OIG_RUNNER_UID:?}:${OIG_RUNNER_GID:?}" "$receipt"
         chmod 0600 "$receipt"
@@ -149,6 +149,11 @@ NMCONF
   # The native live receipt is deliberately separate from the import receipt.
   python3 -B /work/app/tests/hosted-linux-native-nm-live.py --native-scoped-live
   python3 -B /work/app/tests/hosted-linux-native-nm-live.py --native-fullipv4
+  # Separate proof: a real authenticated OpenVPN TUN is active while its
+  # owning process is SIGKILLed. An independent watchdog then executes the
+  # unchanged production rollback helper on that exact UUID. This does NOT
+  # claim a real systemd timer in the Docker container.
+  python3 -B /work/app/tests/hosted-linux-nm-active-crash-rollback.py --supervise
   exit 0
 fi
 
@@ -229,3 +234,19 @@ assert d.get('systemDnsLeakContainmentVerified') is False
 assert d.get('productionKillSwitchVerified') is False
 print('HOSTED_NATIVE_NM_DISPOSABLE_IPV4_FULL_ROUTE_AND_ROLLBACK_PASS')
 PYFULL
+
+test -s "$out/oig-hosted-active-crash-rollback.json"
+python3 -B - "$out/oig-hosted-active-crash-rollback.json" <<'PYCRASH'
+import json,sys
+r=json.load(open(sys.argv[1],encoding="utf8"))
+assert r.get("pass") is True
+assert r.get("activatorKilledAfterRealTunHttps") is True
+assert r.get("independentWatcherSurvivedSIGKILL") is True
+assert r.get("realActiveVpnProfileAndCertificatesRemoved") is True
+assert r.get("containerNetworkRestored") is True
+assert r.get("independentBasePreserved") is True
+assert r.get("productionCrashRollbackVerified") is False
+assert r.get("systemDnsLeakContainmentVerified") is False
+assert r.get("productionKillSwitchVerified") is False
+print("HOSTED_DISPOSABLE_REAL_ACTIVE_OPENVPN_SIGKILL_CLEANUP_PASS")
+PYCRASH
