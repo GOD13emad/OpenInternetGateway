@@ -542,18 +542,45 @@ def main():
                 out["fullIPv4RoutesOwned"] = True
                 out["ipv6RouteInventoryScoped"] = True
                 stage = "TUN_BOUND_EXPLICIT_DNS"
-                # A separate explicit resolver probe complements the real
-                # per-link resolved test above. Neither proves arbitrary
-                # application/IPv6 leak containment on physical owner hosts.
-                response = cmd(["dig", "-4", "+time=4", "+tries=1",
-                                "+short", "@1.1.1.1", "example.com", "A"],
-                               timeout=9)
-                answers = response.stdout.decode("ascii", "replace").splitlines()
-                if (response.returncode or len(response.stdout) > 2048
-                        or not answers or not all(
+                # An explicit DNS query complements resolved's working
+                # route-only lookup. UDP packet loss must not silently
+                # switch to Docker's physical resolver: retry twice on the
+                # SAME pinned 1.1.1.1 and TUN-owned kernel route, then allow
+                # one DNS-over-TCP query to that SAME pinned upstream. No
+                # alternate server, interface or host network fallback.
+                explicit_ok = False
+                for attempt, via_tcp in enumerate((False, False, True), start=1):
+                    dns_route = required(
+                        ["ip", "-4", "route", "get", "1.1.1.1"], timeout=7)
+                    if not re.search(
+                            rb"\bdev\s+" + re.escape(tunnel.encode()) + rb"\b",
+                            dns_route):
+                        fail_stage("EXPLICIT_RESOLVER_ROUTE_LEFT_TUN")
+                    argv = ["dig", "-4", "+time=4", "+tries=1", "+short"]
+                    if via_tcp:
+                        argv.append("+tcp")
+                    response = cmd(argv + ["@1.1.1.1", "example.com", "A"],
+                                   timeout=9)
+                    out["explicitResolverDnsAttempts"] = attempt
+                    out["explicitResolverLastTcp"] = via_tcp
+                    if response.returncode or len(response.stdout) > 2048:
+                        continue
+                    answers = response.stdout.decode(
+                        "ascii", "replace").splitlines()
+                    if not answers:
+                        continue
+                    try:
+                        explicit_ok = all(
                             ipaddress.ip_address(address).version == 4
                             and ipaddress.ip_address(address).is_global
-                            for address in answers)):
+                            for address in answers)
+                    except ValueError:
+                        explicit_ok = False
+                    if explicit_ok:
+                        out["explicitResolverTransport"] = (
+                            "tcp" if via_tcp else "udp")
+                        break
+                if not explicit_ok:
                     fail_stage("EXPLICIT_RESOLVER_VIA_TUN_NOT_VERIFIED")
                 out["explicitResolverDnsViaTun"] = True
                 # Docker owns this namespace and its own resolver file. Test
