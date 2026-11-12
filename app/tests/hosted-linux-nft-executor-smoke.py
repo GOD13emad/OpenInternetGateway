@@ -131,7 +131,7 @@ def main():
         _, second_drop = dns_drop_probe()
         out["relockedDnsDropDelta"] = second_drop
         out["forwardPolicyDropVerified"] = (
-            backend.chain("forward") == ("forward", "drop")
+            backend.chain("forward") == ("forward", "drop", -150)
         )
         out["pass"] = (out["initialKernelLockdownVerified"]
                        and out["unverifiedTunnelRefused"]

@@ -16,12 +16,41 @@ APPROVED = contract.Approved(
 )
 
 
+def eq(category, key, right):
+    if category == "meta":
+        left = {"meta": {"key": key}}
+    else:
+        left = {"payload": {"protocol": key[0], "field": key[1]}}
+    return {"match": {"op": "==", "left": left, "right": right}}
+
+
+def sample_rules():
+    return [
+        {"expr": [eq("meta", "oifname", "lo"), {"accept": None}]},
+        {"expr": [eq("meta", "nfproto", "ipv4"),
+                  eq("meta", "oifname", "eth0"),
+                  eq("payload", ("ip", "daddr"), "1.1.1.1"),
+                  eq("payload", ("tcp", "dport"), 443),
+                  {"accept": None}]},
+        {"expr": [eq("meta", "nfproto", "ipv4"),
+                  eq("meta", "oifname", "eth0"),
+                  eq("payload", ("udp", "sport"), 68),
+                  eq("payload", ("udp", "dport"), 67),
+                  {"accept": None}]},
+        {"expr": [{"counter": {"packets": 0, "bytes": 0}}, {"drop": None}]},
+    ]
+
+
 class FakeBackend:
     def __init__(self):
         self.exists = False
-        self.output = ("output", "drop")
-        self.forward = ("forward", "drop")
+        self.output = ("output", "drop", -150)
+        self.forward = ("forward", "drop", -150)
         self.allow_tunnel = False
+        self.extra_accept = False
+        self.wrong_peer = False
+        self.wrong_port = False
+        self.missing_drop = False
         self.fail = False
         self.scripts = []
         self.calls = []
@@ -34,14 +63,23 @@ class FakeBackend:
         self.calls.append("chain:" + kind)
         return {"output": self.output, "forward": self.forward}[kind]
 
-    def rules(self):
-        self.calls.append("rules")
-        return [{"expr": [{"match": {"right": "tun7"}}]}] if self.allow_tunnel else [
-            {"expr": [{"match": {"right": "lo"}}, {"accept": None}]},
-            {"expr": [{"match": {"right": "eth0"}}, {"accept": None}]},
-            {"expr": [{"match": {"right": "eth0"}}, {"accept": None}]},
-            {"expr": [{"counter": {"packets": 0}}, {"drop": None}]},
-        ]
+    def rules(self, name="output"):
+        self.calls.append("rules:" + name)
+        if name == "forward":
+            return [{"expr": [{"counter": {"packets": 0, "bytes": 0}},
+                               {"drop": None}]}]
+        values = sample_rules()
+        if self.allow_tunnel:
+            values[0] = {"expr": [eq("meta", "oifname", "tun7"), {"accept": None}]}
+        if self.extra_accept:
+            values.insert(0, {"expr": [{"accept": None}]})
+        if self.wrong_peer:
+            values[1]["expr"][2] = eq("payload", ("ip", "daddr"), "8.8.8.8")
+        if self.wrong_port:
+            values[1]["expr"][3] = eq("payload", ("tcp", "dport"), 80)
+        if self.missing_drop:
+            values.pop()
+        return values
 
     def apply(self, script):
         self.calls.append("apply")
@@ -100,13 +138,13 @@ def main():
     refuse(c.relock, "relock_after_unknown")
 
     broken = FakeBackend()
-    broken.output = ("output", "accept")
+    broken.output = ("output", "accept", -150)
     d = executor.LockdownOnlyController(APPROVED, broken)
     refuse(d.install_lockdown, "unsafe_output_chain")
     assert d.state == "UNKNOWN" and broken.exists
 
     broken_forward = FakeBackend()
-    broken_forward.forward = ("forward", "accept")
+    broken_forward.forward = ("forward", "accept", -150)
     e = executor.LockdownOnlyController(APPROVED, broken_forward)
     refuse(e.install_lockdown, "unsafe_forward_chain")
     assert e.state == "UNKNOWN" and broken_forward.exists
@@ -121,6 +159,30 @@ def main():
     refuse(z.relock, "relock_transaction_failed")
     assert z.state == "UNKNOWN"
 
+    # Reject fail-open mutations even if the base chain still says DROP.
+    for condition in ("extra_accept", "wrong_peer", "wrong_port", "missing_drop"):
+        forged = FakeBackend()
+        ctl = executor.LockdownOnlyController(APPROVED, forged)
+        assert ctl.install_lockdown() == "LOCKED"
+        setattr(forged, condition, True)
+        refuse(ctl._locked_verified, "forged_" + condition)
+
+    bad_priority = FakeBackend()
+    bad_priority.output = ("output", "drop", 0)
+    refuse(lambda: executor.LockdownOnlyController(
+        APPROVED, bad_priority).install_lockdown(), "wrong_priority")
+
+    # No extra accept, no missing forward drop, no partial four-rule match.
+    good = sample_rules()
+    forward = [{"expr": [{"counter": {"packets": 0, "bytes": 0}},
+                         {"drop": None}]}]
+    assert executor.verify_locked_nft_rules(APPROVED, good, forward)
+    refuse(lambda: executor.verify_locked_nft_rules(
+        APPROVED, good + [{"expr": [{"accept": None}]}], forward), "extra_allow")
+    refuse(lambda: executor.verify_locked_nft_rules(
+        APPROVED, good, []), "empty_forward")
+    refuse(lambda: executor.verify_locked_nft_rules(
+        APPROVED, good, [{"expr": [{"accept": None}]}]), "forward_accept")
     refuse(lambda: executor.LockdownOnlyController(None, FakeBackend()), "missing_manifest")
     refuse(lambda: executor.LockdownOnlyController(APPROVED, None), "missing_backend")
     try:

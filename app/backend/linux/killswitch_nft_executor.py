@@ -114,20 +114,31 @@ class IsolatedNftBackend:
             if len(entries) != 1:
                 raise ValueError
             entry = entries[0]
-            return (entry["hook"], entry["policy"])
-        except (KeyError, TypeError, ValueError) as exc:
+            if (entry.get("family") != "inet" or entry.get("table") != NFT_TABLE
+                    or entry.get("name") != name
+                    or type(entry.get("prio")) is not int
+                    or entry.get("type") != "filter"):
+                raise ValueError
+            return (entry["hook"], entry["policy"], entry["prio"])
+        except (KeyError, TypeError, ValueError, AttributeError) as exc:
             raise NftSafetyError("UNTRUSTED_CHAIN_STATE") from exc
 
-    def rules(self):
-        raw = self._call(["-j", "list", "chain", "inet", NFT_TABLE, "output"])
+    def rules(self, name="output"):
+        if name not in ("output", "forward"):
+            raise NftSafetyError("Invalid rule chain")
+        raw = self._call(["-j", "list", "chain", "inet", NFT_TABLE, name])
         try:
             doc = json.loads(raw)
             entries = [x["rule"] for x in doc["nftables"]
                        if isinstance(x, dict) and "rule" in x]
-            if not isinstance(entries, list):
+            if not entries or len(entries) > 16:
+                raise ValueError
+            if any(not isinstance(x, dict) or
+                   x.get("family") != "inet" or x.get("table") != NFT_TABLE
+                   or x.get("chain") != name for x in entries):
                 raise ValueError
             return entries
-        except (KeyError, ValueError, TypeError) as exc:
+        except (KeyError, ValueError, TypeError, AttributeError) as exc:
             raise NftSafetyError("UNTRUSTED_RULE_STATE") from exc
 
     def apply(self, script):
@@ -154,6 +165,81 @@ class IsolatedNftBackend:
             self._call(["-f", str(file)])
 
 
+def _match_expr(expr, category, field, value):
+    """Narrow nft JSON comparison; other operators and wildcards are denied."""
+    if not isinstance(expr, dict) or set(expr) != {"match"}:
+        return False
+    match = expr["match"]
+    if not isinstance(match, dict) or set(match) != {"op", "left", "right"}:
+        return False
+    if match["op"] != "==" or type(match["right"]) is not type(value):
+        return False
+    left = match["left"]
+    if not isinstance(left, dict) or set(left) != {category}:
+        return False
+    attr = left[category]
+    if category == "meta":
+        return isinstance(attr, dict) and attr == {"key": field} and match["right"] == value
+    protocol, part = field
+    return (isinstance(attr, dict)
+            and attr == {"protocol": protocol, "field": part}
+            and match["right"] == value)
+
+
+def _accept_rule(rule, specs):
+    expressions = rule.get("expr") if isinstance(rule, dict) else None
+    if not isinstance(expressions, list) or len(expressions) != len(specs) + 1:
+        return False
+    if expressions[-1] != {"accept": None}:
+        return False
+    return all(_match_expr(expr, *spec) for expr, spec in zip(expressions, specs))
+
+
+def _counter_drop(rule):
+    expressions = rule.get("expr") if isinstance(rule, dict) else None
+    if not isinstance(expressions, list) or len(expressions) != 2:
+        return False
+    count, verdict = expressions
+    if not isinstance(count, dict) or set(count) != {"counter"}:
+        return False
+    data = count["counter"]
+    return (isinstance(data, dict) and
+            set(data) == {"packets", "bytes"} and
+            all(type(data[key]) is int and data[key] >= 0 for key in ("packets", "bytes"))
+            and verdict == {"drop": None})
+
+
+def verify_locked_nft_rules(approved, output, forward):
+    """Accept EXACTLY the rendered locked output/forward semantics.
+
+    An extra ACCEPT anywhere, a wrong port, a changed priority, a missing
+    DROP, masquerading, NAT, lookup, jump, goto or wildcard rejects. This
+    is a narrow prototype verifier, not whole-device leak acceptance.
+    """
+    if not isinstance(approved, contract.Approved):
+        raise NftSafetyError("Root-pinned manifest absent")
+    if not isinstance(output, list) or not isinstance(forward, list):
+        raise NftSafetyError("Nft rules must be lists")
+    if len(output) != 4 or len(forward) != 1:
+        raise NftSafetyError("Unexpected nft rule count")
+    oif = lambda interface: [("meta", "oifname", interface)]
+    nfproto = ("meta", "nfproto", "ipv4")
+    ip_peer = ("payload", ("ip", "daddr"), approved.peer_ipv4)
+    port = ("payload", (approved.transport, "dport"), approved.peer_port)
+    dhcp_sport = ("payload", ("udp", "sport"), 68)
+    dhcp_dport = ("payload", ("udp", "dport"), 67)
+    expected = (
+        oif("lo"),
+        [nfproto, *oif(approved.underlay), ip_peer, port],
+        [nfproto, *oif(approved.underlay), dhcp_sport, dhcp_dport],
+    )
+    if not all(_accept_rule(rule, specs) for rule, specs in zip(output[:3], expected)):
+        raise NftSafetyError("Output ACCEPT not exactly pinned")
+    if not _counter_drop(output[3]) or not _counter_drop(forward[0]):
+        raise NftSafetyError("Output or forward DROP missing")
+    return True
+
+
 class LockdownOnlyController:
     """Ownership-scoped state machine; NEVER unlock from untrusted evidence."""
 
@@ -174,20 +260,14 @@ class LockdownOnlyController:
         return a.tunnel, a.underlay, a.peer_ipv4, a.peer_port, a.transport
 
     def _locked_verified(self):
-        if self._backend.chain("output") != ("output", "drop"):
-            raise NftSafetyError("Output base chain is not default-DROP")
-        if self._backend.chain("forward") != ("forward", "drop"):
-            raise NftSafetyError("Forward base chain is not default-DROP")
-        rules = self._backend.rules()
-        if not isinstance(rules, list) or len(rules) > 50:
-            raise NftSafetyError("Untrusted output chain")
-        # In nft JSON, a tunnel allow rule contains meta oifname then accept.
-        # We reject ANY tunnel-accept pair and any global 'accept' if the
-        # backend cannot prove that the named interface is the intended one.
-        encoded = json.dumps(rules, sort_keys=True)
-        if self._approved.tunnel in encoded:
-            raise NftSafetyError("Tunnel allow remains in LOCKED state")
-        return True
+        if self._backend.chain("output") != ("output", "drop", -150):
+            raise NftSafetyError("Output base chain policy/priority changed")
+        if self._backend.chain("forward") != ("forward", "drop", -150):
+            raise NftSafetyError("Forward base chain policy/priority changed")
+        return verify_locked_nft_rules(
+            self._approved, self._backend.rules("output"),
+            self._backend.rules("forward")
+        )
 
     def install_lockdown(self):
         if self.state != "NEW":
