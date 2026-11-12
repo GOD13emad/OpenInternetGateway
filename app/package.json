@@ -114,6 +114,7 @@
         "curl",
         "iproute2",
         "systemd",
+        "systemd-resolved",
         "ca-certificates"
       ]
     },

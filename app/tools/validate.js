@@ -8,7 +8,7 @@ const required = [
   'backend/linux/oig-linux.sh','backend/linux/refresh_cache.py',
   'build/linux-oneclick-installer.sh', 'tools/afterAllArtifactBuild.js',
   'backend/linux/operator_profile.py','backend/linux/operator_rollback.py','backend/linux/operator_trial.py',
-  'backend/linux/operator_full_device.py',
+  'backend/linux/operator_full_device.py','backend/linux/dns_route_guard.py',
   'assets/icon.png','assets/icon.ico'
 ];
 let failures = [];

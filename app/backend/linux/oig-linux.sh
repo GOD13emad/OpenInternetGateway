@@ -144,8 +144,17 @@ recovery_unit_owned() {
   [[ " $execstart " == *" argv[]=/bin/bash $OIG_HOME/linux/oig-linux.sh ensure ; "* ]] || return 1
 }
 
+managed_dns_routing_safe() {
+  local interface="$1"
+  [[ "$interface" =~ ^(tun|tap|vpn)[A-Za-z0-9_.:-]{0,12}$ ]] || return 1
+  # The resolver is considered safe only if its effective live upstreams
+  # belong exclusively to our VPN and the DNS upstream itself routes via TUN.
+  # A poisoned-looking response is neither necessary nor sufficient proof.
+  python3 -B "$OIG_HOME/linux/dns_route_guard.py"     --managed-name "$CONN" --interface "$interface" >/dev/null 2>&1
+}
+
 json_status() {
-  local cf ip loc dns poison routes iface relay auto_state auto effective desired managed_active profile_ip profile_country probe_degraded source ipv6_leak
+  local cf ip loc dns poison routes iface relay auto_state auto effective desired managed_active profile_ip profile_country probe_degraded source ipv6_leak dns_routing
   cf="$(curl -4 --max-time 4 -s https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null || true)"
   ip="$(printf '%s\n' "$cf" | awk -F= '$1=="ip"{print $2;exit}')"
   loc="$(printf '%s\n' "$cf" | awk -F= '$1=="loc"{print $2;exit}')"
@@ -163,7 +172,9 @@ json_status() {
   fi
   routes=0
   ipv6_leak=false
+  dns_routing=false
   if [[ "$managed_active" == true ]] && managed_full_ipv4_route "$iface" "$source"; then
+    if managed_dns_routing_safe "$iface"; then dns_routing=true; fi
     routes=2
     # Preserve IPv4 route evidence for rollback even if IPv6 is unsafe.
     if ! managed_ipv6_egress_safe "$iface"; then ipv6_leak=true; fi
@@ -190,7 +201,7 @@ PY
   fi
 
   probe_degraded=false
-  if [[ -z "$loc" && "$managed_active" == true && "$routes" -ge 2 && "$ipv6_leak" == false && "$poison" == false && -n "$profile_country" ]]; then
+  if [[ -z "$loc" && "$managed_active" == true && "$routes" -ge 2 && "$ipv6_leak" == false && "$dns_routing" == true && "$poison" == false && -n "$profile_country" ]]; then
     loc="$profile_country"
     [[ -n "$ip" ]] || ip="$profile_ip"
     probe_degraded=true
@@ -212,18 +223,21 @@ PY
     auto_state="Missing"
   fi
 
-  python3 - "$ip" "$loc" "$dns" "$poison" "$routes" "$relay" "$auto" "$auto_state" "$iface" "$desired" "$managed_active" "$probe_degraded" "$ipv6_leak" <<'PY'
+  python3 - "$ip" "$loc" "$dns" "$poison" "$routes" "$relay" "$auto" "$auto_state" "$iface" "$desired" "$managed_active" "$probe_degraded" "$ipv6_leak" "$dns_routing" <<'PY'
 import json,sys
-ip,loc,dns,poison,routes,relay,auto,state,iface,desired,managed,probe_degraded,ipv6_leak=sys.argv[1:]
+ip,loc,dns,poison,routes,relay,auto,state,iface,desired,managed,probe_degraded,ipv6_leak,dns_routing=sys.argv[1:]
 dns_list=[x for x in dns.split(",") if x]
 r=int(routes or 0)
-connected=(r>=2 and managed=="true" and bool(loc) and loc!="IR" and poison=="false" and ipv6_leak=="false")
+connected=(r>=2 and managed=="true" and bool(loc) and loc!="IR"
+           and poison=="false" and ipv6_leak=="false"
+           and dns_routing=="true")
 print(json.dumps({
     "connected":connected,"ip":ip,"country":loc,"dns":dns_list,
     "poison":None if poison=="unknown" else poison=="true","fullRoutes":r,"relay":relay,
     "autoRecovery":auto=="true","autoRecoveryState":state,"interface":iface,
     "desiredState":desired,"managedTunnelActive":managed=="true",
-    "healthProbeDegraded":probe_degraded=="true", "ipv6LeakRisk":ipv6_leak=="true"
+    "healthProbeDegraded":probe_degraded=="true", "ipv6LeakRisk":ipv6_leak=="true",
+    "dnsRoutingVerified":dns_routing=="true"
 },separators=(",",":")))
 PY
 }
@@ -365,10 +379,16 @@ preflight_one() {
     [[ "$actual" == "$expected" ]] || return 11
   fi
 
-  delete_connection_name "$PREFLIGHT_CONN"
   local import_name imported uuid before_route before_dns after_route after_dns
   import_name="$(basename "$profile" .ovpn)"
-  delete_connection_name "$import_name"
+  # A profile basename is NOT an ownership proof. Never delete an existing
+  # user NM connection which happens to have the same filename-derived name.
+  local existing_names
+  existing_names="$(nmcli -t -f NAME connection show 2>/dev/null)" || return 19
+  if printf '%s\n' "$existing_names" | grep -Fxq -- "$import_name"; then
+    return 19
+  fi
+  delete_connection_name "$PREFLIGHT_CONN"
   before_route="$(ip -4 route get 1.1.1.1 2>/dev/null | head -1 || true)"
   before_dns="$(dns_server_fingerprint)"
 
@@ -443,16 +463,33 @@ connect_one() {
   local previous_state="$STATE/current-linux-profile.before-connect.json"
   if [[ -f "$state_file" ]]; then cp -f "$state_file" "$previous_state"; else rm -f "$previous_state"; fi
 
-  delete_named_connections
   local import_name imported uuid
   import_name="$(basename "$profile" .ovpn)"
-  delete_connection_name "$import_name"
-
+  # The app owns its saved OIG-VPN-LIVE profile, but a filename-derived name
+  # can collide with an unrelated saved VPN. Verify before touching ANY
+  # active connection or importing the candidate.
+  local existing_names
+  existing_names="$(nmcli -t -f NAME connection show 2>/dev/null)" || return 19
+  if printf '%s\n' "$existing_names" | grep -Fxq -- "$import_name"; then
+    return 19
+  fi
+  delete_named_connections
   imported="$(nmcli connection import type openvpn file "$profile" 2>&1)" || return 12
   uuid="$(nmcli -t -f UUID,NAME connection show | awk -F: -v n="$import_name" '$2==n {print $1; exit}')"
   [[ -n "$uuid" ]] || return 12
 
-  nmcli connection modify uuid "$uuid" connection.id "$CONN" connection.autoconnect no ipv6.method disabled ipv4.never-default no
+  # DNS must be exclusive to the OIG VPN. Do not modify the physical
+  # connection's resolver; NM owns this per-link policy and restores it on
+  # disconnect. The read-only status gate verifies its effective routing.
+  if ! nmcli connection modify uuid "$uuid" \
+      connection.id "$CONN" connection.autoconnect no \
+      ipv6.method disabled ipv6.ignore-auto-dns yes \
+      ipv4.never-default no ipv4.ignore-auto-dns yes \
+      ipv4.dns 1.1.1.1 ipv4.dns-search '~.' \
+      ipv4.dns-priority -2147483647; then
+    nmcli connection delete uuid "$uuid" >/dev/null 2>&1 || true
+    return 12
+  fi
   if ! nmcli -w 30 connection up uuid "$uuid" >/dev/null 2>&1; then
     nmcli connection delete uuid "$uuid" >/dev/null 2>&1 || true
     return 13
@@ -502,6 +539,38 @@ record_failure() {
   python3 "$FACTORY_PY" failure --common "$OIG_COMMON" --sha "$sha" --host "$host" --ip "$ipaddr" --port "$port" --reason "$reason" >/dev/null 2>&1 || true
 }
 
+preconnect_no_foreign_nm_vpn() {
+  local inventory
+  inventory="$(nmcli -t -f NAME,TYPE connection show --active 2>/dev/null)" || return 1
+  python3 -B -c '
+import sys
+owned=set(sys.argv[1:5])
+for line in sys.argv[5].splitlines():
+    name,sep,kind=line.rpartition(":")
+    if not sep or not name or not kind:
+        sys.exit(1)
+    name=name.replace(r"\:",":")
+    if kind.strip().lower() in {"vpn","tun","wireguard","ip-tunnel"} and name not in owned:
+        sys.exit(1)
+' "$CONN" "$PREFLIGHT_CONN" "$LEGACY_CONN" "$CONSOLE_CONN" "$inventory"
+}
+preconnect_public_ipv6_absent() {
+  # No VPN activation is safe while a physical/policy public IPv6 route
+  # can bypass this app's IPv4 OpenVPN. Read-only check across ALL tables,
+  # plus representative effective IPv6 routes, shared with pinned QA gate.
+  python3 -B - "$OIG_HOME/linux" <<'PYIPV6'
+import sys
+sys.path.insert(0,sys.argv[1])
+try:
+    from operator_full_device import public_ipv6_route_present
+    sys.exit(1 if public_ipv6_route_present() else 0)
+except Exception:
+    # A missing helper, unavailable route inventory or permission failure is
+    # not proof of IPv6 containment; never activate a new tunnel.
+    sys.exit(1)
+PYIPV6
+}
+
 connect_gateway() {
   local exact_sha="${1:-}"
   if [[ -z "$exact_sha" ]] && healthy; then
@@ -515,6 +584,14 @@ connect_gateway() {
   command -v curl >/dev/null
   command -v python3 >/dev/null
 
+  if ! preconnect_no_foreign_nm_vpn; then
+    echo "Open Internet Gateway refused Connect: an independent VPN/tunnel is active or its inventory is unavailable." >&2
+    return 24
+  fi
+  if ! preconnect_public_ipv6_absent; then
+    echo "Open Internet Gateway refused Connect: public IPv6 route or unverified IPv6 inventory (no IPv6 kill-switch installed)." >&2
+    return 23
+  fi
   python3 "$FACTORY_PY" ensure --common "$OIG_COMMON" >/dev/null
   [[ -f "$OIG_COMMON/runtime/udp-cache/index.json" ]] || { echo "Config pool index missing" >&2; return 20; }
 
@@ -732,6 +809,10 @@ case "$action" in
     fi
     # Relay switching is not a user disconnect: preserve desired=on before
     # teardown so interruption cannot strand the gateway intent at off.
+    if ! preconnect_no_foreign_nm_vpn || ! preconnect_public_ipv6_absent; then
+      echo "Refusing relay switch: independent VPN or public/unknown IPv6 route; current tunnel preserved." >&2
+      exit 24
+    fi
     set_desired on "connect-profile"
     teardown_gateway >/dev/null 2>&1 || true
     connect_gateway "$2"

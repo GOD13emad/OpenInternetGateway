@@ -15,11 +15,18 @@ dpkg-deb -x "$deb" "$scratch/image"
 exe="$scratch/image/opt/open-internet-gateway/open-internet-gateway"
 helper="$scratch/image/opt/open-internet-gateway/chrome-sandbox"
 ipv6_guard="$scratch/image/opt/open-internet-gateway/resources/backend/linux/ipv6_route_guard.py"
+dns_guard="$scratch/image/opt/open-internet-gateway/resources/backend/linux/dns_route_guard.py"
 desktop="$scratch/image/usr/share/applications/OpenInternetGateway.desktop"
 icon="$scratch/image/usr/share/icons/hicolor/512x512/apps/open-internet-gateway.png"
 postrm="$scratch/control/postrm"
 [[ -f "$exe" && -x "$exe" && ! -L "$exe" && -f "$helper" && ! -L "$helper" && -f "$desktop" && ! -L "$desktop" && -s "$icon" && ! -L "$icon" && -f "$postrm" && -x "$postrm" ]] || { echo INSTALLED_LAYOUT_MISSING >&2; exit 75; }
 [[ -s "$ipv6_guard" && ! -L "$ipv6_guard" ]] || { echo PACKAGED_IPV6_ROUTE_GUARD_MISSING >&2; exit 80; }
+[[ -s "$dns_guard" && ! -L "$dns_guard" ]] || { echo PACKAGED_DNS_ROUTE_GUARD_MISSING >&2; exit 80; }
+python3 -B - "$dns_guard" <<'PYDNS'
+import ast, pathlib, sys
+ast.parse(pathlib.Path(sys.argv[1]).read_text())
+print("PACKAGED_DNS_ROUTE_GUARD_AST_PASS")
+PYDNS
 printf 'local ::1 dev lo table local\nfe80::/64 dev enp1s0\n' |
   python3 -B "$ipv6_guard" tun0 || { echo PACKAGED_IPV6_ROUTE_GUARD_REJECTED_SAFE_LOCAL >&2; exit 80; }
 if printf '2001:4860:4860::/48 dev enp1s0 table 123\n' | python3 -B "$ipv6_guard" tun0; then
