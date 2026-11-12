@@ -27,7 +27,7 @@ if [[ "${1:-}" == '--inner' ]]; then
   export DEBIAN_FRONTEND=noninteractive
   apt-get update -qq >/out/apt-setup.log 2>&1
   apt-get install -y -qq --no-install-recommends \
-    python3 ca-certificates iproute2 dbus network-manager network-manager-openvpn openvpn curl \
+    python3 ca-certificates iproute2 dbus network-manager network-manager-openvpn openvpn curl dnsutils \
     >>/out/apt-setup.log 2>&1
   mkdir -p /run/dbus
   dbus-daemon --system --fork
@@ -174,6 +174,7 @@ d=json.load(open(sys.argv[1],encoding='utf-8'))
 assert d.get('pass') is True
 assert d.get('nativeNmAuthenticated') is True
 assert d.get('fullIPv4RoutesOwned') is True
+assert d.get('explicitResolverDnsViaTun') is True
 assert d.get('tunnelBoundHttpsSucceeded') is True
 assert d.get('containerNetworkRestored') is True
 assert d.get('temporaryProfileAndPEMCleanupVerified') is True

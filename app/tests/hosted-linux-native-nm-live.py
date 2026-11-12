@@ -282,6 +282,21 @@ def main():
                 verify_ipv6_route_inventory(ipv6_routes.decode("utf8", "replace"), owned=tunnel)
                 out["fullIPv4RoutesOwned"] = True
                 out["ipv6RouteInventoryScoped"] = True
+                stage = "TUN_BOUND_EXPLICIT_DNS"
+                # DNS proof is limited to an explicit resolver. The container
+                # still runs NM with dns=none; no system-resolver or universal
+                # leak containment is claimed or altered.
+                response = cmd(["dig", "-4", "+time=4", "+tries=1",
+                                "+short", "@1.1.1.1", "example.com", "A"],
+                               timeout=9)
+                answers = response.stdout.decode("ascii", "replace").splitlines()
+                if (response.returncode or len(response.stdout) > 2048
+                        or not answers or not all(
+                            ipaddress.ip_address(address).version == 4
+                            and ipaddress.ip_address(address).is_global
+                            for address in answers)):
+                    fail_stage("EXPLICIT_RESOLVER_VIA_TUN_NOT_VERIFIED")
+                out["explicitResolverDnsViaTun"] = True
             else:
                 # Scoped mode owns only one temporary /32 route, no default.
                 probe_prefix = probe_ip + "/32"
