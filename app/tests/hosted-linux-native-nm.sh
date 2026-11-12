@@ -27,7 +27,7 @@ if [[ "${1:-}" == '--inner' ]]; then
   export DEBIAN_FRONTEND=noninteractive
   apt-get update -qq >/out/apt-setup.log 2>&1
   apt-get install -y -qq --no-install-recommends \
-    python3 ca-certificates iproute2 dbus network-manager network-manager-openvpn openvpn \
+    python3 ca-certificates iproute2 dbus network-manager network-manager-openvpn openvpn curl \
     >>/out/apt-setup.log 2>&1
   mkdir -p /run/dbus
   dbus-daemon --system --fork
@@ -47,10 +47,12 @@ NMCONF
     # The container creates its private receipt as 0600/root. Transfer only
     # the artifact's ownership to the runner user for actions/upload-artifact.
     # Never loosen permissions or mount owner-host sensitive directories.
-    if [[ -f /out/oig-hosted-native-nm.json ]]; then
-      chown "${OIG_RUNNER_UID:?}:${OIG_RUNNER_GID:?}" /out/oig-hosted-native-nm.json
-      chmod 0600 /out/oig-hosted-native-nm.json
-    fi
+    for receipt in /out/oig-hosted-native-nm.json /out/oig-hosted-native-nm-live.json; do
+      if [[ -f "$receipt" ]]; then
+        chown "${OIG_RUNNER_UID:?}:${OIG_RUNNER_GID:?}" "$receipt"
+        chmod 0600 "$receipt"
+      fi
+    done
     kill "$nm_pid" 2>/dev/null || true
   }
   trap finish_inner EXIT
@@ -68,6 +70,9 @@ NMCONF
     exit 68
   }
   python3 -B /work/app/tests/hosted-linux-native-nm.py --native-import
+  # Only the disposable container progresses to real NM/OpenVPN activation.
+  # The native live receipt is deliberately separate from the import receipt.
+  python3 -B /work/app/tests/hosted-linux-native-nm-live.py --native-scoped-live
   exit 0
 fi
 
@@ -104,3 +109,18 @@ assert d.get('certificateArtifactsRemoved') is True
 assert d.get('networkActivated') is False
 print('HOSTED_DISPOSABLE_NATIVE_NETWORKMANAGER_IMPORT_TRUST_ROLLBACK_PASS')
 PY
+
+test -s "$out/oig-hosted-native-nm-live.json"
+python3 -B - "$out/oig-hosted-native-nm-live.json" <<'PYLIVE'
+import json,sys
+d=json.load(open(sys.argv[1],encoding='utf-8'))
+assert d.get('pass') is True
+assert d.get('nativeNmAuthenticated') is True
+assert d.get('tunnelBoundHttpsSucceeded') is True
+assert d.get('containerNetworkRestored') is True
+assert d.get('temporaryProfileAndPEMCleanupVerified') is True
+assert d.get('fullDeviceTunnelVerified') is False
+assert d.get('systemDnsLeakContainmentVerified') is False
+assert d.get('productionKillSwitchVerified') is False
+print('HOSTED_DISPOSABLE_NATIVE_NM_SCOPED_LIVE_TUN_AND_ROLLBACK_PASS')
+PYLIVE

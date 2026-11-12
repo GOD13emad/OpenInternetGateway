@@ -1,0 +1,285 @@
+#!/usr/bin/env python3
+"""Hosted-only NetworkManager OpenVPN real transport acceptance.
+
+Runs ONLY as root in the disposable GitHub-hosted Docker bridge namespace.
+Authenticates a pinned public OpenVPN peer through the actual NM OpenVPN plugin,
+binds a small HTTPS probe to the observed TUN, and verifies cleanup.
+This is an isolated *scoped* transport test, NOT product full-device/leak acceptance.
+No owner network or credentials are accessed.
+"""
+import hashlib
+import importlib.util
+import ipaddress
+import json
+import os
+from pathlib import Path
+import re
+import socket
+import subprocess
+import sys
+import tempfile
+
+HERE = Path(__file__).resolve().parent
+BACKEND = HERE.parent / "backend" / "linux"
+RECEIPT = Path("/out/oig-hosted-native-nm-live.json")
+
+
+def check_scope():
+    if (sys.argv[1:] != ["--native-scoped-live"]
+            or os.geteuid() != 0
+            or os.environ.get("OIG_HOSTED_CONTAINER") != "1"
+            or os.environ.get("GITHUB_ACTIONS") != "true"
+            or os.environ.get("RUNNER_ENVIRONMENT") != "github-hosted"
+            or os.environ.get("GITHUB_REPOSITORY") != "GOD13emad/OpenInternetGateway"
+            or os.environ.get("GITHUB_EVENT_NAME") != "pull_request"
+            or not re.fullmatch(r"[0-9]+", os.environ.get("GITHUB_RUN_ID", ""))
+            or not Path("/.dockerenv").exists()
+            or not Path("/work/app/backend/linux/operator_profile.py").is_file()):
+        raise SystemExit("REFUSED: owner host or non-disposable runner")
+
+
+def cmd(argv, timeout=15, *, pass_fds=()):
+    return subprocess.run(argv, capture_output=True, check=False,
+                          timeout=timeout, pass_fds=pass_fds,
+                          env={**os.environ, "LC_ALL": "C", "LANG": "C"})
+
+
+def required(argv, *, timeout=15, pass_fds=()):
+    result = cmd(argv, timeout, pass_fds=pass_fds)
+    if result.returncode:
+        raise RuntimeError("CONTROL_STEP_FAILED")
+    return result.stdout
+
+
+def snapshot():
+    entries = []
+    for argv in (["ip", "-4", "route", "show", "table", "all"],
+                 ["ip", "-6", "route", "show", "table", "all"]):
+        output = required(argv, timeout=8)
+        if len(output) > 30000:
+            raise RuntimeError("ROUTE_SNAPSHOT_OVERSIZE")
+        entries.append(hashlib.sha256(output).hexdigest())
+    entries.append(hashlib.sha256(Path("/etc/resolv.conf").read_bytes()).hexdigest())
+    return entries
+
+
+def put_receipt(data):
+    RECEIPT.parent.mkdir(parents=True, exist_ok=True)
+    payload = (json.dumps(data, sort_keys=True) + "\n").encode()
+    fd = os.open(RECEIPT, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    with os.fdopen(fd, "wb") as writer:
+        writer.write(payload)
+        writer.flush()
+        os.fsync(writer.fileno())
+    print("HOSTED_NATIVE_NM_SCOPED_LIVE_RECEIPT=" + json.dumps(data, sort_keys=True))
+
+
+def fail_stage(label):
+    raise RuntimeError(label)
+
+
+def main():
+    check_scope()
+    sys.path.insert(0, str(BACKEND))
+    import operator_profile
+    import operator_trial
+
+    spec = importlib.util.spec_from_file_location(
+        "hosted_provider", HERE / "hosted-linux-provider-data-plane.py")
+    provider = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(provider)
+
+    out = {
+        "schema": "oig-hosted-native-networkmanager-scoped-live-v1",
+        "scope": "Disposable Docker netns, real OIG native NM OpenVPN transport; no owner VPN",
+        "fullDeviceTunnelVerified": False,
+        "systemDnsLeakContainmentVerified": False,
+        "productionKillSwitchVerified": False,
+        "pass": False
+    }
+    stage = "BASELINE"
+    stem = None
+    checked = None
+    uuid = None
+    before = None
+    authenticated = False
+    owned_probe_route = None
+    try:
+        # Host preconditions are checked before any provider secret is fetched.
+        if not Path("/dev/net/tun").exists():
+            fail_stage("TUN_UNAVAILABLE")
+        before = snapshot()
+        baseline = operator_profile._connection_uuids()
+        if any(
+            "vpn" in line.lower()
+            for line in required(["nmcli", "-t", "-f", "TYPE",
+                                  "connection", "show", "--active"],
+                                 timeout=8).decode("utf8", "replace").splitlines()
+        ):
+            fail_stage("INDEPENDENT_CONTAINER_VPN_ACTIVE")
+
+        stage = "TRUSTED_PROFILE"
+        raw_profile, profile_sha = provider.official_profile()
+        public_pass, _ = provider.official_login()
+        public_targets = {
+            item[4][0] for item in socket.getaddrinfo(
+                "www.cloudflare.com", 443, socket.AF_INET, socket.SOCK_STREAM)
+            if ipaddress.ip_address(item[4][0]).is_global
+        }
+        if not public_targets:
+            fail_stage("NO_TRUSTED_HTTPS_PROBE_TARGET")
+        probe_ip = sorted(public_targets)[0]
+        with tempfile.TemporaryDirectory(prefix="oig-native-live-") as folder:
+            os.chmod(folder, 0o700)
+            stem = "oig-native-" + os.urandom(12).hex()
+            source = Path(folder) / (stem + ".ovpn")
+            source.write_text(raw_profile, encoding="utf8")
+            source.chmod(0o600)
+            checked, endpoint, proto = operator_profile.load_and_check(
+                source, provider.EXPECTED_CA, provider.EXPECTED_CN)
+            source.write_bytes(checked)
+            stage = "NM_IMPORT"
+            response = operator_profile._run_nmcli(
+                "connection", "import", "--temporary", "type", "openvpn",
+                "file", str(source), timeout=12)
+            after = operator_profile._connection_uuids()
+            additions = after - baseline
+            if len(additions) != 1:
+                fail_stage("NM_IMPORT_UUID_AMBIGUOUS")
+            uuid = next(iter(additions))
+            if response.returncode:
+                fail_stage("NM_IMPORT_NONZERO")
+            stage = "TRUST_PRESERVATION"
+            operator_profile.verify_nm_import(
+                uuid, stem, checked, endpoint, proto,
+                provider.EXPECTED_CA, provider.EXPECTED_CN)
+
+            # Scoped until native transport and teardown are proven. Do NOT
+            # install a default route or change physical DNS on this gate.
+            stage = "SCOPED_POLICY"
+            required(["nmcli", "--wait", "5", "connection", "modify",
+                      "--temporary", "uuid", uuid,
+                      "connection.autoconnect", "no",
+                      "vpn.user-name", "vpnbook",
+                      "ipv4.never-default", "yes",
+                      "ipv6.never-default", "yes",
+                      "ipv4.ignore-auto-dns", "yes",
+                      "ipv6.ignore-auto-dns", "yes",
+                      "ipv4.ignore-auto-routes", "yes",
+                      "ipv6.ignore-auto-routes", "yes"], timeout=12)
+            operator_profile.verify_nm_import(
+                uuid, stem, checked, endpoint, proto,
+                provider.EXPECTED_CA, provider.EXPECTED_CN)
+            stage = "NM_AUTHENTICATED_ACTIVATION"
+            fd = operator_trial.make_password_fd(public_pass)
+            public_pass = None
+            try:
+                required(["nmcli", "--wait", "75", "connection", "up",
+                          "uuid", uuid, "passwd-file", f"/proc/self/fd/{fd}"],
+                         timeout=83, pass_fds=(fd,))
+            finally:
+                os.close(fd)
+            active = required(["nmcli", "-t", "-f", "UUID",
+                               "connection", "show", "--active"], timeout=8)
+            if uuid not in active.decode("utf8", "replace").lower().splitlines():
+                fail_stage("NM_ACTIVE_UUID_NOT_FOUND")
+            authenticated = True
+            out["trustedProfileAccepted"] = True
+            out["profileSha256"] = profile_sha
+            out["nativeNmAuthenticated"] = True
+            out["pinnedPeerCAAndCNConfigured"] = True
+
+            stage = "TUN_BOUND_DATA_PLANE"
+            result = cmd(["ip", "-j", "-4", "address", "show"], timeout=8)
+            if result.returncode:
+                fail_stage("TUN_INTERFACE_OBSERVATION_FAILED")
+            interfaces = json.loads(result.stdout)
+            candidates = [x["ifname"] for x in interfaces
+                          if re.fullmatch(r"(?:tun|vpn)[A-Za-z0-9_.-]*", x.get("ifname", ""))
+                          and any(i.get("family") == "inet" for i in x.get("addr_info", []))]
+            if len(candidates) != 1:
+                fail_stage("TUN_INTERFACE_AMBIGUOUS")
+            tunnel = candidates[0]
+            out["ownedTunPresent"] = True
+            # The test installs only ONE exact /32 route, in the disposable
+            # Docker namespace, for the bound HTTPS target. It must be gone
+            # before comparing the namespace with its original snapshot.
+            probe_prefix = probe_ip + "/32"
+            if required(["ip", "-4", "route", "show", "exact", probe_prefix], timeout=7).strip():
+                fail_stage("PROBE_ROUTE_ALREADY_PRESENT")
+            required(["ip", "-4", "route", "add", probe_prefix, "dev", tunnel], timeout=7)
+            owned_probe_route = (probe_prefix, tunnel)
+            effective = required(["ip", "-4", "route", "get", probe_ip], timeout=7)
+            if not re.search(rb"\bdev\s+" + re.escape(tunnel.encode()) + rb"\b", effective):
+                fail_stage("PROBE_ROUTE_NOT_TUNNEL_OWNED")
+            http = cmd(["curl", "-4", "--resolve", "www.cloudflare.com:443:" + probe_ip,
+                        "--interface", tunnel, "--connect-timeout", "9",
+                        "--max-time", "24", "--fail", "--silent", "--show-error",
+                        "https://www.cloudflare.com/cdn-cgi/trace"], timeout=28)
+            if http.returncode or len(http.stdout) > 4000:
+                fail_stage("TUN_BOUND_HTTPS_UNAVAILABLE")
+            facts = dict(line.split("=", 1) for line in http.stdout.decode(
+                "ascii", "replace").splitlines() if "=" in line)
+            address = ipaddress.ip_address(facts.get("ip", "127.0.0.1"))
+            if address.version != 4 or not address.is_global:
+                fail_stage("TUN_BOUND_PUBLIC_IPV4_UNVERIFIED")
+            out["tunnelBoundHttpsSucceeded"] = True
+            out["tunneledIPv4PublicEgress"] = True
+            out["serverIdentityVerifiedByPinnedNMProfile"] = True
+    except Exception as exc:
+        out["failureClass"] = type(exc).__name__
+        out["failureStage"] = stage
+        out["pass"] = False
+    finally:
+        # All mutations belong only to the new UUID and its unique PEM namespace.
+        # On error, leave no active NM VPN while the bounded Docker namespace lives.
+        cleanup_ok = True
+        if owned_probe_route:
+            prefix, interface = owned_probe_route
+            try:
+                deleted_route = cmd(["ip", "-4", "route", "del", prefix,
+                                     "dev", interface], timeout=7)
+                if deleted_route.returncode:
+                    cleanup_ok = False
+            except Exception:
+                cleanup_ok = False
+        if uuid:
+            try:
+                identity = operator_profile._run_nmcli(
+                    "-g", "connection.id", "connection", "show", "uuid", uuid)
+                if identity.returncode == 0 and identity.stdout.decode(
+                    "utf8", "replace").strip() == stem:
+                    operator_profile._run_nmcli(
+                        "connection", "down", "uuid", uuid, timeout=12)
+                    removed = operator_profile._run_nmcli(
+                        "connection", "delete", "uuid", uuid, timeout=12)
+                    if removed.returncode:
+                        cleanup_ok = False
+                elif identity.returncode == 0:
+                    cleanup_ok = False
+            except Exception:
+                cleanup_ok = False
+        if stem and checked:
+            try:
+                operator_profile.cleanup_nm_import_artifacts(stem, checked)
+            except Exception:
+                cleanup_ok = False
+        if uuid:
+            try:
+                cleanup_ok = cleanup_ok and uuid not in operator_profile._connection_uuids()
+            except Exception:
+                cleanup_ok = False
+        out["temporaryProfileAndPEMCleanupVerified"] = cleanup_ok
+        try:
+            out["containerNetworkRestored"] = before is not None and before == snapshot()
+        except Exception:
+            out["containerNetworkRestored"] = False
+        out["pass"] = (authenticated and out.get("tunnelBoundHttpsSucceeded") is True
+                       and out["temporaryProfileAndPEMCleanupVerified"]
+                       and out["containerNetworkRestored"])
+        put_receipt(out)
+    return 0 if out["pass"] else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -6,6 +6,7 @@ on:
       - '.github/workflows/hosted-linux-native-networkmanager.yml'
       - 'app/tests/hosted-linux-native-nm.py'
       - 'app/tests/hosted-linux-native-nm.sh'
+      - 'app/tests/hosted-linux-native-nm-live.py'
       - 'app/tests/hosted-linux-provider-data-plane.py'
       - 'app/backend/linux/operator_profile.py'
       - 'app/backend/linux/operator_full_device.py'
@@ -39,6 +40,7 @@ jobs:
           python3 -B - <<'PY'
           import ast,pathlib
           ast.parse(pathlib.Path('app/tests/hosted-linux-native-nm.py').read_text())
+          ast.parse(pathlib.Path('app/tests/hosted-linux-native-nm-live.py').read_text())
           print('DISPOSABLE_NATIVE_NM_IMPORT_AST_PASS')
           PY
           set +e
@@ -47,8 +49,15 @@ jobs:
           set -e
           test "$code" -ne 0
           test "$result" = "REFUSED: owner host or non-disposable runner"
+          set +e
+          live_result="$(env -u GITHUB_ACTIONS -u RUNNER_ENVIRONMENT -u GITHUB_REPOSITORY \
+            python3 -B app/tests/hosted-linux-native-nm-live.py --native-scoped-live 2>&1)"
+          live_code=$?
+          set -e
+          test "$live_code" -ne 0
+          test "$live_result" = "REFUSED: owner host or non-disposable runner"
           echo 'OWNER_HOST_REFUSED=PASS'
-      - name: Real OIG NetworkManager plugin import and pinned CA/CN in isolated Docker netns
+      - name: Real OIG NetworkManager import plus scoped live OpenVPN TUN in isolated Docker netns
         shell: bash
         run: |
           set -euo pipefail
@@ -60,6 +69,8 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: linux-native-networkmanager-import-receipt
-          path: ${{ runner.temp }}/oig-hosted-nm/oig-hosted-native-nm.json
+          path: |
+            ${{ runner.temp }}/oig-hosted-nm/oig-hosted-native-nm.json
+            ${{ runner.temp }}/oig-hosted-nm/oig-hosted-native-nm-live.json
           if-no-files-found: warn
           retention-days: 7
