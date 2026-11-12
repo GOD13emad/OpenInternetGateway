@@ -36,6 +36,11 @@ if [[ "${1:-}" == '--inner' ]]; then
 [main]
 plugins=keyfile
 dns=none
+# Ubuntu's distribution keyfile policy can mark *all* non-WiFi devices
+# strictly unmanaged; unlike device.managed, it cannot be overridden by
+# nmcli. Scope it to ONLY the Docker underlay in this disposable namespace.
+[keyfile]
+unmanaged-devices=interface-name:eth0
 [device-oig-container-underlay]
 match-device=interface-name:eth0
 managed=0
@@ -72,6 +77,10 @@ NMCONF
     echo 'HOSTED_DISPOSABLE_NM_SERVICE_NOT_AVAILABLE' >&2
     exit 68
   }
+  # Ensure the fresh, disposable NM instance is not disabled by a
+  # distribution networking state file; physical owner hosts never run this.
+  nmcli networking on >/out/nm-networking-state.log 2>&1
+  test "$(nmcli networking)" = enabled
   # A native VPN connection needs a NetworkManager-owned *active base*
   # interface. Docker eth0 stays unmanaged to preserve the runner's bridge
   # underlay; a disposable dummy with a documentation-only /30 is used as the
