@@ -190,6 +190,73 @@ def public_trace(ns, interface=None):
     ipaddress.IPv4Address(values['ip'])
     return {'ip': values['ip'], 'loc': values.get('loc','')}
 
+
+def verify_dns_route_owned(route, resolver='1.1.1.1'):
+    """Refuse a configured DNS resolver that can egress outside owned TUN."""
+    address = ipaddress.ip_address(resolver)
+    if address.version != 4 or not address.is_global:
+        raise RuntimeError('Isolated DNS resolver must be a public IPv4 address')
+    if not re.search(r'\bdev\s+tun1(?:\s|$)', route) or not re.search(r'\bsrc\s+\d+\.\d+\.\d+\.\d+(?:\s|$)', route):
+        raise RuntimeError('Configured DNS resolver route is not owned by TUN')
+    return True
+
+
+def verify_ipv6_route_inventory(routes):
+    """Reject every non-local IPv6 route not owned by the test TUN, including policy tables."""
+    for line in routes.splitlines():
+        tokens = line.split()
+        if not tokens:
+            continue
+        if tokens[0] in ('unreachable', 'prohibit', 'blackhole', 'throw'):
+            continue
+        destination = tokens[1] if tokens[0] in ('local', 'anycast', 'multicast') and len(tokens) > 1 else tokens[0]
+        try:
+            prefix = ipaddress.ip_network('::/0' if destination == 'default' else destination, strict=False)
+        except ValueError as exc:
+            raise RuntimeError('IPv6 route inventory has an unrecognized prefix') from exc
+        if prefix.version != 6:
+            raise RuntimeError('Non-IPv6 entry in IPv6 routing inventory')
+        if prefix.is_link_local or prefix.is_multicast or prefix.is_loopback:
+            continue
+        match = re.search(r'\bdev\s+([A-Za-z0-9_.:-]+)(?:\s|$)', line)
+        if not match or match.group(1) != 'tun1':
+            raise RuntimeError('Foreign global or private IPv6 route remains outside TUN')
+    return True
+
+
+def offline_leak_guard_regression():
+    safe = 'local ::1 dev lo table local\nfe80::/64 dev guest0 proto kernel\nff00::/8 dev guest0\nunreachable default dev lo\n'
+    assert verify_ipv6_route_inventory(safe)
+    assert verify_ipv6_route_inventory(safe + '2001:4860:1::/48 dev tun1\n')
+    assert verify_dns_route_owned('1.1.1.1 dev tun1 src 10.8.0.2 uid 1000')
+    dangerous = (
+        'default via fe80::1 dev guest0',
+        '2001:4860:4860::/48 dev guest0 table 123',
+        'fc00::/7 dev guest0',
+        'local 2001:4860::2 dev lo table local',
+        'unknown-token-prefix dev guest0',
+    )
+    for route in dangerous:
+        try:
+            verify_ipv6_route_inventory(safe + route + '\n')
+        except RuntimeError:
+            pass
+        else:
+            raise RuntimeError('Fail-closed IPv6 leak guard accepted foreign route')
+    for route, resolver in (
+        ('1.1.1.1 via 10.243.254.1 dev guest0 src 10.243.254.2', '1.1.1.1'),
+        ('1.1.1.1 dev tun1 src 10.8.0.2', '127.0.0.53'),
+        ('1.1.1.1 dev tun1', '1.1.1.1'),
+    ):
+        try:
+            verify_dns_route_owned(route, resolver)
+        except RuntimeError:
+            pass
+        else:
+            raise RuntimeError('Fail-closed DNS leak guard accepted bypass or ambiguous source')
+    print('HOSTED_LINUX_OFFLINE_DNS_IPV6_ROUTE_LEAK_NEGATIVE_PASS')
+
+
 class Trial:
     def __init__(self, scratch, receipt):
         suffix = str(os.getpid() % 100000)
@@ -247,10 +314,10 @@ class Trial:
         # netns-local resolver file bind mount, never replaces the runner host DNS.
         nsdir = Path('/etc/netns') / self.ns
         nsdir.mkdir(parents=True, exist_ok=False)
-        resolver = Path('/etc/resolv.conf').read_text()
-        nameservers = re.findall(r'(?m)^\s*nameserver\s+(\S+)', resolver)
-        external = [i for i in nameservers if ':' not in i and not i.startswith('127.')]
-        (nsdir/'resolv.conf').write_text('nameserver ' + (external[0] if external else '1.1.1.1') + '\n')
+        # Explicit public test resolver. This file is bind-mounted only into
+        # ip netns exec; it never edits the owner/runner /etc/resolv.conf.
+        # The real DNS path is verified through the connected TUN below.
+        (nsdir/'resolv.conf').write_text('nameserver 1.1.1.1\n')
         # Pin DNS once via the runner host; OpenVPN still verifies the actual peer cert.
         addr = socket.getaddrinfo(ENDPOINT, 443, family=socket.AF_INET,
                                   type=socket.SOCK_STREAM)[0][4][0]
@@ -296,21 +363,42 @@ class Trial:
         self.receipt['route_tunnel_two_destinations'] = route
         if not route:
             raise RuntimeError('Two representative IPv4 destinations not routed via TUN')
-        self.receipt['ipv6_no_external_default'] = \
-            not bool(sh(['ip','-n',self.ns,'-6','route','show','default'],check=False))
-        if not self.receipt['ipv6_no_external_default']:
-            raise RuntimeError('Unproven native IPv6 default route in isolated namespace')
+        # A clean default alone is insufficient: a foreign specific route or
+        # policy-routing table can leak IPv6 while both default probes pass.
+        ipv6_routes = self.ns_run('ip','-6','route','show','table','all')
+        self.receipt['ipv6_no_foreign_routes_all_tables'] = verify_ipv6_route_inventory(ipv6_routes)
+        for address in ('2606:4700:4700::1111', '2001:4860:4860::8888'):
+            check = subprocess.run(['ip','netns','exec',self.ns,'ip','-6','route','get',address],
+                                   text=True,capture_output=True,timeout=8)
+            if check.returncode != 0:
+                if not re.search(r'Network is unreachable|No route to host',check.stderr):
+                    raise RuntimeError('IPv6 route lookup failed without proved unreachable state')
+            elif not re.search(r'\bdev\s+tun1(?:\s|$)',check.stdout) and not check.stdout.startswith(
+                    ('unreachable ', 'prohibit ', 'blackhole ')):
+                raise RuntimeError('IPv6 probe has foreign effective egress route')
+        self.receipt['ipv6_representative_destinations_no_foreign_egress'] = True
+        resolver = Path('/etc/netns') / self.ns / 'resolv.conf'
+        contents = resolver.read_text(encoding='ascii')
+        effective_resolver = self.ns_run('cat','/etc/resolv.conf')
+        if contents.strip() != 'nameserver 1.1.1.1' or effective_resolver != contents.strip():
+            raise RuntimeError('Isolated DNS resolver was unexpectedly replaced or not mounted')
+        self.receipt['namespace_resolver_effective'] = True
+        self.receipt['configured_dns_route_tunnel_owned'] = verify_dns_route_owned(
+            self.ns_run('ip','-4','route','get','1.1.1.1'))
         exit_trace = public_trace(self.ns, 'tun1')
         self.receipt['vpn_egress'] = exit_trace
         if exit_trace['loc'] == 'IR':
             raise RuntimeError('VPN egress unexpectedly located in IR')
-        # DNS query is explicit 1.1.1.1 through the active tunnel route.
-        dns = self.ns_run('dig','+short','+time=4','+tries=1','@1.1.1.1','dns.google','A',timeout=10)
+        # No @server override: dig reads the netns-owned /etc/resolv.conf.
+        # A passing explicit @1.1.1.1 test alone would not validate normal
+        # resolver behavior. Recheck its effective route after DNS execution.
+        dns = self.ns_run('dig','+short','+time=4','+tries=1','dns.google','A',timeout=10)
         addresses = [x for x in dns.splitlines() if re.fullmatch(r'\d+\.\d+\.\d+\.\d+', x)]
-        self.receipt['explicit_dns_clean'] = ('8.8.8.8' in addresses and
-                                              '10.10.34.35' not in addresses and self.route_is_tunnel())
-        if not self.receipt['explicit_dns_clean']:
-            raise RuntimeError('Explicit DNS over the tunnel not proven')
+        self.receipt['configured_dns_resolver_clean'] = (
+            '8.8.8.8' in addresses and '10.10.34.35' not in addresses and
+            verify_dns_route_owned(self.ns_run('ip','-4','route','get','1.1.1.1')))
+        if not self.receipt['configured_dns_resolver_clean']:
+            raise RuntimeError('Configured DNS resolver through tunnel not proven')
         # Keep trial traffic small; bind to TUN rather than using runner direct NIC.
         dl = sh(ns + ['curl','-4','--noproxy','*','-fsS','--interface','tun1',
                       '--connect-timeout','6','--max-time','30',
@@ -336,6 +424,10 @@ class Trial:
         self.receipt['tunnel_route_verified_after_transfer'] = self.route_is_tunnel()
         if not self.receipt['tunnel_route_verified_after_transfer']:
             raise RuntimeError('TUN routes changed during throughput transfer')
+        self.receipt['configured_dns_route_owned_after_transfer'] = verify_dns_route_owned(
+            self.ns_run('ip','-4','route','get','1.1.1.1'))
+        self.receipt['ipv6_no_foreign_routes_after_transfer'] = verify_ipv6_route_inventory(
+            self.ns_run('ip','-6','route','show','table','all'))
         self.receipt['data_plane_pass'] = True
     def stop_vpn(self):
         if self.proc is None:
@@ -382,11 +474,16 @@ class Trial:
 
 def main():
     parser = argparse.ArgumentParser()
+    parser.add_argument('--offline-leak-guard-regression', action='store_true')
     parser.add_argument('--probe-official-source-only', action='store_true')
     parser.add_argument('--run-hosted-tunnel', action='store_true')
     args = parser.parse_args()
-    if args.probe_official_source_only == args.run_hosted_tunnel:
+    if sum((args.offline_leak_guard_regression, args.probe_official_source_only,
+            args.run_hosted_tunnel)) != 1:
         parser.error('Select exactly one mode')
+    if args.offline_leak_guard_regression:
+        offline_leak_guard_regression()
+        return 0
     if args.run_hosted_tunnel and (os.geteuid() != 0 or
             os.getenv('GITHUB_ACTIONS') != 'true' or
             os.getenv('RUNNER_ENVIRONMENT') != 'github-hosted' or
@@ -453,6 +550,13 @@ def main():
     rec['completed_utc'] = dt.datetime.now(dt.timezone.utc).isoformat()
     rec['pass'] = bool(rec['server_identity_verified'] and rec['public_user_authenticated'] and
                        rec['data_plane_pass'] and rec['tunnel_route_verified_after_transfer'] and
+                       rec.get('configured_dns_route_tunnel_owned') and
+                       rec.get('configured_dns_resolver_clean') and
+                       rec.get('namespace_resolver_effective') and
+                       rec.get('configured_dns_route_owned_after_transfer') and
+                       rec.get('ipv6_no_foreign_routes_all_tables') and
+                       rec.get('ipv6_representative_destinations_no_foreign_egress') and
+                       rec.get('ipv6_no_foreign_routes_after_transfer') and
                        rec.get('route_restored_in_namespace') and rec['host_runner_recovered'] and
                        not rec.get('openvpn_forced_kill') and not rec.get('failure_message'))
     with os.fdopen(os.open(receipt_file,os.O_CREAT|os.O_EXCL|os.O_WRONLY,0o600),'w') as file:

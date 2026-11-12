@@ -38,6 +38,9 @@ jobs:
           ast.parse(Path('app/tests/hosted-linux-provider-data-plane.py').read_text())
           print('PROVIDER_HARNESS_AST=PASS')
           PY
+          # No network or privilege: negative cases reject foreign IPv6
+          # policy-table routes and DNS egress via the physical interface.
+          python3 -B app/tests/hosted-linux-provider-data-plane.py --offline-leak-guard-regression
           set +e
           refusal="$(env -u GITHUB_ACTIONS -u RUNNER_ENVIRONMENT -u GITHUB_REPOSITORY             python3 -B app/tests/hosted-linux-provider-data-plane.py --run-hosted-tunnel 2>&1)"
           rc=$?
