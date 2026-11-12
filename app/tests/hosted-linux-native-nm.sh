@@ -39,6 +39,9 @@ dns=none
 [device-oig-container-underlay]
 match-device=interface-name:eth0
 managed=0
+[device-oig-container-base]
+match-device=interface-name:oigqa0
+managed=1
 NMCONF
   NetworkManager --no-daemon --config=/etc/NetworkManager/NetworkManager.conf \
     >/out/nm-service.log 2>&1 &
@@ -73,6 +76,16 @@ NMCONF
   # interface. Docker eth0 stays unmanaged to preserve the runner's bridge
   # underlay; a disposable dummy with a documentation-only /30 is used as the
   # NM activation base. This modifies no owner or runner-host interface.
+  # A pre-created link avoids NM treating an auto-created virtual dummy as
+  # unmanaged on Ubuntu's default container device policy.
+  ip link add name oigqa0 type dummy
+  ip link set oigqa0 up
+  if ! nmcli --wait 5 device set oigqa0 managed yes \
+      >/out/nm-base-setup.log 2>&1; then
+    echo 'HOSTED_DISPOSABLE_NM_BASE_MANAGEMENT_FAILED' >&2
+    tail -n 8 /out/nm-base-setup.log >&2
+    exit 71
+  fi
   if ! nmcli --wait 5 connection add save no type dummy ifname oigqa0 \
       con-name oig-hosted-base ipv4.method manual \
       ipv4.addresses 198.51.100.1/30 ipv4.never-default yes \
