@@ -174,6 +174,8 @@ d=json.load(open(sys.argv[1],encoding='utf-8'))
 assert d.get('pass') is True
 assert d.get('nativeNmAuthenticated') is True
 assert d.get('fullIPv4RoutesOwned') is True
+assert d.get('nmPinnedDnsPriorityConfigVerified') is True
+assert d.get('nmActiveDnsRoutingPolicyVerified') is True
 assert d.get('explicitResolverDnsViaTun') is True
 assert d.get('containerDefaultDnsViaTunVerified') is True
 assert d.get('containerDefaultResolverRestoredExact') is True

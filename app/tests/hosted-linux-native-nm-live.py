@@ -213,6 +213,13 @@ def main():
                       "ipv6.never-default", "yes",
                       "ipv4.ignore-auto-dns", "yes",
                       "ipv6.ignore-auto-dns", "yes",
+                      # This is only profile-policy acceptance in Docker
+                      # (NM daemon currently runs dns=none), NOT a claim
+                      # that a production resolver or every app is leak-free.
+                      *(["ipv4.dns", "1.1.1.1",
+                         "ipv4.dns-search", "~.",
+                         "ipv4.dns-priority", "-2147483647"]
+                        if is_full_ipv4 else []),
                       "ipv4.ignore-auto-routes", "no" if is_full_ipv4 else "yes",
                       "ipv6.ignore-auto-routes", "yes",
                       # VPNBook's imported profile does not necessarily push
@@ -224,6 +231,23 @@ def main():
             operator_profile.verify_nm_import(
                 uuid, stem, checked, endpoint, proto,
                 provider.EXPECTED_CA, provider.EXPECTED_CN)
+            if is_full_ipv4:
+                stage = "NM_PINNED_DNS_ROUTING_POLICY"
+                expected_dns = {
+                    "ipv4.dns": "1.1.1.1",
+                    "ipv4.dns-search": "~.",
+                    "ipv4.dns-priority": "-2147483647",
+                    "ipv4.ignore-auto-dns": "yes",
+                    "ipv6.ignore-auto-dns": "yes",
+                }
+                for field, expected in expected_dns.items():
+                    observed = required(
+                        ["nmcli", "--wait", "5", "-g", field,
+                         "connection", "show", "uuid", uuid],
+                        timeout=9).decode("utf8", "replace").strip()
+                    if observed != expected:
+                        fail_stage("NM_DNS_POLICY_NOT_PRESERVED")
+                out["nmPinnedDnsPriorityConfigVerified"] = True
             stage = "NM_AUTHENTICATED_ACTIVATION"
             fd = operator_trial.make_password_fd(public_pass)
             public_pass = None
@@ -258,6 +282,21 @@ def main():
             if uuid not in active.decode("utf8", "replace").lower().splitlines():
                 fail_stage("NM_ACTIVE_UUID_NOT_FOUND")
             authenticated = True
+            if is_full_ipv4:
+                stage = "NM_ACTIVE_DNS_POLICY_PERSISTENCE"
+                active_policy = {
+                    "ipv4.dns": "1.1.1.1",
+                    "ipv4.dns-search": "~.",
+                    "ipv4.dns-priority": "-2147483647",
+                }
+                for field, expected in active_policy.items():
+                    observed = required(
+                        ["nmcli", "--wait", "5", "-g", field,
+                         "connection", "show", "uuid", uuid],
+                        timeout=9).decode("utf8", "replace").strip()
+                    if observed != expected:
+                        fail_stage("NM_ACTIVE_DNS_POLICY_CHANGED")
+                out["nmActiveDnsRoutingPolicyVerified"] = True
             out["trustedProfileAccepted"] = True
             out["profileSha256"] = profile_sha
             out["nativeNmAuthenticated"] = True
@@ -529,6 +568,8 @@ def main():
                        and out.get("tunnelBoundHttpsSucceeded") is True
                        and (not is_full_ipv4 or (
                            out.get("fullIPv4RoutesOwned") is True
+                           and out.get("nmPinnedDnsPriorityConfigVerified") is True
+                           and out.get("nmActiveDnsRoutingPolicyVerified") is True
                            and out.get("containerDefaultDnsViaTunVerified") is True
                            and out.get("containerDefaultResolverRestoredExact") is True))
                        and out["temporaryProfileAndPEMCleanupVerified"]
