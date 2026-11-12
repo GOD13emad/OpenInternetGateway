@@ -77,6 +77,37 @@ test('Linux Debian packaging keeps Electron dependencies and adds native OpenVPN
 });
 
 
+test('Linux hosted package gate requires nftables and exact root-owned backend modules', () => {
+  const layout = fs.readFileSync(
+    path.join(__dirname, '../tools/qaLinuxOfflineDebLayout.sh'), 'utf8'
+  );
+  const build = fs.readFileSync(
+    path.join(__dirname, '../../.github/workflows/build.yml'), 'utf8'
+  );
+  const dependencyCheck = build.match(/for package in ([^\n]+); do/);
+  assert.ok(dependencyCheck, 'Hosted Linux apt prerequisites gate missing');
+  const required = dependencyCheck[1].trim().split(/\s+/);
+  for (const dep of [
+    'nftables', 'systemd-resolved', 'network-manager',
+    'network-manager-openvpn', 'openvpn', 'python3'
+  ]) {
+    assert.ok(required.includes(dep), 'Hosted apt gate must enforce ' + dep);
+  }
+  assert.match(layout, /OIG_DEB_ROOT_BACKEND_EXACT_SOURCE_ROOT_0644_NOT_ACTIVATED_PASS/);
+  assert.match(layout, /cmp -s -- "\$original" "\$packaged"/);
+  assert.match(layout, /-rw-r--r--.*root\/root/);
+  assert.match(layout, /UNAPPROVED_ROOT_SERVICE_INSTALLED/);
+  for (const module of [
+    'killswitch_bootstrap.py', 'killswitch_nft_executor.py',
+    'nft_killswitch_plan.py', 'killswitch_lifecycle_contract.py',
+    'killswitch_broker_service.py', 'killswitch_root_observer.py',
+    'killswitch_broker_ipc.py', 'operator_full_device.py'
+  ]) {
+    assert.ok(layout.includes(module), 'Missing packaged root backend proof: ' + module);
+  }
+  assert.match(build, /qaLinuxOfflineDebLayout\.sh/);
+});
+
 test('Linux one-file builder verifies real embedded DEB and refuses tampering or active VPN without apt', {
   skip: process.platform !== 'linux' || process.arch !== 'x64' ||
     typeof process.getuid !== 'function' || process.getuid() === 0

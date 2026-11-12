@@ -191,7 +191,7 @@ jobs:
             echo "Invalid literal default package in Debian dependencies" >&2
             exit 1
           fi
-          for package in network-manager network-manager-openvpn openvpn python3 curl iproute2 systemd ca-certificates libgtk-3-0 libnss3; do
+          for package in network-manager network-manager-openvpn openvpn python3 curl iproute2 nftables systemd systemd-resolved ca-certificates libgtk-3-0 libnss3; do
             grep -Eq "(^|, )$package([ ,(]|$)" <<< "$depends" || {
               echo "Required native dependency missing in Debian package: $package" >&2
               exit 1
