@@ -27,7 +27,7 @@ if [[ "${1:-}" == '--inner' ]]; then
   export DEBIAN_FRONTEND=noninteractive
   apt-get update -qq >/out/apt-setup.log 2>&1
   apt-get install -y -qq --no-install-recommends \
-    python3 ca-certificates iproute2 dbus network-manager network-manager-openvpn openvpn curl dnsutils systemd-resolved \
+    python3 ca-certificates iproute2 dbus network-manager network-manager-openvpn openvpn curl dnsutils systemd-resolved nftables \
     >>/out/apt-setup.log 2>&1
   mkdir -p /run/dbus
   dbus-daemon --system --fork
@@ -87,7 +87,7 @@ NMCONF
     # The container creates its private receipt as 0600/root. Transfer only
     # the artifact's ownership to the runner user for actions/upload-artifact.
     # Never loosen permissions or mount owner-host sensitive directories.
-    for receipt in /out/oig-hosted-native-nm.json /out/oig-hosted-native-nm-live.json /out/oig-hosted-native-nm-fullipv4.json /out/oig-hosted-active-crash-rollback.json /out/oig-hosted-active-timer-rollback.json; do
+    for receipt in /out/oig-hosted-native-nm.json /out/oig-hosted-native-nm-live.json /out/oig-hosted-native-nm-fullipv4.json /out/oig-hosted-active-crash-rollback.json /out/oig-hosted-active-timer-rollback.json /out/oig-hosted-nft-killswitch-smoke.json; do
       if [[ -f "$receipt" ]]; then
         chown "${OIG_RUNNER_UID:?}:${OIG_RUNNER_GID:?}" "$receipt"
         chmod 0600 "$receipt"
@@ -289,6 +289,9 @@ PYRESTORE
   # product arm(), real hosted user-systemd timer and durable helper. Only the
   # timer transport is bridged across the disposable Docker user-bus boundary.
   python3 -B /work/app/tests/hosted-linux-nm-active-crash-rollback.py --timer-supervise
+  # PROTOTYPE only: temporary nftables table is applied and removed INSIDE
+  # this disposable Docker netns, after every real VPN test has finished.
+  python3 -B /work/app/tests/hosted-linux-nft-killswitch-smoke.py --isolated-docker-only
   exit 0
 fi
 
@@ -428,3 +431,18 @@ assert r.get("systemDnsLeakContainmentVerified") is False
 assert r.get("productionKillSwitchVerified") is False
 print("HOSTED_REAL_USER_SYSTEMD_TIMER_AND_REAL_NM_ACTIVE_TUN_ROLLBACK_PASS")
 PYTIMER
+
+test -s "$out/oig-hosted-nft-killswitch-smoke.json"
+python3 -B - "$out/oig-hosted-nft-killswitch-smoke.json" <<'PYNFT'
+import json,sys
+r=json.load(open(sys.argv[1],encoding="utf8"))
+assert r.get("pass") is True
+assert r.get("nftKernelRulesLoaded") is True
+assert r.get("physicalDnsEgressDropCounterAdvanced") is True
+assert r.get("isolatedTableRemoved") is True
+assert r.get("containerRouteDnsBaselineRestored") is True
+assert r.get("productionKillSwitchVerified") is False
+assert r.get("persistentBootTimeEnforcementVerified") is False
+assert r.get("physicalOwnerNetworkChanged") is False
+print("HOSTED_DISPOSABLE_NFT_OUTPUT_DROP_AND_ROLLBACK_PASS")
+PYNFT

@@ -9,6 +9,9 @@ on:
       - 'app/tests/hosted-linux-native-nm-live.py'
       - 'app/tests/hosted-linux-nm-active-crash-rollback.py'
       - 'app/tests/hosted-linux-user-timer-bridge.py'
+      - 'app/tests/hosted-linux-nft-killswitch-smoke.py'
+      - 'app/tests/nft-killswitch-plan.test.js'
+      - 'app/backend/linux/nft_killswitch_plan.py'
       - 'app/tests/hosted-linux-provider-data-plane.py'
       - 'app/backend/linux/operator_profile.py'
       - 'app/backend/linux/operator_full_device.py'
@@ -46,6 +49,8 @@ jobs:
           ast.parse(pathlib.Path('app/tests/hosted-linux-native-nm-live.py').read_text())
           ast.parse(pathlib.Path('app/tests/hosted-linux-nm-active-crash-rollback.py').read_text())
           ast.parse(pathlib.Path('app/tests/hosted-linux-user-timer-bridge.py').read_text())
+          ast.parse(pathlib.Path('app/tests/hosted-linux-nft-killswitch-smoke.py').read_text())
+          ast.parse(pathlib.Path('app/backend/linux/nft_killswitch_plan.py').read_text())
           print('DISPOSABLE_NATIVE_NM_IMPORT_AST_PASS')
           PY
           set +e
@@ -79,6 +84,12 @@ jobs:
           set -e
           test "$timer_code" -ne 0
           case "$timer_result" in *"REFUSED: owner host or non-disposable runner"*) ;; *) exit 81 ;; esac
+          set +e
+          nft_result="$(env -u GITHUB_ACTIONS -u RUNNER_ENVIRONMENT -u GITHUB_REPOSITORY python3 -B app/tests/hosted-linux-nft-killswitch-smoke.py --isolated-docker-only 2>&1)"
+          nft_code=$?
+          set -e
+          test "$nft_code" -ne 0
+          test "$nft_result" = 'REFUSED: owner host or non-disposable runner'
           echo 'OWNER_HOST_REFUSED=PASS'
       - name: Real OIG NetworkManager import plus scoped live OpenVPN TUN in isolated Docker netns
         shell: bash
@@ -98,5 +109,6 @@ jobs:
             ${{ runner.temp }}/oig-hosted-nm/oig-hosted-native-nm-fullipv4.json
             ${{ runner.temp }}/oig-hosted-nm/oig-hosted-active-crash-rollback.json
             ${{ runner.temp }}/oig-hosted-nm/oig-hosted-active-timer-rollback.json
+            ${{ runner.temp }}/oig-hosted-nm/oig-hosted-nft-killswitch-smoke.json
           if-no-files-found: warn
           retention-days: 7
