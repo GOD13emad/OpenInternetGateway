@@ -349,6 +349,9 @@ assert d.get('nmActiveDnsRoutingPolicyVerified') is True
 assert d.get('resolvedVpnDnsOnlyPolicyVerified') is True
 assert d.get('resolvedQueryViaVpnVerified') is True
 assert d.get('productionDnsGuardRealNmResolvedVerified') is True
+assert d.get('productionDnsGuardForeignLinkRejected') is True
+assert d.get('productionDnsGuardRecoveredAfterForeignRevert') is True
+assert d.get('foreignLinkDnsBaselineRestoredExact') is True
 assert d.get('temporaryNmAliasRestored') is True
 assert d.get('resolvedDnsPolicyRestored') is True
 assert d.get('explicitResolverDnsViaTun') is True

@@ -508,6 +508,66 @@ def main():
                         out["productionDnsGuardRejectionShape"] = shape
                         fail_stage("PRODUCT_DNS_ROUTE_GUARD_REJECTED_REAL_TUN")
                     out["productionDnsGuardRealNmResolvedVerified"] = True
+                    stage = "PRODUCT_DNS_REAL_FOREIGN_LINK_FAIL_CLOSED"
+                    # Inject one foreign resolved upstream ONLY on Docker's
+                    # private unmanaged eth0. Do not send DNS queries while it
+                    # is present; verify the shipped guard refuses Connected,
+                    # revert the D-Bus override in finally, and recheck PASS.
+                    # This does not manipulate owner/runner host networking.
+                    foreign_before = required(
+                        ["resolvectl", "dns", "eth0"], timeout=8).decode(
+                            "utf8", "replace").strip()
+                    foreign_line = re.fullmatch(
+                        r"Link\\s+\\d+\\s+\\(eth0\\):\\s*",
+                        foreign_before)
+                    if not foreign_line:
+                        fail_stage("FOREIGN_LINK_DNS_BASELINE_NOT_EMPTY")
+                    foreign_injected = False
+                    try:
+                        # An external command may mutate D-Bus state before
+                        # timing out; mark rollback required *before* calling
+                        # it, so ambiguous outcomes also trigger revert.
+                        foreign_injected = True
+                        required(["resolvectl", "dns", "eth0", "9.9.9.9"],
+                                 timeout=8)
+                        effective = required(
+                            ["resolvectl", "dns"], timeout=8).decode(
+                                "utf8", "replace")
+                        if not re.search(
+                                r"(?m)^Link\\s+\\d+\\s+\\(eth0\\):\\s*9\\.9\\.9\\.9\\s*$",
+                                effective):
+                            fail_stage("FOREIGN_LINK_INJECTION_NOT_EFFECTIVE")
+                        rejected = cmd(
+                            ["python3", "-B", str(BACKEND / "dns_route_guard.py"),
+                             "--managed-name", "OIG-VPN-LIVE",
+                             "--interface", tunnel], timeout=16)
+                        if rejected.returncode != 1:
+                            fail_stage("PRODUCT_DNS_GUARD_ALLOWED_FOREIGN_RESOLVER")
+                        out["productionDnsGuardForeignLinkRejected"] = True
+                    finally:
+                        if foreign_injected:
+                            reverted = cmd(["resolvectl", "revert", "eth0"], timeout=9)
+                            if reverted.returncode:
+                                fail_stage("FOREIGN_LINK_DNS_REVERT_FAILED")
+                    stage = "PRODUCT_DNS_REAL_FOREIGN_LINK_RESTORE"
+                    restored_foreign = False
+                    for _ in range(8):
+                        seen = required(["resolvectl", "dns", "eth0"],
+                                        timeout=8).decode("utf8", "replace").strip()
+                        if seen == foreign_before:
+                            restored_foreign = True
+                            break
+                        time.sleep(.2)
+                    if not restored_foreign:
+                        fail_stage("FOREIGN_LINK_DNS_BASELINE_NOT_RESTORED")
+                    recovered = cmd(
+                        ["python3", "-B", str(BACKEND / "dns_route_guard.py"),
+                         "--managed-name", "OIG-VPN-LIVE",
+                         "--interface", tunnel], timeout=16)
+                    if recovered.returncode:
+                        fail_stage("PRODUCT_DNS_GUARD_NOT_RESTORED_AFTER_INJECTION")
+                    out["productionDnsGuardRecoveredAfterForeignRevert"] = True
+                    out["foreignLinkDnsBaselineRestoredExact"] = True
                 finally:
                     restored = cmd(
                         ["nmcli", "--wait", "5", "connection", "modify",
@@ -841,6 +901,9 @@ def main():
                            and out.get("resolvedVpnDnsOnlyPolicyVerified") is True
                            and out.get("resolvedQueryViaVpnVerified") is True
                            and out.get("productionDnsGuardRealNmResolvedVerified") is True
+                           and out.get("productionDnsGuardForeignLinkRejected") is True
+                           and out.get("productionDnsGuardRecoveredAfterForeignRevert") is True
+                           and out.get("foreignLinkDnsBaselineRestoredExact") is True
                            and out.get("temporaryNmAliasRestored") is True
                            and out.get("resolvedDnsPolicyRestored") is True
                            and out.get("containerDefaultDnsViaTunVerified") is True
