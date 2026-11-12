@@ -35,20 +35,60 @@ def render(interface, underlay, peer, port, transport):
         raise UnsafePlan("OpenVPN peer must be a public literal IPv4 address")
     if type(port) is not int or not 1 <= port <= 65535 or transport not in ("tcp", "udp"):
         raise UnsafePlan("Untrusted OpenVPN endpoint or transport")
-    # An isolated, independent nftables table. Never flush or replace the
-    # owner's existing ruleset. The default is DROP; only loopback, OIG
-    # tunnel and exactly one pinned OpenVPN control endpoint are allowed.
-    # DHCPv4 renewals on the underlay are allowed to preserve link leasing,
-    # but NO physical DNS, other IPv4, or physical IPv6 egress is permitted.
-    # This table does NOT authenticate the kernel interface's owner.
-    return "\n".join((
+    return _create(interface, underlay, address, port, transport, True)
+
+
+def _output_rules(interface, underlay, peer, port, transport, tunnel_allowed):
+    # No blanket conntrack established ACCEPT: it could permit an existing
+    # underlay connection to survive route fallback.
+    rules = [f'add rule inet {TABLE} output oifname "lo" accept']
+    if tunnel_allowed:
+        rules.append(f'add rule inet {TABLE} output oifname "{interface}" accept')
+    rules.extend((
+        f'add rule inet {TABLE} output meta nfproto ipv4 oifname "{underlay}" ip daddr {peer} {transport} dport {port} accept',
+        f'add rule inet {TABLE} output meta nfproto ipv4 oifname "{underlay}" udp sport 68 udp dport 67 accept',
+        f'add rule inet {TABLE} output counter drop'
+    ))
+    return rules
+
+
+def _create(interface, underlay, address, port, transport, tunnel_allowed):
+    # Private independent table: never flush the owner's entire nft ruleset.
+    # Output and forwarded traffic are both fail-closed by default.
+    # Forward traffic is intentionally NOT enabled here: this is not yet
+    # a production gateway or consented root-owned service.
+    return "\n".join([
         f"add table inet {TABLE}",
         f"add chain inet {TABLE} output {{ type filter hook output priority -150; policy drop; }}",
-        f'add rule inet {TABLE} output oifname "lo" accept',
-        f'add rule inet {TABLE} output oifname "{interface}" accept',
-        f'add rule inet {TABLE} output meta nfproto ipv4 oifname "{underlay}" ip daddr {address} {transport} dport {port} accept',
-        f'add rule inet {TABLE} output meta nfproto ipv4 oifname "{underlay}" udp sport 68 udp dport 67 accept',
-        f"add rule inet {TABLE} output counter drop",
+        f"add chain inet {TABLE} forward {{ type filter hook forward priority -150; policy drop; }}",
+        *_output_rules(interface, underlay, address, port, transport, tunnel_allowed),
+        f"add rule inet {TABLE} forward counter drop",
+        ""
+    ])
+
+
+def render_lockdown(interface, underlay, peer, port, transport):
+    """Pre-tunnel lockdown: only loopback, pinned VPN transport and DHCPv4."""
+    render(interface, underlay, peer, port, transport)  # Validate first.
+    return _create(interface, underlay, ipaddress.IPv4Address(peer),
+                   port, transport, False)
+
+
+def render_transition(interface, underlay, peer, port, transport, *, tunnel_allowed):
+    """Single atomic nft -f batch for an existing default-DROP table.
+
+    Only a separately authorized root-owned operator may apply a rendered
+    transition. A TUN name alone does not prove interface ownership.
+    """
+    render(interface, underlay, peer, port, transport)  # Validate first.
+    if type(tunnel_allowed) is not bool:
+        raise UnsafePlan("Transition state must be a boolean")
+    rules = _output_rules(interface, underlay, ipaddress.IPv4Address(peer),
+                          port, transport, tunnel_allowed)
+    return "\n".join((
+        f"flush chain inet {TABLE} output",
+        *rules,
+        # Forward base chain never changes and remains default-DROP.
         ""
     ))
 

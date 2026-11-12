@@ -438,6 +438,14 @@ import json,sys
 r=json.load(open(sys.argv[1],encoding="utf8"))
 assert r.get("pass") is True
 assert r.get("nftKernelRulesLoaded") is True
+assert r.get("lockdownToTunnelToRelock") is True
+assert r.get("nftAtomicTransitionsKernelApplied") is True
+assert r.get("kernelForwardPolicyDropPresent") is True
+assert r.get("activePhysicalDropCounterDelta", 0) >= 8
+assert r.get("relockedPhysicalDropCounterDelta", 0) >= 8
+assert r.get("forwardPacketsProbed") is False
+assert r.get("bootPersistenceVerified") is False
+assert r.get("operatorInterfaceOwnershipVerified") is False
 assert r.get("physicalDnsEgressDropCounterAdvanced") is True
 assert r.get("isolatedTableRemoved") is True
 assert r.get("containerRouteDnsBaselineRestored") is True

@@ -69,6 +69,35 @@ def drop_count():
         raise RuntimeError("NFT_DROP_COUNTER_NOT_UNIQUE")
     return drop[0]
 
+def probe_blocked_physical_dns():
+    """A denied socket send alone is insufficient; require a kernel counter."""
+    before = drop_count()
+    udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    denials = 0
+    try:
+        for _ in range(8):
+            try:
+                udp.sendto(b"\x00", ("9.9.9.9", 53))
+            except PermissionError:
+                denials += 1
+    finally:
+        udp.close()
+    delta = drop_count() - before
+    if delta < 8:
+        raise RuntimeError("KERNEL_DROP_COUNTER_DID_NOT_ADVANCE")
+    return denials, delta
+
+
+def apply_atomic(script):
+    # nft -f commits the transition as one transaction. No global flush.
+    with tempfile.TemporaryDirectory(prefix="oig-hosted-nft-state-") as directory:
+        path = Path(directory) / "transition.nft"
+        path.write_text(script, encoding="utf8")
+        path.chmod(0o600)
+        need(["nft", "-c", "-f", str(path)])
+        need(["nft", "-f", str(path)])
+
+
 def main():
     scope()
     if run(["nft", "list", "table", "inet", "oig_qa_killswitch"]).returncode == 0:
@@ -98,7 +127,7 @@ def main():
     try:
         # Never let the product render code mutate the host. nft execution is
         # confined to this explicitly scoped disposable test harness.
-        script = module.render("tun99", "eth0", "1.1.1.1", 443, "tcp")
+        script = module.render_lockdown("tun99", "eth0", "1.1.1.1", 443, "tcp")
         with tempfile.TemporaryDirectory(prefix="oig-hosted-nft-") as directory:
             path = Path(directory) / "rules.nft"
             path.write_text(script, encoding="utf8")
@@ -114,31 +143,45 @@ def main():
         if (len(chains) != 1 or chains[0].get("policy") != "drop"
                 or chains[0].get("hook") != "output"):
             raise RuntimeError("POLICY_NOT_DROP")
-        before = drop_count()
-        stage = "PHYSICAL_EGRESS_DROP_PROBE"
-        # Eight UDP datagrams to a public literal DNS destination: no hostname,
-        # no private payload, no tunnel, and no externally delivered packet.
-        udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        kernel_denials = 0
-        try:
-            for _ in range(8):
-                try:
-                    udp.sendto(b"\x00", ("9.9.9.9", 53))
-                except PermissionError:
-                    # Some kernels return EPERM synchronously when the nft
-                    # output hook drops a locally generated UDP datagram.
-                    # This is a valid denial, NOT a failure to probe.
-                    kernel_denials += 1
-        finally:
-            udp.close()
-        after = drop_count()
-        if after < before + 8:
-            raise RuntimeError("KERNEL_DROP_COUNTER_DID_NOT_ADVANCE")
+        stage = "INITIAL_LOCKDOWN_PHYSICAL_DNS_PROBE"
+        kernel_denials, drop_delta = probe_blocked_physical_dns()
         out["nftKernelPermissionDenialsObserved"] = kernel_denials
-        out["nftDropCounterDelta"] = after - before
+        out["nftDropCounterDelta"] = drop_delta
+        forward_info = json.loads(need([
+            "nft", "-j", "list", "chain", "inet", table, "forward"]))
+        forward_chains = [item["chain"] for item in forward_info.get("nftables", [])
+                          if isinstance(item, dict) and "chain" in item]
+        if (len(forward_chains) != 1
+                or forward_chains[0].get("policy") != "drop"
+                or forward_chains[0].get("hook") != "forward"):
+            raise RuntimeError("FORWARD_DEFAULT_DROP_NOT_INSTALLED")
+        out["kernelForwardPolicyDropPresent"] = True
+        stage = "LOCKED_TO_TUNNEL_ATOMIC_TRANSITION"
+        apply_atomic(module.render_transition(
+            "tun99", "eth0", "1.1.1.1", 443, "tcp",
+            tunnel_allowed=True))
+        if 'oifname "tun99" accept' not in need([
+                "nft", "list", "chain", "inet", table, "output"]):
+            raise RuntimeError("TUNNEL_ALLOW_RULE_NOT_APPLIED")
+        _, active_delta = probe_blocked_physical_dns()
+        stage = "TUNNEL_TO_RELOCK_ATOMIC_TRANSITION"
+        apply_atomic(module.render_transition(
+            "tun99", "eth0", "1.1.1.1", 443, "tcp",
+            tunnel_allowed=False))
+        if 'oifname "tun99" accept' in need([
+                "nft", "list", "chain", "inet", table, "output"]):
+            raise RuntimeError("RELOCK_TUNNEL_ALLOW_RULE_REMAINS")
+        _, relock_delta = probe_blocked_physical_dns()
+        out["lockdownToTunnelToRelock"] = True
+        out["activePhysicalDropCounterDelta"] = active_delta
+        out["relockedPhysicalDropCounterDelta"] = relock_delta
+        out["nftAtomicTransitionsKernelApplied"] = True
         out["nftKernelRulesLoaded"] = True
         out["physicalDnsEgressDropCounterAdvanced"] = True
         out["ipv6PhysicalAllowRuleAbsent"] = True  # Static inspection only, no IPv6 packet proof.
+        out["forwardPacketsProbed"] = False
+        out["bootPersistenceVerified"] = False
+        out["operatorInterfaceOwnershipVerified"] = False
         out["pass"] = True
     except Exception as exc:
         out["failureStage"] = stage
