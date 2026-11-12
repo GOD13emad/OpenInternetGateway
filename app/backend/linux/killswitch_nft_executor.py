@@ -47,6 +47,26 @@ def disposable_scope():
         raise NftSafetyError("REFUSED: owner host or non-disposable runner")
 
 
+def nft_argv_permitted(args, active_policy_file=None):
+    """Pure exact-argv gate. A similarly named arbitrary file is not trusted."""
+    read_only = (
+        ["-j", "list", "tables"],
+        ["-j", "list", "chain", "inet", NFT_TABLE, "output"],
+        ["-j", "list", "chain", "inet", NFT_TABLE, "forward"],
+    )
+    if not isinstance(args, list) or not all(type(x) is str for x in args):
+        return False
+    if args in read_only:
+        return True
+    if (type(active_policy_file) is not str or
+            not active_policy_file.startswith("/")):
+        return False
+    return args in (
+        ["-c", "-f", active_policy_file],
+        ["-f", active_policy_file],
+    )
+
+
 class IsolatedNftBackend:
     """Fixed nft executable and command shapes, never shell or owner commands."""
 
@@ -55,27 +75,11 @@ class IsolatedNftBackend:
         if not isinstance(approved, contract.Approved):
             raise NftSafetyError("Pinned manifest required for the executor")
         self.approved = approved
+        self._active_policy_file = None
 
-    @staticmethod
-    def _call(args):
+    def _call(self, args):
         disposable_scope()
-        if not isinstance(args, list) or not all(type(x) is str for x in args):
-            raise NftSafetyError("Unexpected nft args")
-        # An attacker must not turn the read-only observer into a root nft
-        # command oracle: only fixed inventory/check/apply vectors exist.
-        allowed = [
-            ["-j", "list", "tables"],
-            ["-j", "list", "chain", "inet", NFT_TABLE, "output"],
-            ["-j", "list", "chain", "inet", NFT_TABLE, "forward"],
-        ]
-        is_policy_file = (
-            len(args) in (2, 3) and args[-2] == "-f"
-            and (args[0] == "-f" or args[:2] == ["-c", "-f"])
-            and Path(args[-1]).name == "policy.nft"
-            and Path(args[-1]).parent.name.startswith("oig-qa-nft-")
-            and Path(args[-1]).is_file()
-        ) if len(args) >= 2 else False
-        if args not in allowed and not is_policy_file:
+        if not nft_argv_permitted(args, self._active_policy_file):
             raise NftSafetyError("Nft arguments not in isolated allowlist")
         try:
             result = subprocess.run(
@@ -161,8 +165,14 @@ class IsolatedNftBackend:
                 stream.write(script)
                 stream.flush()
                 os.fsync(stream.fileno())
-            self._call(["-c", "-f", str(file)])
-            self._call(["-f", str(file)])
+            if self._active_policy_file is not None:
+                raise NftSafetyError("Concurrent policy transaction refused")
+            self._active_policy_file = str(file)
+            try:
+                self._call(["-c", "-f", str(file)])
+                self._call(["-f", str(file)])
+            finally:
+                self._active_policy_file = None
 
 
 def _match_expr(expr, category, field, value):

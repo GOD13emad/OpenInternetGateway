@@ -183,6 +183,33 @@ def main():
         APPROVED, good, []), "empty_forward")
     refuse(lambda: executor.verify_locked_nft_rules(
         APPROVED, good, [{"expr": [{"accept": None}]}]), "forward_accept")
+    read_only = [
+        ["-j", "list", "tables"],
+        ["-j", "list", "chain", "inet", executor.NFT_TABLE, "output"],
+        ["-j", "list", "chain", "inet", executor.NFT_TABLE, "forward"],
+    ]
+    for command in read_only:
+        assert executor.nft_argv_permitted(command)
+    own_file = "/tmp/oig-qa-nft-trusted/policy.nft"
+    assert executor.nft_argv_permitted(["-c", "-f", own_file], own_file)
+    assert executor.nft_argv_permitted(["-f", own_file], own_file)
+    forbidden_commands = [
+        ["-f", "/tmp/oig-qa-nft-evil/policy.nft"],
+        ["-c", "-f", "/tmp/oig-qa-nft-evil/policy.nft"],
+        ["flush", "ruleset"],
+        ["delete", "table", "inet", executor.NFT_TABLE],
+        ["add", "rule", "inet", executor.NFT_TABLE, "output", "accept"],
+        ["-j", "list", "ruleset"],
+        ["-j", "list", "chain", "inet", executor.NFT_TABLE, "input"],
+        ["-f", "../policy.nft"],
+    ]
+    for command in forbidden_commands:
+        assert not executor.nft_argv_permitted(command, own_file), command
+        assert not executor.nft_argv_permitted(command), command
+    assert not executor.nft_argv_permitted(["-f", own_file])
+    assert not executor.nft_argv_permitted(["-c", "-f", own_file])
+    assert not executor.nft_argv_permitted("nft -f", own_file)
+
     refuse(lambda: executor.LockdownOnlyController(None, FakeBackend()), "missing_manifest")
     refuse(lambda: executor.LockdownOnlyController(APPROVED, None), "missing_backend")
     try:
