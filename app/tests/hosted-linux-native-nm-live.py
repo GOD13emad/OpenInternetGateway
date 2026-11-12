@@ -322,6 +322,54 @@ def main():
             out["tunnelBoundHttpsSucceeded"] = True
             out["tunneledIPv4PublicEgress"] = True
             out["serverIdentityVerifiedByPinnedNMProfile"] = True
+            if is_full_ipv4:
+                # Reuse the same bounded public speed test endpoints as the
+                # already accepted disposable provider data-plane harness.
+                # Bind each transfer to the identified TUN; no physical ISP
+                # retry or alternative source is permitted.
+                stage = "NATIVE_NM_VPN_BOUND_DOWNLOAD"
+                dl = cmd(["curl", "-4", "--noproxy", "*", "--interface", tunnel,
+                          "--connect-timeout", "6", "--max-time", "30",
+                          "--fail", "--silent", "--show-error",
+                          "--output", "/dev/null",
+                          "--write-out", "%{size_download} %{time_total} %{http_code}",
+                          "https://speed.cloudflare.com/__down?bytes=1000000"],
+                         timeout=35)
+                try:
+                    dbytes, dsecs, dstatus = dl.stdout.decode("ascii").strip().split()
+                    dbytes, dsecs = float(dbytes), float(dsecs)
+                except (ValueError, UnicodeDecodeError):
+                    fail_stage("NATIVE_NM_DOWNLOAD_OBSERVATION_INVALID")
+                if dl.returncode or dstatus != "200" or dbytes < 900000 or dsecs <= 0:
+                    fail_stage("NATIVE_NM_DOWNLOAD_BYTES_NOT_VERIFIED")
+                stage = "NATIVE_NM_VPN_BOUND_UPLOAD"
+                sample = Path(folder) / "upload-test.bin"
+                sample.write_bytes(os.urandom(262144))
+                sample.chmod(0o600)
+                ul = cmd(["curl", "-4", "--noproxy", "*", "--interface", tunnel,
+                          "--connect-timeout", "6", "--max-time", "30",
+                          "--fail", "--silent", "--show-error",
+                          "--data-binary", "@" + str(sample),
+                          "--output", "/dev/null",
+                          "--write-out", "%{size_upload} %{time_total} %{http_code}",
+                          "https://speed.cloudflare.com/__up"], timeout=35)
+                try:
+                    ubytes, usecs, ustatus = ul.stdout.decode("ascii").strip().split()
+                    ubytes, usecs = float(ubytes), float(usecs)
+                except (ValueError, UnicodeDecodeError):
+                    fail_stage("NATIVE_NM_UPLOAD_OBSERVATION_INVALID")
+                if ul.returncode or ustatus != "200" or ubytes < 262144 or usecs <= 0:
+                    fail_stage("NATIVE_NM_UPLOAD_BYTES_NOT_VERIFIED")
+                stage = "NATIVE_NM_POST_TRANSFER_ROUTES"
+                for target in ("1.1.1.1", "9.9.9.9"):
+                    path = required(["ip", "-4", "route", "get", target], timeout=7)
+                    if not re.search(rb"\bdev\s+" + re.escape(tunnel.encode()) + rb"\b", path):
+                        fail_stage("NATIVE_NM_TUN_ROUTE_CHANGED_AFTER_TRANSFER")
+                out["nativeNmDownloadMbps"] = round(dbytes * 8 / dsecs / 1000000, 2)
+                out["nativeNmUploadMbps"] = round(ubytes * 8 / usecs / 1000000, 2)
+                out["nativeNmDownloadBytes"] = int(dbytes)
+                out["nativeNmUploadBytes"] = int(ubytes)
+                out["nativeNmMeasuredVpnBoundThroughput"] = True
     except Exception as exc:
         out["failureClass"] = type(exc).__name__
         out["failureStage"] = stage

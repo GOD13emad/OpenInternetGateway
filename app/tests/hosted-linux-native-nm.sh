@@ -175,6 +175,11 @@ assert d.get('pass') is True
 assert d.get('nativeNmAuthenticated') is True
 assert d.get('fullIPv4RoutesOwned') is True
 assert d.get('explicitResolverDnsViaTun') is True
+assert d.get('nativeNmMeasuredVpnBoundThroughput') is True
+assert d.get('nativeNmDownloadBytes', 0) >= 900000
+assert d.get('nativeNmUploadBytes', 0) >= 262144
+assert d.get('nativeNmDownloadMbps', 0) > 0
+assert d.get('nativeNmUploadMbps', 0) > 0
 assert d.get('tunnelBoundHttpsSucceeded') is True
 assert d.get('containerNetworkRestored') is True
 assert d.get('temporaryProfileAndPEMCleanupVerified') is True
