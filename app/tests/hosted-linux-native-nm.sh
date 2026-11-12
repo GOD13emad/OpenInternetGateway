@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Disposable GitHub-hosted Docker acceptance of the REAL OIG NM importer.
 # Never called by the installed app; neither Docker nor NetworkManager is
-# started on an owner host. No OpenVPN tunnel is activated.
+# started on an owner host. OpenVPN activates ONLY in the private Docker netns.
 set -euo pipefail
 
 scope_guard() {

@@ -11,6 +11,15 @@ New-Item -ItemType Directory -Force -Path (Join-Path $Root 'state')|Out-Null
 foreach($name in @('exact-profile.request','headless-known-recover.request','headless-pool-probe.request','connector-probe.request')){
  Remove-Item -LiteralPath (Join-Path $Root ('state\'+$name)) -Force -ErrorAction SilentlyContinue
 }
+# A subsequent explicit Connect owns the new user intent. A pending older
+# Disconnect must never report success or re-trigger cleanup as if it still
+# owned that newer request.
+function Assert-DisconnectStillRequested {
+ $now='unknown'
+ try{$now=[string](Get-Content -LiteralPath $desired -Raw -ErrorAction Stop|ConvertFrom-Json).desired}catch{}
+ if($now -ne 'off'){throw 'Disconnect was superseded or its desired-state record cannot be verified.'}
+}
+Assert-DisconnectStillRequested
 $routes=@(Get-NetRoute -AddressFamily IPv4 -ErrorAction SilentlyContinue|Where-Object{$_.DestinationPrefix -in @('0.0.0.0/1','128.0.0.0/1')})
 $svc=Get-Service OVPNConnectorService -ErrorAction SilentlyContinue
 if($routes.Count -eq 0 -and (-not $svc -or $svc.Status -eq 'Stopped')){
@@ -31,6 +40,7 @@ $requeued=0
 $until=(Get-Date).AddSeconds(180)
 do{
  Start-Sleep -Seconds 2
+ Assert-DisconnectStillRequested
  $routes=@(Get-NetRoute -AddressFamily IPv4 -ErrorAction SilentlyContinue|Where-Object{$_.DestinationPrefix -in @('0.0.0.0/1','128.0.0.0/1')})
  $svc=Get-Service OVPNConnectorService -ErrorAction SilentlyContinue
  if($routes.Count -eq 0 -and (-not $svc -or $svc.Status -eq 'Stopped')){

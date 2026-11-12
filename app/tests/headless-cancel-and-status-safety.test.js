@@ -74,3 +74,15 @@ test('Windows Disconnect reconciles coalesced scheduled Ensure before accepting 
   assert.match(disconnect,/Could not requeue elevated Open Internet Gateway disconnect/);
   assert.doesNotMatch(disconnect,/Stop-Process|Unregister-ScheduledTask|Start-Process[^\r\n]*RunAs/);
 });
+
+test('a newer Connect supersedes any pending Windows Disconnect requeue',()=>{
+  const intentGuard=disconnect.indexOf('function Assert-DisconnectStillRequested');
+  const firstAssert=disconnect.indexOf('Assert-DisconnectStillRequested\n$routes=@');
+  const laterAssert=disconnect.indexOf('Assert-DisconnectStillRequested\n $routes=@');
+  const firstTask=disconnect.indexOf('schtasks.exe /Run /TN OpenInternetGateway-AutoRecovery');
+  const retry=disconnect.indexOf("if([string]$current.State -ne 'Running')");
+  assert.ok(intentGuard>disconnect.indexOf("desired='off'"));
+  assert.ok(firstAssert>intentGuard && firstAssert<firstTask);
+  assert.ok(laterAssert>firstTask && laterAssert<retry);
+  assert.match(disconnect,/if\(\$now -ne 'off'\)\{throw 'Disconnect was superseded/);
+});
