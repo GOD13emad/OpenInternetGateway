@@ -15,6 +15,7 @@ import hashlib
 import ipaddress
 import json
 import os
+import runpy
 from pathlib import Path
 import socket
 import struct
@@ -252,6 +253,41 @@ def probe_drop_counter(probe, chain):
     return after - before
 
 
+def locked_openvpn_tls_loopback_probe(backend):
+    """Real pinned-CN OpenVPN TLS handshake under a real, locked nft table.
+
+    Uses the existing independent localhost test: a fresh throwaway CA,
+    valid server cert and deliberately wrong CN, --dev null, localhost
+    TCP only. NO tun, DNS, route, NetworkManager or public VPN touched.
+    This only verifies CA/CN TLS behavior plus loopback availability;
+    it is NOT a proof that a real managed tunnel is authenticated.
+    """
+    if (os.geteuid() != 0
+            or os.stat("/proc/self/ns/net").st_ino ==
+            os.stat("/proc/1/ns/net").st_ino
+            or not backend.verify_sole_table()
+            or not nft_test.verify_locked_nft_rules(
+                MANIFEST, backend.rules("output"), backend.rules("forward"))):
+        raise RuntimeError("REFUSED: verified locked netns required for TLS")
+    script = Path(__file__).resolve().parent / "openvpn-loopback-tls-smoke.py"
+    if not script.is_file() or script.stat().st_size > 16384:
+        raise RuntimeError("REFUSED: fixed TLS smoke missing or oversized")
+    source = script.read_text(encoding="utf8")
+    if ('"--dev", "null"' not in source
+            or '"--verify-x509-name"' not in source
+            or '"wrong-oig-loopback-server"' not in source
+            or '"127.0.0.1"' not in source):
+        raise RuntimeError("REFUSED: TLS smoke contract changed")
+    # runpy chooses an in-process import scope without executing __main__.
+    # The probe creates/terminates isolated OpenVPN child processes itself.
+    runpy.run_path(str(script), run_name="oig_isolated_tls_fixture")["main"]()
+    backend.verify_sole_table()
+    nft_test.verify_locked_nft_rules(
+        MANIFEST, backend.rules("output"), backend.rules("forward")
+    )
+    return True
+
+
 def synthetic_tunnel_transition_probe(backend):
     """Exercise the kernel's atomic TUN allow -> relock syntax in test netns.
 
@@ -332,6 +368,8 @@ def main():
         "bootPersistenceVerified": False,
         "authorizedTunnelUnlockVerified": False,
         "dnsOwnedByVpnVerified": False,
+        "independentLoopbackTlsValidCnAccepted": False,
+        "independentLoopbackTlsWrongCnRejected": False,
         "isolatedNetnsVerified": False,
         "kernelInitialLockdownVerified": False,
         "kernelAtomicRelockVerified": False,
@@ -358,6 +396,10 @@ def main():
         controller = nft_test.LockdownOnlyController(MANIFEST, backend)
         controller.install_lockdown()
         receipt["kernelInitialLockdownVerified"] = controller.state == "LOCKED"
+        stage = "AUTHENTIC_OPENVPN_TLS_LOOPBACK_UNDER_KERNEL_LOCK"
+        if locked_openvpn_tls_loopback_probe(backend):
+            receipt["independentLoopbackTlsValidCnAccepted"] = True
+            receipt["independentLoopbackTlsWrongCnRejected"] = True
         stage = "PROBE_INITIAL_DROPS"
         receipt["initialV4DnsDropDelta"] = probe_drop_counter(probe_local_v4, "output")
         receipt["initialV6DnsDropDelta"] = probe_drop_counter(probe_local_v6, "output")
@@ -385,6 +427,8 @@ def main():
             and receipt["kernelInitialLockdownVerified"]
             and receipt["kernelAtomicRelockVerified"]
             and receipt["forwardPolicyDropVerified"]
+            and receipt["independentLoopbackTlsValidCnAccepted"]
+            and receipt["independentLoopbackTlsWrongCnRejected"]
             and receipt["unverifiedTunnelUnlockDenied"]
             and receipt["syntheticTunnelAllowKernelVerified"]
             and receipt["syntheticTunnelToRelockKernelVerified"]
