@@ -173,6 +173,44 @@ def main():
             })
             if not peer_ips:
                 fail_stage("PROVIDER_IP_INVENTORY_EMPTY")
+            # Docker's original resolver is required ONLY for the HTTPS
+            # bootstrap above: pinned public profile, public credential
+            # page, and peer/probe DNS. Retain the shared password in memory,
+            # never on disk/env/argv. Before ANY VPN route/activation, ask the
+            # parent --inner Docker script to switch its own resolved daemon
+            # to normal 127.0.0.53 stub mode (no imported Global fallback).
+            # Capture the route+resolver baseline AFTER the parent confirms
+            # the stub, but BEFORE adding provider underlay /32 routes.
+            stage = "DOCKER_RESOLVER_BOOTSTRAP_HANDOFF"
+            if os.environ.get("OIG_HOSTED_RESOLVER_HANDOFF") != "1":
+                fail_stage("DOCKER_RESOLVER_HANDOFF_NOT_AUTHORIZED")
+            handoff = Path("/run/oig-docker-bootstrap-ready")
+            ready = Path("/run/oig-docker-stub-ready")
+            if handoff.exists() or handoff.is_symlink() or ready.exists():
+                fail_stage("DOCKER_RESOLVER_HANDOFF_MARKER_ALREADY_EXISTS")
+            handle = os.open(handoff, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            os.close(handle)
+            synced = False
+            for _ in range(160):
+                if ready.is_file() and not ready.is_symlink():
+                    synced = True
+                    break
+                time.sleep(.25)
+            if not synced:
+                fail_stage("DOCKER_RESOLVER_STUB_HANDOFF_TIMEOUT")
+            now_resolved = required(
+                ["resolvectl", "dns", "oigqa0"], timeout=8).decode(
+                "utf8", "replace")
+            if now_resolved != resolved_base_baseline:
+                fail_stage("DOCKER_BASE_NM_DNS_CHANGED_DURING_STUB_HANDOFF")
+            current_servers = required(["resolvectl", "dns"], timeout=8).decode(
+                "utf8", "replace")
+            if any(line.strip().startswith("Global:") and
+                   line.partition(":")[2].strip()
+                   for line in current_servers.splitlines()):
+                fail_stage("DOCKER_STUB_GLOBAL_DNS_FALLBACK_NOT_REMOVED")
+            before = snapshot()
+            out["dockerStubAfterPrivateBootstrapVerified"] = True
             for peer_ip in peer_ips:
                 route = required(["ip", "-4", "route", "get", peer_ip], timeout=7)
                 parts = route.decode("utf8", "replace").split()

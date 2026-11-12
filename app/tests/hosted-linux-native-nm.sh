@@ -149,6 +149,33 @@ NMCONF
   # The native live receipt is deliberately separate from the import receipt.
   python3 -B /work/app/tests/hosted-linux-native-nm-live.py --native-scoped-live
 
+  # The real full-route acceptance process first fetches the independently
+  # pinned provider configuration and public credential page using Docker's
+  # original bootstrap resolver, and resolves its peer/HTTPS targets. All
+  # sensitive state remains in that process memory. It then pauses BEFORE
+  # any VPN activation/route ownership and signals a marker; only --inner
+  # switches the disposable resolver to fail-closed normal stub mode.
+  OIG_HOSTED_RESOLVER_HANDOFF=1     python3 -B /work/app/tests/hosted-linux-native-nm-live.py --native-fullipv4 &
+  full_pid="$!"
+  bootstrap_ready=false
+  for _ in $(seq 1 160); do
+    if [[ -f /run/oig-docker-bootstrap-ready && ! -L /run/oig-docker-bootstrap-ready ]]; then
+      bootstrap_ready=true
+      break
+    fi
+    if ! kill -0 "$full_pid" 2>/dev/null; then
+      wait "$full_pid" || true
+      echo 'HOSTED_FULL_IPV4_PROVIDER_BOOTSTRAP_FAILED_BEFORE_STUB' >&2
+      exit 75
+    fi
+    sleep .25
+  done
+  [[ "$bootstrap_ready" == true ]] || {
+    echo 'HOSTED_FULL_IPV4_PROVIDER_BOOTSTRAP_TIMEOUT' >&2
+    exit 75
+  }
+  echo 'HOSTED_FULL_IPV4_IN_MEMORY_PROVIDER_BOOTSTRAP_BEFORE_TUN=PASS'
+
   # Disposable Docker ships a REGULAR /etc/resolv.conf with a foreign
   # nameserver. systemd-resolved imports that nameserver as Global even when
   # NM's negative VPN DNS priority suppresses the dummy base DNS. The shipped
@@ -229,7 +256,10 @@ assert not any(line.strip().startswith("Global:") and line.partition(":")[2].str
 assert re.search(r"Link\s+\d+\s+\(oigqa0\):.*9\.9\.9\.9",p.stdout),"DOCKER_BASE_NM_DNS_NOT_PRESERVED"
 print("HOSTED_DISPOSABLE_NORMAL_RESOLVED_STUB_INVENTORY_PASS")
 PYCHECK_FINAL
-  python3 -B /work/app/tests/hosted-linux-native-nm-live.py --native-fullipv4
+  [[ ! -e /run/oig-docker-stub-ready && ! -L /run/oig-docker-stub-ready ]] || exit 75
+  (umask 077; : > /run/oig-docker-stub-ready)
+  wait "$full_pid"
+  echo 'HOSTED_FULL_IPV4_IN_MEMORY_BOOTSTRAP_AND_STUB_HANDOFF_PASS'
   # Re-enter the original Docker DNS bootstrap mode between independent test
   # cases. The exact private baseline file is restored only inside --inner.
   python3 -B - <<'PYRESTORE'
