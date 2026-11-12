@@ -337,3 +337,47 @@ else:
       fs.rmSync(root, { recursive: true, force: true });
     }
   });
+
+
+test('native NM legacy inline identity path is restricted and private', {skip: process.platform !== 'linux'}, () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'oig-nm-legacy-regression-'));
+  try {
+    const py = String.raw`
+import os,sys
+from pathlib import Path
+sys.path.insert(0,os.environ['OIG_BACKEND'])
+import operator_profile as profile
+import operator_rollback as rollback
+root=Path(os.environ['HOME'])
+directory=root/'.cert'/'nm-openvpn'
+directory.mkdir(parents=True,mode=0o700)
+stem='oig-native-'+'a'*24
+files={}
+for key in ('ca','cert','key'):
+    f=directory/(stem+'-'+key+'.pem')
+    f.write_bytes(b'SYNTHETIC_TEST_DATA')
+    f.chmod(0o600)
+    files[key]=str(f)
+profile._nm_vpn_data=lambda uuid:files
+assert profile._nm_imported_certificate_directory('test',stem)==directory
+assert rollback.checked_certificate_directory(str(directory))==directory
+try:
+    rollback.checked_certificate_directory(str(root/'foreign'))
+    raise AssertionError('foreign dir accepted')
+except rollback.RollbackError:pass
+profile._nm_vpn_data=lambda uuid:{**files,'key':str(root/'foreign')}
+try:
+    profile._nm_imported_certificate_directory('test',stem)
+    raise AssertionError('foreign key accepted')
+except profile.UnsafeProfile:pass
+print('LEGACY_NM_STORAGE_POLICY_PASS')
+`;
+    const proc = spawnSync('python3', ['-B', '-'], {input: py, encoding: 'utf8',
+      timeout: 5000, env: {...process.env, HOME: root,
+        OIG_BACKEND: path.join(__dirname, '../backend/linux')}});
+    assert.equal(proc.status, 0, proc.stderr);
+    assert.match(proc.stdout, /LEGACY_NM_STORAGE_POLICY_PASS/);
+  } finally {
+    fs.rmSync(root, {recursive: true, force: true});
+  }
+});
