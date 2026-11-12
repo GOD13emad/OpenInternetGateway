@@ -19,6 +19,11 @@ if [[ "${1:-}" == '--inner' ]]; then
   scope_guard
   [[ "${OIG_HOSTED_CONTAINER:-}" == "1" && -f /.dockerenv && "$(id -u)" == 0 ]] || exit 64
   test -f /work/app/tests/hosted-linux-native-nm.py
+  # Explicit per-container XDG root makes the plugin's inline PEM import
+  # location deterministic; no host user-data path is mounted.
+  export HOME=/root XDG_DATA_HOME=/root/.local/share
+  mkdir -p "$XDG_DATA_HOME"
+  chmod 0700 "$XDG_DATA_HOME"
   export DEBIAN_FRONTEND=noninteractive
   apt-get update -qq >/out/apt-setup.log 2>&1
   apt-get install -y -qq --no-install-recommends \

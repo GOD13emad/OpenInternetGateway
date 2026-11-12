@@ -104,6 +104,30 @@ def main():
             result["nmDeleteExitCode"] = response.returncode
         return response
     operator_profile._run_nmcli = observed_nmcli
+    raw_vpn_data = operator_profile._nm_vpn_data
+    def observed_vpn_data(uuid):
+        data = raw_vpn_data(uuid)
+        candidates = {
+            "xdg": Path.home() / ".local/share/networkmanagement/certificates/nm-openvpn",
+            "legacy": Path.home() / ".cert/nm-openvpn",
+        }
+        fields = {}
+        for key in ("ca", "cert", "key"):
+            value = data.get(key, "")
+            path = Path(value)
+            cls = next((name for name, parent in candidates.items()
+                        if path.parent == parent), "other")
+            fields[key] = {
+                "class": cls,
+                "expectedSuffix": path.name.startswith("oig-native-")
+                                  and path.name.endswith("-" + key + ".pem"),
+                "regularPrivate": path.is_file() and not path.is_symlink()
+                                  and path.stat().st_uid == os.geteuid()
+                                  and (path.stat().st_mode & 0o777) == 0o600,
+            }
+        result["importedIdentityShape"] = fields
+        return data
+    operator_profile._nm_vpn_data = observed_vpn_data
     stage = "POLICY"
     try:
         before = checked_snapshot()
