@@ -8,7 +8,7 @@ root-owned executable, install the service plus explicit network-manager
 ordering, and demonstrate failure/boot/restart coverage BEFORE enabling it.
 
 Production invocation (only AFTER an independently approved installation):
-  /usr/bin/python3 -I /opt/OpenInternetGateway/resources/backend/linux/
+  /usr/bin/python3 -I /opt/open-internet-gateway/resources/backend/linux/
       killswitch_bootstrap.py --bootstrap-lockdown
 
 This helper NEVER allows tunnel egress, deletes any firewall table, changes
@@ -27,7 +27,7 @@ import tempfile
 
 
 INSTALLED_SCRIPT = Path(
-    "/opt/OpenInternetGateway/resources/backend/linux/killswitch_bootstrap.py"
+    "/opt/open-internet-gateway/resources/backend/linux/killswitch_bootstrap.py"
 )
 MODULE_NAMES = (
     "nft_killswitch_plan.py",
@@ -61,9 +61,9 @@ def validate_installed_root_runtime():
     if os.geteuid() != 0 or Path(__file__).absolute() != INSTALLED_SCRIPT:
         raise BootRefused("REFUSED: not the trusted native root installation")
     parent = INSTALLED_SCRIPT.parent
-    for entry in (Path("/"), Path("/opt"), Path("/opt/OpenInternetGateway"),
-                  Path("/opt/OpenInternetGateway/resources"),
-                  Path("/opt/OpenInternetGateway/resources/backend"), parent):
+    for entry in (Path("/"), Path("/opt"), Path("/opt/open-internet-gateway"),
+                  Path("/opt/open-internet-gateway/resources"),
+                  Path("/opt/open-internet-gateway/resources/backend"), parent):
         if not _is_immutable_root_path(entry, regular=False):
             raise BootRefused("REFUSED: writable or untrusted native code directory")
     for name in MODULE_NAMES:
@@ -256,7 +256,7 @@ Wants=network-pre.target
 Type=oneshot
 User=root
 Group=root
-ExecStart=/usr/bin/python3 -I /opt/OpenInternetGateway/resources/backend/linux/killswitch_bootstrap.py --bootstrap-lockdown
+ExecStart=/usr/bin/python3 -I /opt/open-internet-gateway/resources/backend/linux/killswitch_bootstrap.py --bootstrap-lockdown
 RemainAfterExit=yes
 NoNewPrivileges=true
 CapabilityBoundingSet=CAP_NET_ADMIN
@@ -267,9 +267,24 @@ PrivateTmp=true
 """
 
 
+def networkmanager_dependency_preview():
+    """REVIEW ONLY: no NetworkManager drop-in is installed by this project."""
+    return """# REVIEW PREVIEW ONLY. DO NOT DEPLOY.
+# An opt-in native installer must first independently attest full boot/loss
+# coverage and have an owner-approved rollback/recovery method.
+# If the root-locked startup service fails, do not start NetworkManager.
+[Unit]
+Requires=openinternetgateway-lockdown.service
+After=openinternetgateway-lockdown.service
+"""
+
+
 def main(argv):
     if argv == ["--print-noninstallable-unit-preview"]:
         sys.stdout.write(service_unit_preview())
+        return 0
+    if argv == ["--print-noninstallable-nm-gate-preview"]:
+        sys.stdout.write(networkmanager_dependency_preview())
         return 0
     if argv != ["--bootstrap-lockdown"]:
         raise BootRefused("REFUSED: unknown root bootstrap request")

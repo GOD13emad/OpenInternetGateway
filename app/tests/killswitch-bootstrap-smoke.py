@@ -94,6 +94,9 @@ def must_refuse(fn, label):
 
 
 def main():
+    assert boot.INSTALLED_SCRIPT.as_posix() == (
+        "/opt/open-internet-gateway/resources/backend/linux/killswitch_bootstrap.py"
+    )
     assert boot.TABLE == "oig_guard"
     assert boot.TABLE == policy.BOOT_TABLE
     assert verifier.NFT_TABLE == policy.TABLE

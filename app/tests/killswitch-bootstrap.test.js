@@ -31,6 +31,16 @@ test('Linux optional root systemd unit parses but is deliberately not installabl
     assert.doesNotMatch(unit.stdout, /^\[Install\]$/m);
     assert.match(unit.stdout, /Before=network-pre.target NetworkManager.service/);
     assert.match(unit.stdout, /CapabilityBoundingSet=CAP_NET_ADMIN/);
+    const gate = spawnSync('python3', [
+      '-B', '-I', python, '--print-noninstallable-nm-gate-preview'
+    ], { encoding: 'utf8', timeout: 5000 });
+    assert.equal(gate.status, 0, gate.stderr);
+    assert.match(gate.stdout, /Requires=openinternetgateway-lockdown\.service/);
+    assert.match(gate.stdout, /After=openinternetgateway-lockdown\.service/);
+    assert.match(gate.stdout, /# REVIEW PREVIEW ONLY/);
+    const pkg = JSON.parse(fs.readFileSync(path.join(__dirname, '../package.json'), 'utf8'));
+    assert.equal(pkg.name, 'open-internet-gateway');
+    assert.match(unit.stdout, /ExecStart=\/usr\/bin\/python3 -I \/opt\/open-internet-gateway\/resources\/backend\/linux\/killswitch_bootstrap\.py --bootstrap-lockdown/);
     const folder = fs.mkdtempSync(path.join(os.tmpdir(), 'oig-boot-unit-qa-'));
     try {
       const file = path.join(folder, 'oig-lockdown-preview.service');
