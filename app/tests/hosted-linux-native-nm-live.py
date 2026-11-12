@@ -398,6 +398,43 @@ def main():
                          "--interface", tunnel], timeout=16)
                     out["productionDnsGuardExitCode"] = verified.returncode
                     if verified.returncode != 0:
+                        # No raw profile, resolver or route data in CI logs.
+                        # Reuse the actual guard's production parsers and
+                        # report only fixed Boolean decision predicates.
+                        import dns_route_guard as diagnostic_guard
+                        policy = {
+                            "ipv4.dns": "1.1.1.1",
+                            "ipv4.dns-search": "~.",
+                            "ipv4.dns-priority": "-2147483647",
+                            "ipv4.ignore-auto-dns": "yes",
+                            "ipv6.ignore-auto-dns": "yes",
+                            "ipv6.method": "disabled",
+                        }
+                        checks = {
+                            field + "Match": diagnostic_guard.read(
+                                ["nmcli", "-g", field, "connection", "show",
+                                 "OIG-VPN-LIVE"]) == value
+                            for field, value in policy.items()
+                        }
+                        link_dns_text = diagnostic_guard.read(
+                            ["resolvectl", "dns", tunnel]) or ""
+                        all_dns_text = diagnostic_guard.read(["resolvectl", "dns"]) or ""
+                        domains_text = diagnostic_guard.read(
+                            ["resolvectl", "domain", tunnel]) or ""
+                        domain_match = diagnostic_guard.LINK.fullmatch(domains_text.strip())
+                        route_text = diagnostic_guard.read(
+                            ["ip", "-4", "route", "get", "1.1.1.1"]) or ""
+                        checks.update({
+                            "linkDnsInventoryMatch": diagnostic_guard.dns_inventory(
+                                link_dns_text, tunnel),
+                            "allDnsInventoryMatch": diagnostic_guard.dns_inventory(
+                                all_dns_text, tunnel),
+                            "linkRouteDomainMatch": bool(
+                                domain_match and domain_match.groups() == (tunnel, "~.")),
+                            "dnsUpstreamTunRouteMatch": bool(re.search(
+                                r"\bdev\s+" + re.escape(tunnel) + r"\b", route_text)),
+                        })
+                        out["productionDnsGuardBooleanChecks"] = checks
                         fail_stage("PRODUCT_DNS_ROUTE_GUARD_REJECTED_REAL_TUN")
                     out["productionDnsGuardRealNmResolvedVerified"] = True
                 finally:
