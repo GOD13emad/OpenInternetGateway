@@ -258,14 +258,19 @@ def main():
                 stage = "FULL_IPV4_ROUTE_OWNERSHIP"
                 # No test-specific data /32: the real NM default path must
                 # cover two independent public resolvers and HTTPS itself.
-                for target in ("1.1.1.1", "9.9.9.9", probe_ip):
+                for label, target in (("DNS_ONE", "1.1.1.1"),
+                                      ("DNS_TWO", "9.9.9.9"),
+                                      ("HTTPS_TARGET", probe_ip)):
+                    stage = "FULL_IPV4_ROUTE_" + label
                     effective = required(["ip", "-4", "route", "get", target], timeout=7)
                     if not re.search(rb"\bdev\s+" + re.escape(tunnel.encode()) + rb"\b", effective):
                         fail_stage("FULL_IPV4_ROUTE_NOT_TUNNEL_OWNED")
+                stage = "PROVIDER_CONTROL_CHANNEL_UNDERLAY"
                 for peer_ip in peer_ips:
                     effective = required(["ip", "-4", "route", "get", peer_ip], timeout=7)
                     if not re.search(rb"\bdev\s+eth0\b", effective):
                         fail_stage("PROVIDER_CONTROL_CHANNEL_NOT_UNDERLAY_BOUND")
+                stage = "IPV6_ROUTE_INVENTORY"
                 from ipv6_route_guard import verify_ipv6_route_inventory
                 ipv6_routes = required(["ip", "-6", "route", "show", "table", "all"], timeout=7)
                 verify_ipv6_route_inventory(ipv6_routes.decode("utf8", "replace"), owned=tunnel)
