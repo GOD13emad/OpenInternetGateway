@@ -73,6 +73,38 @@ def main():
         "readyForFullDevice": False,
         "pass": False,
     }
+    # Observability is limited to fixed error categories and exit codes.
+    # Never include nmcli stdout/stderr, an imported UUID, PEM, or credentials.
+    fixed_errors = {
+        "NetworkManager import, trust preservation, or cleanup was not verified": "NM_IMPORT_TRUST_OR_CLEANUP_NOT_VERIFIED",
+        "NetworkManager native importer unavailable or timed out": "NM_IMPORTER_TIMEOUT",
+        "Unable to inspect NetworkManager connection UUIDs": "NM_INVENTORY_UNAVAILABLE",
+        "Temporary import identity is ambiguous; refusing deletion": "NM_IMPORT_AMBIGUOUS",
+        "NetworkManager did not preserve the unique imported profile identity": "NM_PROFILE_IDENTITY_CHANGED",
+        "Imported NetworkManager profile is not an OpenVPN VPN": "NM_PROFILE_TYPE_CHANGED",
+        "NetworkManager changed the pinned provider endpoint": "NM_ENDPOINT_CHANGED",
+        "NetworkManager did not preserve server certificate role validation": "NM_TLS_SERVER_ROLE_LOST",
+        "NetworkManager did not preserve the exact server certificate CN": "NM_TLS_PEER_CN_LOST",
+        "NetworkManager changed the selected TCP transport": "NM_TRANSPORT_CHANGED",
+        "NetworkManager omitted an imported certificate or key": "NM_KEY_OR_CA_OMITTED",
+        "NetworkManager stored identity material outside the unique QA namespace": "NM_IDENTITY_STORAGE_UNSAFE",
+        "Imported identity material is missing or linked": "NM_IDENTITY_MISSING",
+        "Imported identity material is not private and uniquely owned": "NM_IDENTITY_NOT_PRIVATE",
+        "NetworkManager changed imported identity material": "NM_IDENTITY_BYTES_CHANGED",
+        "NetworkManager returned ambiguous VPN data": "NM_VPN_DATA_AMBIGUOUS",
+        "NetworkManager returned malformed VPN data": "NM_VPN_DATA_MALFORMED",
+        "NetworkManager certificate storage ownership or permissions are unsafe": "NM_CERT_DIRECTORY_UNSAFE",
+    }
+    raw_nmcli = operator_profile._run_nmcli
+    def observed_nmcli(*args, **kwargs):
+        response = raw_nmcli(*args, **kwargs)
+        if args[:2] == ("connection", "import"):
+            result["nmImportExitCode"] = response.returncode
+        elif args[:2] == ("connection", "delete"):
+            result["nmDeleteExitCode"] = response.returncode
+        return response
+    operator_profile._run_nmcli = observed_nmcli
+    stage = "POLICY"
     try:
         before = checked_snapshot()
         profile, profile_sha = provider.official_profile()
@@ -85,6 +117,8 @@ def main():
                 path, provider.EXPECTED_CA, provider.EXPECTED_CN)
             if not checked:
                 raise RuntimeError("PINNED_PROFILE_NOT_ACCEPTED")
+            result["profilePolicyAccepted"] = True
+            stage = "NATIVE_IMPORT"
             gate = operator_profile.native_import_check(
                 path, provider.EXPECTED_CA, provider.EXPECTED_CN)
             for k in ("ok", "nativeImportCompatible", "trustConstraintsPreserved",
@@ -102,7 +136,8 @@ def main():
         result["pass"] = result["containerNetworkUntouched"]
     except Exception as exc:
         result["failureClass"] = type(exc).__name__
-        result["failureGate"] = "ISOLATED_NM_IMPORT_NOT_ACCEPTED"
+        result["failureGate"] = stage
+        result["failureCode"] = fixed_errors.get(str(exc), "UNCLASSIFIED_OR_EXTERNAL_ERROR")
         result["pass"] = False
     write_receipt(result)
     print("HOSTED_NATIVE_NETWORKMANAGER_IMPORT_RECEIPT=" + json.dumps(result, sort_keys=True))
