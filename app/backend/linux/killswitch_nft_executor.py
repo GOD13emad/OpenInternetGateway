@@ -51,6 +51,7 @@ def nft_argv_permitted(args, active_policy_file=None):
     """Pure exact-argv gate. A similarly named arbitrary file is not trusted."""
     read_only = (
         ["-j", "list", "tables"],
+        ["-j", "list", "table", "inet", NFT_TABLE],
         ["-j", "list", "chain", "inet", NFT_TABLE, "output"],
         ["-j", "list", "chain", "inet", NFT_TABLE, "forward"],
     )
@@ -65,6 +66,52 @@ def nft_argv_permitted(args, active_policy_file=None):
         ["-c", "-f", active_policy_file],
         ["-f", active_policy_file],
     )
+
+
+def verify_sole_lockdown_table(raw):
+    """Reject extra chains/sets/maps/foreign rules in the disposable table.
+
+    Merely checking output/forward chains would miss a malicious extra
+    chain (possibly attached to a second hook) in the same table.
+    This validation is limited to our disposable QA table and does not
+    attest to all other host firewall tables.
+    """
+    if not isinstance(raw, bytes) or not raw or len(raw) > MAX_NFT_OUTPUT:
+        raise NftSafetyError("UNTRUSTED_LOCKDOWN_TABLE_JSON")
+    try:
+        doc = json.loads(raw)
+        if not isinstance(doc, dict) or not isinstance(doc.get("nftables"), list):
+            raise ValueError("Missing NFT inventory")
+        kind_counts = {"table": 0, "chain": 0, "rule": 0}
+        chain_names = []
+        rule_names = []
+        for item in doc["nftables"]:
+            if not isinstance(item, dict) or len(item) != 1:
+                raise ValueError("Ambiguous NFT item")
+            kind, data = next(iter(item.items()))
+            if kind == "metainfo":
+                continue
+            if kind not in kind_counts or not isinstance(data, dict):
+                raise ValueError("Unknown NFT object in owned table")
+            if data.get("family") != "inet" or data.get("table", data.get("name")) != NFT_TABLE:
+                raise ValueError("Wrong table identity")
+            kind_counts[kind] += 1
+            if kind == "table":
+                if data.get("name") != NFT_TABLE:
+                    raise ValueError("Wrong table name")
+            elif kind == "chain":
+                chain_names.append(data.get("name"))
+            else:
+                rule_names.append(data.get("chain"))
+        if (kind_counts != {"table": 1, "chain": 2, "rule": 5}
+                or set(chain_names) != {"output", "forward"}
+                or chain_names.count("output") != 1 or chain_names.count("forward") != 1
+                or rule_names.count("output") != 4
+                or rule_names.count("forward") != 1):
+            raise ValueError("Unexpected lockdown table contents")
+    except (UnicodeError, ValueError, KeyError, TypeError, AttributeError) as exc:
+        raise NftSafetyError("UNTRUSTED_LOCKDOWN_TABLE_JSON") from exc
+    return True
 
 
 class IsolatedNftBackend:
@@ -106,6 +153,10 @@ class IsolatedNftBackend:
             ]
         except (ValueError, KeyError, TypeError) as exc:
             raise NftSafetyError("UNTRUSTED_TABLE_INVENTORY") from exc
+
+    def verify_sole_table(self):
+        raw = self._call(["-j", "list", "table", "inet", NFT_TABLE])
+        return verify_sole_lockdown_table(raw)
 
     def chain(self, name):
         if name not in ("output", "forward"):
@@ -257,7 +308,7 @@ class LockdownOnlyController:
         if not isinstance(approved, contract.Approved):
             raise NftSafetyError("Approved pinned config is required")
         if backend is None or any(not callable(getattr(backend, n, None))
-                                  for n in ("tables", "chain", "rules", "apply")):
+                                  for n in ("tables", "chain", "rules", "verify_sole_table", "apply")):
             raise NftSafetyError("Nft backend interface missing")
         if isinstance(backend, IsolatedNftBackend) and backend.approved != approved:
             raise NftSafetyError("Executor's pinned manifest differs")
@@ -270,6 +321,7 @@ class LockdownOnlyController:
         return a.tunnel, a.underlay, a.peer_ipv4, a.peer_port, a.transport
 
     def _locked_verified(self):
+        self._backend.verify_sole_table()
         if self._backend.chain("output") != ("output", "drop", -150):
             raise NftSafetyError("Output base chain policy/priority changed")
         if self._backend.chain("forward") != ("forward", "drop", -150):

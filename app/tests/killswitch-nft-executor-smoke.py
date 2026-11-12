@@ -2,8 +2,10 @@
 """Offline transaction/state regression; never executes nft on owner host."""
 from pathlib import Path
 import copy
+import json
 import os
 import runpy
+import tempfile
 import stat
 import subprocess
 import sys
@@ -53,6 +55,7 @@ class FakeBackend:
         self.forward = ("forward", "drop", -150)
         self.allow_tunnel = False
         self.extra_accept = False
+        self.extra_table_object = False
         self.wrong_peer = False
         self.wrong_port = False
         self.missing_drop = False
@@ -63,6 +66,22 @@ class FakeBackend:
     def tables(self):
         self.calls.append("tables")
         return [("inet", executor.NFT_TABLE)] if self.exists else []
+
+    def verify_sole_table(self):
+        self.calls.append("verify_sole_table")
+        doc = {
+            "nftables": [
+                {"metainfo": {"version": "test"}},
+                {"table": {"family": "inet", "name": executor.NFT_TABLE}},
+                {"chain": {"family": "inet", "table": executor.NFT_TABLE, "name": "output"}},
+                {"chain": {"family": "inet", "table": executor.NFT_TABLE, "name": "forward"}},
+                *[{"rule": {"family": "inet", "table": executor.NFT_TABLE, "chain": "output"}} for _ in range(4)],
+                {"rule": {"family": "inet", "table": executor.NFT_TABLE, "chain": "forward"}},
+            ]
+        }
+        if self.extra_table_object:
+            doc["nftables"].append({"set": {"family": "inet", "table": executor.NFT_TABLE, "name": "unsafe"}})
+        return executor.verify_sole_lockdown_table(json.dumps(doc).encode("utf8"))
 
     def chain(self, kind):
         self.calls.append("chain:" + kind)
@@ -272,6 +291,80 @@ def hosted_receipt_failure_regressions():
     print("NFT_EXECUTOR_HOSTED_RECEIPT_FAILURE_PATHS_PASS")
 
 
+def hosted_main_receipt_integration():
+    """Exercise main() receipt persistence under mocked, NEVER real, nft.
+
+    Preflight errors must be visible in an on-disk JSON receipt; a successful
+    isolated simulation must still state no production proof. All methods
+    reading/applying kernel state are replaced with the offline FakeBackend.
+    """
+    hosted = runpy.run_path(str(Path(__file__).with_name(
+        "hosted-linux-nft-executor-smoke.py"
+    )))
+    entry = hosted["main"]
+    globals_for_main = entry.__globals__
+    baseline = ("route4", "route6", "dns")
+
+    def invoke(*, snapshot, backend):
+        with tempfile.TemporaryDirectory(prefix="oig-nft-receipt-fixture-") as root:
+            receipt = Path(root) / "receipt.json"
+            with (patch.object(sys, "argv", [
+                      "hosted-linux-nft-executor-smoke.py",
+                      "--isolated-docker-only"]),
+                  patch.object(executor, "disposable_scope", return_value=None),
+                  patch.object(executor, "IsolatedNftBackend",
+                               side_effect=lambda _: backend),
+                  patch.dict(globals_for_main, {
+                      "RECEIPT": receipt,
+                      "snapshot": snapshot,
+                      "dns_drop_probe": lambda: (0, 8),
+                  })):
+                outcome = entry()
+            assert receipt.is_file(), "Early CI failure lost its receipt"
+            recorded = json.loads(receipt.read_text())
+            assert recorded["schema"] == "oig-hosted-nft-executor-v1"
+            assert recorded["pass"] is (outcome == 0)
+            assert recorded["productionKillSwitchVerified"] is False
+            assert recorded["bootPersistenceVerified"] is False
+            assert recorded["physicalHostNetworkChanged"] is False
+            return outcome, recorded
+
+    never_called = []
+    def snapshot_failure():
+        never_called.append("baseline")
+        raise RuntimeError("BASELINE_UNAVAILABLE")
+
+    rc, record = invoke(snapshot=snapshot_failure, backend=FakeBackend())
+    assert rc == 1
+    assert record["failureStage"] == "BASELINE_SNAPSHOT"
+    assert record["failureClass"] == "RuntimeError"
+    assert record["containerRouteDnsBaselineRestored"] is False
+    assert never_called == ["baseline"]
+
+    collision = FakeBackend()
+    collision.exists = True
+    rc, record = invoke(snapshot=lambda: baseline, backend=collision)
+    assert rc == 1
+    assert record["failureStage"] == "ISOLATED_EXECUTOR_PREFLIGHT"
+    assert record["failureClass"] == "NftSafetyError"
+    assert not collision.scripts
+    assert record["containerRouteDnsBaselineRestored"] is True
+    assert record["isolatedOwnedTableRemoved"] is False
+
+    # An unknown post-commit state must preserve the failure and never
+    # attempt the test-table deletion.
+    unknown = FakeBackend()
+    unknown.fail = True
+    rc, record = invoke(snapshot=lambda: baseline, backend=unknown)
+    assert rc == 1
+    assert record["failureStage"] == "LOCKDOWN_INSTALL"
+    assert record["failureClass"] == "NftSafetyError"
+    assert record["isolatedOwnedTableRemoved"] is False
+    assert len(unknown.scripts) == 1
+
+    print("NFT_HOSTED_MAIN_REAL_RECEIPT_MOCKED_FAILURE_CASES_PASS")
+
+
 def main():
     a = FakeBackend()
     controller = executor.LockdownOnlyController(APPROVED, a)
@@ -336,6 +429,32 @@ def main():
         setattr(forged, condition, True)
         refuse(ctl._locked_verified, "forged_" + condition)
 
+    extra_table = FakeBackend()
+    extra_table.extra_table_object = True
+    bad_table = executor.LockdownOnlyController(APPROVED, extra_table)
+    refuse(bad_table.install_lockdown, "extra_set_in_owned_table")
+    assert bad_table.state == "UNKNOWN"
+
+    good_table = FakeBackend()
+    good_table.verify_sole_table()
+    def bad_structure(entries):
+        refuse(lambda: executor.verify_sole_lockdown_table(
+            json.dumps({"nftables": entries}).encode()), "forged_table_layout")
+    entries = json.loads(json.dumps({
+        "nftables": [
+            {"table": {"family": "inet", "name": executor.NFT_TABLE}},
+            {"chain": {"family": "inet", "table": executor.NFT_TABLE, "name": "output"}},
+            {"chain": {"family": "inet", "table": executor.NFT_TABLE, "name": "forward"}},
+            *[{"rule": {"family": "inet", "table": executor.NFT_TABLE, "chain": "output"}} for _ in range(4)],
+            {"rule": {"family": "inet", "table": executor.NFT_TABLE, "chain": "forward"}},
+        ]
+    }))["nftables"]
+    bad_structure(entries + [{"chain": {"family": "inet", "table": executor.NFT_TABLE, "name": "input"}}])
+    bad_structure(entries + [{"set": {"family": "inet", "table": executor.NFT_TABLE, "name": "hidden"}}])
+    bad_structure(entries[:-1])
+    bad_structure(entries + [{"rule": {"family": "inet", "table": executor.NFT_TABLE, "chain": "output"}}])
+    bad_structure([{"table": {"family": "inet", "name": "other"}}] + entries[1:])
+
     bad_priority = FakeBackend()
     bad_priority.output = ("output", "drop", 0)
     refuse(lambda: executor.LockdownOnlyController(
@@ -357,6 +476,7 @@ def main():
         ["-j", "list", "chain", "inet", executor.NFT_TABLE, "output"],
         ["-j", "list", "chain", "inet", executor.NFT_TABLE, "forward"],
     ]
+    read_only.append(["-j", "list", "table", "inet", executor.NFT_TABLE])
     for command in read_only:
         assert executor.nft_argv_permitted(command)
     own_file = "/tmp/oig-qa-nft-trusted/policy.nft"
@@ -389,6 +509,7 @@ def main():
         raise AssertionError("OWNER_HOST_NFT_EXECUTOR_NOT_REFUSED")
     isolated_nft_subprocess_simulation()
     hosted_receipt_failure_regressions()
+    hosted_main_receipt_integration()
     source = Path(executor.__file__).read_text()
     assert "shell=True" not in source and "Nft arguments not in isolated allowlist" in source
     assert "sudo " not in source and "pkexec " not in source
