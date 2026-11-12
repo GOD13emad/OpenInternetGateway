@@ -435,6 +435,39 @@ def main():
                                 r"\bdev\s+" + re.escape(tunnel) + r"\b", route_text)),
                         })
                         out["productionDnsGuardBooleanChecks"] = checks
+                        # Categorize any extra effective resolver without
+                        # exposing IPs, credentials, profiles or raw output.
+                        # Never weaken the shipped fail-closed DNS predicate.
+                        shape = {
+                            "globalResolverPresent": False,
+                            "foreignLinkResolverPresent": False,
+                            "unparsedResolverRowPresent": False,
+                            "extraOwnedLinkResolverPresent": False,
+                            "dockerResolvConfMatchesGlobal": False,
+                        }
+                        docker_dns = set(re.findall(
+                            r"(?m)^nameserver\s+([^\s#]+)",
+                            Path("/etc/resolv.conf").read_text(
+                                encoding="utf8", errors="replace")))
+                        for row in all_dns_text.splitlines():
+                            line = row.strip()
+                            if not line:
+                                continue
+                            if line.startswith("Global:"):
+                                values = line.partition(":")[2].split()
+                                if values:
+                                    shape["globalResolverPresent"] = True
+                                    if docker_dns.intersection(values):
+                                        shape["dockerResolvConfMatchesGlobal"] = True
+                            else:
+                                match = diagnostic_guard.LINK.fullmatch(line)
+                                if match is None:
+                                    shape["unparsedResolverRowPresent"] = True
+                                elif match.group(1) != tunnel and match.group(2).strip():
+                                    shape["foreignLinkResolverPresent"] = True
+                                elif match.group(1) == tunnel and                                         match.group(2).split() != ["1.1.1.1"]:
+                                    shape["extraOwnedLinkResolverPresent"] = True
+                        out["productionDnsGuardRejectionShape"] = shape
                         fail_stage("PRODUCT_DNS_ROUTE_GUARD_REJECTED_REAL_TUN")
                     out["productionDnsGuardRealNmResolvedVerified"] = True
                 finally:
