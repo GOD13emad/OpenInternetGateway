@@ -49,10 +49,20 @@ def _command_args(kind, approved):
     }[kind]
 
 
-def _run_readonly(args):
-    """Trusted service-only OS command reader; no root service is installed."""
-    if args[0] not in (NMCLI, IP):
-        raise ObservationError("Unsafe executable")
+def _run_readonly(args, approved):
+    """Execute ONLY the three exact approved read-only command vectors.
+
+    Matching an executable path alone is NOT sufficient: ip/nmcli also
+    contain network-mutating subcommands. No caller-provided argv is allowed.
+    """
+    if not isinstance(approved, contract.Approved):
+        raise ObservationError("Approved manifest required")
+    allow = tuple(_command_args(kind, approved) for kind in
+                  ("nmcli-active", "link-detail", "peer-route"))
+    if (not isinstance(args, list) or
+            not all(type(arg) is str for arg in args) or
+            args not in allow):
+        raise ObservationError("Command is not on the exact read-only allowlist")
     try:
         p = subprocess.run(
             args, stdin=subprocess.DEVNULL, capture_output=True,
@@ -130,7 +140,7 @@ def observe_readonly(approved, runner=None):
     """
     if not isinstance(approved, contract.Approved):
         raise ObservationError("Approved manifest required")
-    reader = _run_readonly if runner is None else runner
+    reader = (lambda args: _run_readonly(args, approved)) if runner is None else runner
     observations = []
     for kind in ("nmcli-active", "link-detail", "peer-route"):
         raw = reader(_command_args(kind, approved))

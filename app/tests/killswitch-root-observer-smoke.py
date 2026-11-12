@@ -106,14 +106,30 @@ def main():
     refused(lambda: observer.observe_readonly(None, lambda _: b''), "no_manifest")
     refused(lambda: observer._command_args("nft", APPROVED), "command_injection")
     refused(lambda: observer._command_args("disconnect", APPROVED), "network_mutation")
-    refused(lambda: observer._run_readonly(["/bin/sh","-c","id"]), "shell")
+    forbidden_argv = [
+        (["/bin/sh", "-c", "id"], "shell"),
+        ([observer.NMCLI, "connection", "down", "id", "tun7"], "nm_down"),
+        ([observer.NMCLI, "connection", "up", "id", "tun7"], "nm_up"),
+        ([observer.IP, "link", "set", "dev", "eth0", "down"], "ip_link_down"),
+        ([observer.IP, "route", "add", "default", "dev", "eth0"], "route_add"),
+        ([observer.IP, "-j", "-4", "route", "get", "8.8.8.8"], "wrong_peer"),
+        ([observer.IP, "-j", "-d", "link", "show", "dev", "tun12"], "wrong_tunnel"),
+    ]
+    for argv, label in forbidden_argv:
+        # Rejected at allowlist, BEFORE subprocess is ever invoked.
+        refused(lambda argv=argv: observer._run_readonly(argv, APPROVED), label)
+    refused(lambda: observer._run_readonly(EXPECTED[0], None), "no_approved")
+    for approved_cmd in EXPECTED:
+        assert approved_cmd in [observer._command_args(
+            label, APPROVED) for label in
+            ("nmcli-active", "link-detail", "peer-route")]
     assert len(failure_cases)==15
     text=Path(observer.__file__).read_text()
     for mutation in ("nft -f", "nmcli connection up", "nmcli connection down",
                      "os.system(", "shell=True", "systemctl enable"):
         assert mutation not in text,mutation
     print("NM_KERNEL_INDEPENDENT_PARTIAL_OBSERVER_FIXTURES_PASS"
-          " 15_INVALID_RECORDS 4_MUTATION_REFUSALS NO_UNLOCK_NO_HOST_MUTATION")
+          " 15_INVALID_RECORDS 8_COMMAND_REFUSALS NO_UNLOCK_NO_HOST_MUTATION")
 
 
 if __name__=="__main__":

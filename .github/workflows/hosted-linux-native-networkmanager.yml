@@ -12,6 +12,18 @@ on:
       - 'app/tests/hosted-linux-nft-killswitch-smoke.py'
       - 'app/tests/nft-killswitch-plan.test.js'
       - 'app/backend/linux/nft_killswitch_plan.py'
+      - 'app/backend/linux/killswitch_lifecycle_contract.py'
+      - 'app/backend/linux/killswitch_broker_protocol.py'
+      - 'app/backend/linux/killswitch_root_observer.py'
+      - 'app/backend/linux/killswitch_broker_ipc.py'
+      - 'app/tests/killswitch-lifecycle-contract-smoke.py'
+      - 'app/tests/killswitch-lifecycle-contract.test.js'
+      - 'app/tests/killswitch-broker-protocol-smoke.py'
+      - 'app/tests/killswitch-broker-protocol.test.js'
+      - 'app/tests/killswitch-root-observer-smoke.py'
+      - 'app/tests/killswitch-root-observer.test.js'
+      - 'app/tests/killswitch-broker-ipc-smoke.py'
+      - 'app/tests/killswitch-broker-ipc.test.js'
       - 'app/tests/hosted-linux-provider-data-plane.py'
       - 'app/backend/linux/operator_profile.py'
       - 'app/backend/linux/operator_full_device.py'
@@ -51,6 +63,14 @@ jobs:
           ast.parse(pathlib.Path('app/tests/hosted-linux-user-timer-bridge.py').read_text())
           ast.parse(pathlib.Path('app/tests/hosted-linux-nft-killswitch-smoke.py').read_text())
           ast.parse(pathlib.Path('app/backend/linux/nft_killswitch_plan.py').read_text())
+          ast.parse(pathlib.Path('app/backend/linux/killswitch_lifecycle_contract.py').read_text())
+          ast.parse(pathlib.Path('app/backend/linux/killswitch_broker_protocol.py').read_text())
+          ast.parse(pathlib.Path('app/backend/linux/killswitch_root_observer.py').read_text())
+          ast.parse(pathlib.Path('app/backend/linux/killswitch_broker_ipc.py').read_text())
+          ast.parse(pathlib.Path('app/tests/killswitch-lifecycle-contract-smoke.py').read_text())
+          ast.parse(pathlib.Path('app/tests/killswitch-broker-protocol-smoke.py').read_text())
+          ast.parse(pathlib.Path('app/tests/killswitch-root-observer-smoke.py').read_text())
+          ast.parse(pathlib.Path('app/tests/killswitch-broker-ipc-smoke.py').read_text())
           print('DISPOSABLE_NATIVE_NM_IMPORT_AST_PASS')
           PY
           set +e
@@ -90,6 +110,10 @@ jobs:
           set -e
           test "$nft_code" -ne 0
           test "$nft_result" = 'REFUSED: owner host or non-disposable runner'
+          python3 -B app/tests/killswitch-lifecycle-contract-smoke.py
+          python3 -B app/tests/killswitch-broker-protocol-smoke.py
+          python3 -B app/tests/killswitch-root-observer-smoke.py
+          python3 -B app/tests/killswitch-broker-ipc-smoke.py
           echo 'OWNER_HOST_REFUSED=PASS'
       - name: Real OIG NetworkManager import plus scoped live OpenVPN TUN in isolated Docker netns
         shell: bash
