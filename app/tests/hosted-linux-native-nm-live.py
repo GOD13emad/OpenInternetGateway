@@ -222,6 +222,9 @@ def main():
                       "vpn.user-name", "vpnbook",
                       "ipv4.never-default", "no" if is_full_ipv4 else "yes",
                       "ipv6.never-default", "yes",
+                      # Match the actual OIG production security policy:
+                      # IPv4-only VPN must not permit an IPv6 escape route.
+                      "ipv6.method", "disabled",
                       "ipv4.ignore-auto-dns", "yes",
                       "ipv6.ignore-auto-dns", "yes",
                       # This is only profile-policy acceptance in Docker
@@ -250,6 +253,7 @@ def main():
                     "ipv4.dns-priority": "-2147483647",
                     "ipv4.ignore-auto-dns": "yes",
                     "ipv6.ignore-auto-dns": "yes",
+                    "ipv6.method": "disabled",
                 }
                 for field, expected in expected_dns.items():
                     observed = required(
@@ -382,14 +386,17 @@ def main():
                 if "OIG-VPN-LIVE" in existing:
                     fail_stage("TEST_OIG_CONNECTION_NAME_ALREADY_PRESENT")
                 try:
+                    stage = "PRODUCT_DNS_QA_ALIAS_APPLY"
                     required(
                         ["nmcli", "--wait", "5", "connection", "modify",
                          "--temporary", "uuid", uuid, "connection.id",
                          "OIG-VPN-LIVE"], timeout=10)
+                    stage = "PRODUCT_DNS_READONLY_GUARD_ON_REAL_NM"
                     verified = cmd(
                         ["python3", "-B", str(BACKEND / "dns_route_guard.py"),
                          "--managed-name", "OIG-VPN-LIVE",
                          "--interface", tunnel], timeout=16)
+                    out["productionDnsGuardExitCode"] = verified.returncode
                     if verified.returncode != 0:
                         fail_stage("PRODUCT_DNS_ROUTE_GUARD_REJECTED_REAL_TUN")
                     out["productionDnsGuardRealNmResolvedVerified"] = True
@@ -398,6 +405,7 @@ def main():
                         ["nmcli", "--wait", "5", "connection", "modify",
                          "--temporary", "uuid", uuid,
                          "connection.id", original_name], timeout=10)
+                    out["temporaryNmAliasRestoreExitCode"] = restored.returncode
                     if restored.returncode != 0:
                         fail_stage("TEST_PROFILE_IDENTITY_RESTORE_FAILED")
                 operator_profile.verify_nm_import(
