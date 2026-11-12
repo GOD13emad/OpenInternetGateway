@@ -69,6 +69,15 @@ NMCONF
     echo 'HOSTED_DISPOSABLE_NM_SERVICE_NOT_AVAILABLE' >&2
     exit 68
   }
+  # A native VPN connection needs a NetworkManager-owned *active base*
+  # interface. Docker eth0 stays unmanaged to preserve the runner's bridge
+  # underlay; a disposable dummy with a documentation-only /30 is used as the
+  # NM activation base. This modifies no owner or runner-host interface.
+  nmcli --wait 5 connection add save no type dummy ifname oigqa0 \
+    con-name oig-hosted-base ipv4.method manual \
+    ipv4.addresses 198.51.100.1/30 ipv4.never-default yes \
+    ipv6.method disabled >/out/nm-base-setup.log 2>&1
+  nmcli --wait 12 connection up id oig-hosted-base >>/out/nm-base-setup.log 2>&1
   python3 -B /work/app/tests/hosted-linux-native-nm.py --native-import
   # Only the disposable container progresses to real NM/OpenVPN activation.
   # The native live receipt is deliberately separate from the import receipt.

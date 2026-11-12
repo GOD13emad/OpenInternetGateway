@@ -174,9 +174,29 @@ def main():
             fd = operator_trial.make_password_fd(public_pass)
             public_pass = None
             try:
-                required(["nmcli", "--wait", "75", "connection", "up",
-                          "uuid", uuid, "passwd-file", f"/proc/self/fd/{fd}"],
-                         timeout=83, pass_fds=(fd,))
+                started = cmd(["nmcli", "--wait", "75", "connection", "up",
+                               "uuid", uuid, "ifname", "oigqa0",
+                               "passwd-file", f"/proc/self/fd/{fd}"],
+                              timeout=83, pass_fds=(fd,))
+                out["nmUpExitCode"] = started.returncode
+                if started.returncode:
+                    # Expose only fixed diagnostics, never provider credentials
+                    # or raw nmcli stdout/stderr (which may hold profile data).
+                    error = started.stderr.decode("utf8", "replace").lower()
+                    categories = {
+                        "no suitable device": "BASE_INTERFACE_UNSUITABLE",
+                        "no active connection": "BASE_CONNECTION_MISSING",
+                        "secrets were required": "NM_SECRET_HANDOFF_REFUSED",
+                        "no valid vpn secrets": "NM_SECRET_HANDOFF_REFUSED",
+                        "could not find": "NM_RESOURCE_NOT_FOUND",
+                        "vpn service failed": "VPN_PLUGIN_FAILURE",
+                        "vpn service was stopped": "VPN_PLUGIN_FAILURE",
+                        "connection activation failed": "NM_ACTIVATION_FAILED",
+                    }
+                    out["nmUpFailureCategory"] = next(
+                        (value for needle, value in categories.items()
+                         if needle in error), "NM_UNKNOWN_FAILURE")
+                    fail_stage("NM_UP_RETURNED_NONZERO")
             finally:
                 os.close(fd)
             active = required(["nmcli", "-t", "-f", "UUID",
