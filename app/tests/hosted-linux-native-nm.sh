@@ -38,7 +38,17 @@ NMCONF
   NetworkManager --no-daemon --config=/etc/NetworkManager/NetworkManager.conf \
     >/out/nm-service.log 2>&1 &
   nm_pid="$!"
-  trap 'kill "$nm_pid" 2>/dev/null || true' EXIT
+  finish_inner() {
+    # The container creates its private receipt as 0600/root. Transfer only
+    # the artifact's ownership to the runner user for actions/upload-artifact.
+    # Never loosen permissions or mount owner-host sensitive directories.
+    if [[ -f /out/oig-hosted-native-nm.json ]]; then
+      chown "${OIG_RUNNER_UID:?}:${OIG_RUNNER_GID:?}" /out/oig-hosted-native-nm.json
+      chmod 0600 /out/oig-hosted-native-nm.json
+    fi
+    kill "$nm_pid" 2>/dev/null || true
+  }
+  trap finish_inner EXIT
   nm_ready=false
   for _ in $(seq 1 30); do
     if nmcli --wait 2 general status >/dev/null 2>&1; then
@@ -73,6 +83,7 @@ timeout 600s docker run --rm --name "$name" \
   --network bridge --security-opt no-new-privileges \
   -v "$PWD:/work:ro" -v "$out:/out:rw" \
   -e OIG_HOSTED_CONTAINER=1 \
+  -e OIG_RUNNER_UID="$(id -u)" -e OIG_RUNNER_GID="$(id -g)" \
   -e GITHUB_ACTIONS -e RUNNER_ENVIRONMENT -e GITHUB_REPOSITORY \
   -e GITHUB_EVENT_NAME -e GITHUB_RUN_ID \
   ubuntu:24.04 bash /work/app/tests/hosted-linux-native-nm.sh --inner

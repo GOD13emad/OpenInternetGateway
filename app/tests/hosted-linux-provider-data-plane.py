@@ -97,7 +97,7 @@ def official_profile():
         raise RuntimeError('Unexpected pre-existing trust override in official profile')
     hardened = s.rstrip() + '\nremote-cert-tls server\n' \
         + 'verify-x509-name ' + EXPECTED_CN + ' name\n' \
-        + 'auth-nocache\nverb 3\n'
+        + 'auth-nocache\n'  # Official config already provides its own verb setting.
     return hardened, hashlib.sha256(raw).hexdigest()
 
 def sh(args, timeout=12, check=True):
