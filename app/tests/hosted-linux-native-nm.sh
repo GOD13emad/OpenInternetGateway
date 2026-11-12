@@ -27,15 +27,41 @@ if [[ "${1:-}" == '--inner' ]]; then
   export DEBIAN_FRONTEND=noninteractive
   apt-get update -qq >/out/apt-setup.log 2>&1
   apt-get install -y -qq --no-install-recommends \
-    python3 ca-certificates iproute2 dbus network-manager network-manager-openvpn openvpn curl dnsutils \
+    python3 ca-certificates iproute2 dbus network-manager network-manager-openvpn openvpn curl dnsutils systemd-resolved \
     >>/out/apt-setup.log 2>&1
   mkdir -p /run/dbus
   dbus-daemon --system --fork
+  # Run a genuine disposable systemd-resolved D-Bus service. Without this,
+  # NetworkManager profile DNS priority proves only saved properties.
+  resolved_bin=/usr/lib/systemd/systemd-resolved
+  [[ -x "$resolved_bin" ]] || {
+    echo 'HOSTED_RESOLVED_EXECUTABLE_UNAVAILABLE' >&2
+    exit 72
+  }
+  "$resolved_bin" >/out/resolved-service.log 2>&1 &
+  resolved_pid="$!"
+  resolved_ready=false
+  for _ in $(seq 1 40); do
+    if resolvectl status >/dev/null 2>&1; then
+      resolved_ready=true
+      break
+    fi
+    kill -0 "$resolved_pid" 2>/dev/null || break
+    sleep .25
+  done
+  [[ "$resolved_ready" == true ]] || {
+    echo 'HOSTED_RESOLVED_DBUS_NOT_READY' >&2
+    tail -n 8 /out/resolved-service.log >&2
+    exit 73
+  }
   mkdir -p /etc/NetworkManager
   cat > /etc/NetworkManager/NetworkManager.conf <<'NMCONF'
 [main]
 plugins=keyfile
-dns=none
+dns=systemd-resolved
+rc-manager=unmanaged
+# Keep Docker's original resolv.conf untouched by NM; real DNS routing is
+# checked via resolvectl D-Bus, independent of the container file probe.
 # Ubuntu's distribution keyfile policy can mark *all* non-WiFi devices
 # strictly unmanaged; unlike device.managed, it cannot be overridden by
 # nmcli. Scope it to ONLY the Docker underlay in this disposable namespace.
@@ -62,6 +88,7 @@ NMCONF
       fi
     done
     kill "$nm_pid" 2>/dev/null || true
+    kill "$resolved_pid" 2>/dev/null || true
   }
   trap finish_inner EXIT
   nm_ready=false
@@ -98,6 +125,7 @@ NMCONF
   if ! nmcli --wait 5 connection add save no type dummy ifname oigqa0 \
       con-name oig-hosted-base ipv4.method manual \
       ipv4.addresses 198.51.100.1/30 ipv4.never-default yes \
+      ipv4.dns 9.9.9.9 ipv4.dns-search '~.' ipv4.dns-priority 100 \
       ipv6.method disabled >/out/nm-base-setup.log 2>&1; then
     echo 'HOSTED_DISPOSABLE_NM_BASE_CREATE_FAILED' >&2
     tail -n 8 /out/nm-base-setup.log >&2
@@ -176,6 +204,9 @@ assert d.get('nativeNmAuthenticated') is True
 assert d.get('fullIPv4RoutesOwned') is True
 assert d.get('nmPinnedDnsPriorityConfigVerified') is True
 assert d.get('nmActiveDnsRoutingPolicyVerified') is True
+assert d.get('resolvedVpnDnsOnlyPolicyVerified') is True
+assert d.get('resolvedQueryViaVpnVerified') is True
+assert d.get('resolvedDnsPolicyRestored') is True
 assert d.get('explicitResolverDnsViaTun') is True
 assert d.get('containerDefaultDnsViaTunVerified') is True
 assert d.get('containerDefaultResolverRestoredExact') is True

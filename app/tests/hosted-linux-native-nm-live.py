@@ -19,6 +19,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 
 HERE = Path(__file__).resolve().parent
 BACKEND = HERE.parent / "backend" / "linux"
@@ -116,11 +117,21 @@ def main():
     resolver_file = Path("/etc/resolv.conf")
     resolver_original = None
     resolver_changed = False
+    resolved_base_baseline = None
     try:
         # Host preconditions are checked before any provider secret is fetched.
         if not Path("/dev/net/tun").exists():
             fail_stage("TUN_UNAVAILABLE")
         before = snapshot()
+        if is_full_ipv4:
+            stage = "RESOLVED_BASE_DNS_BASELINE"
+            # The disposable NM-managed dummy is the competing physical
+            # resolver; it must reappear after the VPN is removed. No
+            # host/runner resolver participates in this test.
+            resolved_base_baseline = required(
+                ["resolvectl", "dns", "oigqa0"], timeout=8).decode("utf8", "replace")
+            if "9.9.9.9" not in resolved_base_baseline:
+                fail_stage("RESOLVED_COMPETING_BASE_LINK_UNAVAILABLE")
         baseline = operator_profile._connection_uuids()
         if any(
             "vpn" in line.lower()
@@ -315,6 +326,44 @@ def main():
             tunnel = candidates[0]
             out["ownedTunPresent"] = True
             if is_full_ipv4:
+                stage = "RESOLVED_VPN_EXCLUSIVE_ROUTING"
+                # Inspect resolved's live per-link configuration, not merely
+                # the saved NM profile. It must receive an exclusive route-only
+                # root domain and a single VPN DNS upstream.
+                link_dns = required(["resolvectl", "dns", tunnel], timeout=8).decode(
+                    "utf8", "replace")
+                link_domains = required(["resolvectl", "domain", tunnel], timeout=8).decode(
+                    "utf8", "replace")
+                if (not re.search(r"(?<![0-9.])1\.1\.1\.1(?![0-9.])", link_dns)
+                        or not re.search(r"(?<!\S)~\.(?!\S)", link_domains)):
+                    fail_stage("RESOLVED_VPN_LINK_DNS_OR_ROUTING_DOMAIN_MISSING")
+                dns_inventory = required(["resolvectl", "dns"], timeout=8).decode(
+                    "utf8", "replace")
+                if "9.9.9.9" in dns_inventory:
+                    fail_stage("RESOLVED_COMPETING_BASE_DNS_NOT_EXCLUDED")
+                out["resolvedVpnDnsOnlyPolicyVerified"] = True
+                stage = "RESOLVED_GLOBAL_QUERY_OVER_VPN"
+                # A bounded real query through the systemd-resolved service
+                # itself (without --interface) proves route selection for this
+                # test name. The host underlay never becomes a fallback.
+                resolved_ok = False
+                for resolved_attempt in range(2):
+                    routed = required(["ip", "-4", "route", "get", "1.1.1.1"], timeout=7)
+                    if not re.search(rb"\bdev\s+" + re.escape(tunnel.encode()) + rb"\b", routed):
+                        fail_stage("RESOLVED_DNS_UPSTREAM_ROUTE_LEFT_TUN")
+                    queried = cmd(["resolvectl", "-4", "query", "example.com"], timeout=12)
+                    out["resolvedQueryAttempts"] = resolved_attempt + 1
+                    if queried.returncode or len(queried.stdout) > 4096:
+                        continue
+                    addresses = re.findall(rb"(?<![0-9.])(?:[0-9]{1,3}\.){3}[0-9]{1,3}(?![0-9.])", queried.stdout)
+                    if addresses and all(
+                            ipaddress.ip_address(value.decode()).is_global
+                            for value in addresses):
+                        resolved_ok = True
+                        break
+                if not resolved_ok:
+                    fail_stage("RESOLVED_DEFAULT_QUERY_NOT_VERIFIED")
+                out["resolvedQueryViaVpnVerified"] = True
                 stage = "FULL_IPV4_ROUTE_OWNERSHIP"
                 # No test-specific data /32: the real NM default path must
                 # cover two independent public resolvers and HTTPS itself.
@@ -337,9 +386,9 @@ def main():
                 out["fullIPv4RoutesOwned"] = True
                 out["ipv6RouteInventoryScoped"] = True
                 stage = "TUN_BOUND_EXPLICIT_DNS"
-                # DNS proof is limited to an explicit resolver. The container
-                # still runs NM with dns=none; no system-resolver or universal
-                # leak containment is claimed or altered.
+                # A separate explicit resolver probe complements the real
+                # per-link resolved test above. Neither proves arbitrary
+                # application/IPv6 leak containment on physical owner hosts.
                 response = cmd(["dig", "-4", "+time=4", "+tries=1",
                                 "+short", "@1.1.1.1", "example.com", "A"],
                                timeout=9)
@@ -578,6 +627,24 @@ def main():
             except Exception:
                 cleanup_ok = False
         out["temporaryProfileAndPEMCleanupVerified"] = cleanup_ok
+        if is_full_ipv4 and resolved_base_baseline is not None:
+            # NM -> resolved D-Bus updates may complete asynchronously.
+            # Fail closed if the competing link's DNS is not restored or a
+            # deleted TUN still advertises the exclusive VPN resolver.
+            out["resolvedDnsPolicyRestored"] = False
+            for _ in range(8):
+                try:
+                    restored = required(
+                        ["resolvectl", "dns", "oigqa0"], timeout=7).decode(
+                        "utf8", "replace") == resolved_base_baseline
+                    inventory = required(
+                        ["resolvectl", "dns"], timeout=7).decode("utf8", "replace")
+                    if restored and "1.1.1.1" not in inventory:
+                        out["resolvedDnsPolicyRestored"] = True
+                        break
+                except Exception:
+                    pass
+                time.sleep(0.25)
         try:
             out["containerNetworkRestored"] = before is not None and before == snapshot()
         except Exception:
@@ -588,6 +655,9 @@ def main():
                            out.get("fullIPv4RoutesOwned") is True
                            and out.get("nmPinnedDnsPriorityConfigVerified") is True
                            and out.get("nmActiveDnsRoutingPolicyVerified") is True
+                           and out.get("resolvedVpnDnsOnlyPolicyVerified") is True
+                           and out.get("resolvedQueryViaVpnVerified") is True
+                           and out.get("resolvedDnsPolicyRestored") is True
                            and out.get("containerDefaultDnsViaTunVerified") is True
                            and out.get("containerDefaultResolverRestoredExact") is True))
                        and out["temporaryProfileAndPEMCleanupVerified"]

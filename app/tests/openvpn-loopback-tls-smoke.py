@@ -90,7 +90,10 @@ def attempt(root, common, port, cert, key, expected_name):
     log = root / ("client-" + expected_name.replace(".", "-") + ".log")
     command = common + [
         "--proto", "tcp-client", "--remote", "127.0.0.1", str(port),
-        "--tls-client", "--remote-cert-tls", "server",
+        # Each concurrent QA client must use a distinct ephemeral local port.
+        # --local in the common flags implicitly bound all clients to 1194,
+        # causing cross-session TLS record overflow under parallel tests.
+        "--nobind", "--tls-client", "--remote-cert-tls", "server",
         "--verify-x509-name", expected_name, "name",
         "--cert", str(cert), "--key", str(key), "--connect-retry-max", "1",
         "--log", str(log)]
@@ -129,7 +132,7 @@ def main():
         client_cert, client_key = certificate(
             root, ca_cert, ca_key, "oig-loopback-client")
         common = ["openvpn", "--dev", "null", "--ifconfig-noexec", "--route-noexec",
-                  "--local", "127.0.0.1", "--ca", str(ca_cert),
+                  "--ca", str(ca_cert),
                   "--data-ciphers", "AES-256-GCM", "--verb", "3",
                   "--connect-retry-max", "1", "--tls-exit"]
         # The deliberate identity rejection may terminate the server due to
@@ -140,8 +143,8 @@ def main():
             port = local_port()
             server_log = root / ("server-" + identity + ".log")
             server = subprocess.Popen(
-                common + ["--proto", "tcp-server", "--lport", str(port),
-                          "--tls-server", "--dh", "none",
+                common + ["--proto", "tcp-server", "--local", "127.0.0.1",
+                          "--lport", str(port), "--tls-server", "--dh", "none",
                           "--cert", str(server_cert), "--key", str(server_key),
                           "--log", str(server_log)],
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
@@ -154,15 +157,15 @@ def main():
                     details = server_log.read_text(errors="replace") if server_log.exists() else ""
                     raise AssertionError(
                         "Valid local OpenVPN handshake failed; client: " +
-                        " | ".join(client_log.splitlines()[-5:]) +
-                        "; server: " + " | ".join(details.splitlines()[-5:]))
+                        " | ".join(client_log.splitlines()[-12:]) +
+                        "; server: " + " | ".join(details.splitlines()[-12:]))
                 if not should_connect and (
                         actual or "VERIFY X509NAME ERROR" not in client_log):
                     details = server_log.read_text(errors="replace") if server_log.exists() else ""
                     raise AssertionError(
                         "Untrusted server identity was not explicitly rejected; " +
-                        "client: " + " | ".join(client_log.splitlines()[-5:]) +
-                        "; server: " + " | ".join(details.splitlines()[-5:]))
+                        "client: " + " | ".join(client_log.splitlines()[-12:]) +
+                        "; server: " + " | ".join(details.splitlines()[-12:]))
             finally:
                 terminate(server)
         print("PASS: real OpenVPN TLS loopback authenticated peer, "
