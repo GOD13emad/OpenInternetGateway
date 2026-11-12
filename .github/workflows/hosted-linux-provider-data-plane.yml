@@ -5,6 +5,8 @@ on:
     paths:
       - '.github/workflows/hosted-linux-provider-data-plane.yml'
       - 'app/tests/hosted-linux-provider-data-plane.py'
+      - 'app/backend/linux/ipv6_route_guard.py'
+      - 'app/backend/linux/operator_full_device.py'
       - 'app/tools/prepareHostedUbuntuApt.sh'
 
 permissions:

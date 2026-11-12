@@ -13,8 +13,14 @@ TUNNEL = re.compile(r"(?:tun|tap)[A-Za-z0-9_.:-]{0,12}\Z")
 DEV = re.compile(r"\bdev\s+([A-Za-z0-9_.:-]+)(?:\s|$)")
 
 
+class NonlocalIpv6Route(ValueError):
+    """A nonlocal IPv6 route does not have an accepted owner."""
+
+
 def verify_ipv6_route_inventory(routes, owned="tun1"):
-    if not TUNNEL.fullmatch(owned):
+    # owned=None is for read-only preflight: *no* nonlocal IPv6 route
+    # is allowed before activating a full-device VPN.
+    if owned is not None and not TUNNEL.fullmatch(owned):
         raise ValueError("Invalid owned tunnel interface")
     if not isinstance(routes, str) or len(routes) > 262144:
         raise ValueError("Invalid or oversized IPv6 route inventory")
@@ -38,8 +44,8 @@ def verify_ipv6_route_inventory(routes, owned="tun1"):
         if prefix.is_link_local or prefix.is_multicast or prefix.is_loopback:
             continue
         dev = DEV.search(line)
-        if not dev or dev.group(1) != owned:
-            raise ValueError("Non-local IPv6 route outside owned tunnel")
+        if owned is None or not dev or dev.group(1) != owned:
+            raise NonlocalIpv6Route("Non-local IPv6 route outside owned tunnel")
     return True
 
 

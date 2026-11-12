@@ -17,7 +17,7 @@ test('Linux full-device preflight is read-only, pinned and fail-closed across re
     fs.mkdirSync(path.join(root, 'state'), {recursive:true});
     const profileScript = path.join(__dirname, '../backend/linux/operator_profile.py');
     const preflightScript = path.join(__dirname, '../backend/linux/operator_full_device.py');
-    for (const script of ['operator_profile.py','operator_full_device.py']) {
+    for (const script of ['operator_profile.py','operator_full_device.py','ipv6_route_guard.py']) {
       fs.copyFileSync(path.join(__dirname, '../backend/linux', script), path.join(root,'linux',script));
     }
     const cert = path.join(dir, 'cert.pem');
@@ -67,12 +67,21 @@ test('Linux full-device preflight is read-only, pinned and fail-closed across re
       '  if case=="manual-link-tun":print(\'[{"ifname":"customdev0","linkinfo":{"info_kind":"tun"},"operstate":"UNKNOWN"}]\');sys.exit(0)',
       '  print(\'[{"ifname":"enp1s0","operstate":"UP","link_type":"ether"}]\')',
       '  sys.exit(0)',
-      'if tool=="ip" and a==["-4","route","show","table","main"]:',
+      'if tool=="ip" and a==["-4","route","show","table","all"]:',
       '  print("default via 192.0.2.1 dev enp1s0")',
       '  if case=="manual-tun-route":print("0.0.0.0/1 dev tun1")',
+      '  if case=="manual-tun-policy-route":print("10.20.30.0/24 dev tun77 table 300")',
       '  sys.exit(0)',
-      'if tool=="ip" and a==["-6","route","show","table","main"]:',
+      'if tool=="ip" and a==["-6","route","show","table","all"]:',
+      '  print("local ::1 dev lo table local")',
+      '  print("fe80::/64 dev enp1s0 proto kernel")',
+      '  print("ff00::/8 dev enp1s0")',
       '  if case=="manual-ipv6-tun-route":print("fd00::/64 dev tun77")',
+      '  if case=="ipv6-specific-policy":print("2001:db8:42::/48 dev enp1s0 table 123")',
+      '  if case=="ipv6-private-policy":print("fc00::/7 dev enp1s0 table 456")',
+      '  if case=="ipv6-policy-default":print("default via fe80::1 dev enp1s0 table 500")',
+      '  if case=="ipv6-inventory-error":sys.exit(2)',
+      '  if case=="ipv6-malformed":print("not-a-prefix dev enp1s0 table 18")',
       '  sys.exit(0)',
       'if tool=="ip" and a[:3]==["-6","route","get"] and len(a)==4:',
       '  if case=="ipv6-route":print(a[3]+" via fe80::1 dev enp1s0 src 2001:db8::2");sys.exit(0)',
@@ -108,6 +117,7 @@ test('Linux full-device preflight is read-only, pinned and fail-closed across re
     assert.equal(clean.candidateHostIsolation,true);
     assert.equal(clean.noIndependentTunnelObserved,true);
     assert.equal(clean.publicIpv6AbsenceRepresentativelyChecked,true);
+    assert.equal(clean.publicIpv6AbsenceAllTablesChecked,true);
     assert.deepEqual(clean.blockers,[]);
     for(const key of ['activationRequested','independentRollbackArmed',
       'fullDevicePathEnabled','fullDeviceTunnelVerified','readyForAutomaticConnection']) {
@@ -117,8 +127,14 @@ test('Linux full-device preflight is read-only, pinned and fail-closed across re
       'external-vpn':'INDEPENDENT_TUNNEL_ACTIVE',
       'external-tun':'INDEPENDENT_TUNNEL_ACTIVE',
       'manual-tun-route':'INDEPENDENT_TUNNEL_ACTIVE',
+      'manual-tun-policy-route':'INDEPENDENT_TUNNEL_ACTIVE',
       'manual-link-tun':'INDEPENDENT_TUNNEL_ACTIVE',
       'manual-ipv6-tun-route':'INDEPENDENT_TUNNEL_ACTIVE',
+      'ipv6-specific-policy':'PUBLIC_IPV6_ROUTE_PRESENT',
+      'ipv6-private-policy':'PUBLIC_IPV6_ROUTE_PRESENT',
+      'ipv6-policy-default':'PUBLIC_IPV6_ROUTE_PRESENT',
+      'ipv6-inventory-error':'IPV6_ROUTE_STATUS_UNKNOWN',
+      'ipv6-malformed':'IPV6_ROUTE_STATUS_UNKNOWN',
       'unknown-link':'ACTIVE_TUNNEL_INVENTORY_UNKNOWN',
       'malformed-link':'ACTIVE_TUNNEL_INVENTORY_UNKNOWN',
       'unknown-nm':'ACTIVE_TUNNEL_INVENTORY_UNKNOWN',
@@ -130,6 +146,9 @@ test('Linux full-device preflight is read-only, pinned and fail-closed across re
       assert.equal(r.candidateHostIsolation,false,name);
       assert.ok(r.blockers.includes(reason),name);
       assert.equal(r.fullDevicePathEnabled,false,name);
+      assert.equal(r.publicIpv6AbsenceAllTablesChecked,
+        !r.blockers.includes('PUBLIC_IPV6_ROUTE_PRESENT') &&
+        !r.blockers.includes('IPV6_ROUTE_STATUS_UNKNOWN'),name);
     }
     fs.writeFileSync(desired,'on\n',{mode:0o600});
     assert.ok(run('clean').data.blockers.includes('DESIRED_STATE_NOT_VERIFIED_OFF'));

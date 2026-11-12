@@ -7,7 +7,6 @@ separate gates. No credential material is read, stored or printed here.
 """
 import argparse
 import json
-import json
 import os
 import re
 import stat
@@ -16,6 +15,7 @@ import sys
 from pathlib import Path
 
 import operator_profile
+from ipv6_route_guard import NonlocalIpv6Route, verify_ipv6_route_inventory
 
 
 class PreflightError(RuntimeError):
@@ -93,7 +93,7 @@ def active_tunnels():
                 r"(?:tun|tap|wg|tailscale|vpn)[A-Za-z0-9_.:-]*", name):
             return True
     for family in ("-4", "-6"):
-        rc, stdout, _ = read_command(["ip", family, "route", "show", "table", "main"])
+        rc, stdout, _ = read_command(["ip", family, "route", "show", "table", "all"])
         if rc:
             raise PreflightError("Cannot inspect kernel route inventory")
         for route in stdout.splitlines():
@@ -103,7 +103,20 @@ def active_tunnels():
 
 
 def public_ipv6_route_present():
-    """Representative physical IPv6 egress check; not an IPv6 leak proof."""
+    """Fail closed on any non-local IPv6 route across all policy tables.
+
+    Two effective public-route lookups remain complementary; checking
+    only those destinations would miss foreign specific/policy routes.
+    """
+    rc, stdout, _ = read_command(["ip", "-6", "route", "show", "table", "all"])
+    if rc:
+        raise PreflightError("Cannot enumerate IPv6 routing tables")
+    try:
+        verify_ipv6_route_inventory(stdout, owned=None)
+    except NonlocalIpv6Route:
+        return True
+    except (TypeError, ValueError) as exc:
+        raise PreflightError("IPv6 route inventory is ambiguous") from exc
     for destination in ("2606:4700:4700::1111", "2001:4860:4860::8888"):
         rc, stdout, stderr = read_command(["ip", "-6", "route", "get", destination])
         head = stdout.splitlines()[0].strip() if stdout.splitlines() else ""
@@ -143,6 +156,8 @@ def preflight(profile, ca_pin, peer_cn, desired_state):
         "noIndependentTunnelObserved": "INDEPENDENT_TUNNEL_ACTIVE" not in reasons
             and "ACTIVE_TUNNEL_INVENTORY_UNKNOWN" not in reasons,
         "publicIpv6AbsenceRepresentativelyChecked": "PUBLIC_IPV6_ROUTE_PRESENT" not in reasons
+            and "IPV6_ROUTE_STATUS_UNKNOWN" not in reasons,
+        "publicIpv6AbsenceAllTablesChecked": "PUBLIC_IPV6_ROUTE_PRESENT" not in reasons
             and "IPV6_ROUTE_STATUS_UNKNOWN" not in reasons,
         "blockers": reasons,
         "candidateHostIsolation": not reasons,
