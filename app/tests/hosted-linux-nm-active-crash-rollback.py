@@ -24,12 +24,17 @@ import time
 
 HERE = Path(__file__).resolve().parent
 BACKEND = HERE.parent / "backend" / "linux"
-RECEIPT = Path("/out/oig-hosted-active-crash-rollback.json")
-STATE = Path("/tmp/oig-hosted-active-crash-private")
+TIMER_MODE = len(sys.argv) > 1 and sys.argv[1] in ("--timer-supervise", "--timer-activate")
+RECEIPT = Path("/out/oig-hosted-active-timer-rollback.json" if TIMER_MODE
+               else "/out/oig-hosted-active-crash-rollback.json")
+STATE = Path("/tmp/oig-hosted-active-timer-private" if TIMER_MODE
+             else "/tmp/oig-hosted-active-crash-private")
+BRIDGE = Path("/out/oig-hosted-timer-bridge")
 
 
 def scope():
-    if (sys.argv[1:] not in (["--supervise"], ["--activate"], ["--watch"])
+    if (sys.argv[1:] not in (["--supervise"], ["--activate"], ["--watch"],
+                                 ["--timer-supervise"], ["--timer-activate"])
             or os.geteuid() != 0 or os.environ.get("OIG_HOSTED_CONTAINER") != "1"
             or os.environ.get("GITHUB_ACTIONS") != "true"
             or os.environ.get("RUNNER_ENVIRONMENT") != "github-hosted"
@@ -120,7 +125,7 @@ def watch():
 
 
 def activate():
-    profile, _, trial, provider = environment()
+    profile, rollback, trial, provider = environment()
     baseline = profile._connection_uuids()
     if any("vpn" in row.lower() for row in required(
             ["nmcli", "-t", "-f", "TYPE", "connection", "show", "--active"]
@@ -159,14 +164,42 @@ def activate():
         "certificate_directory": str(cert_dir),
         "hashes": hashes, "activator": os.getpid()
     })
-    # A different process owns cleanup. If this process is SIGKILLed it still
-    # survives (it is reparented to container PID 1, not the controller).
-    watcher = subprocess.Popen(
-        [sys.executable, "-B", str(Path(__file__)), "--watch"],
-        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-        stderr=(STATE / "watcher-errors.log").open("wb"),
-        start_new_session=True)
-    store(STATE / "watcher-armed.json", {"watcherSpawnedBeforeActivation": True})
+    if TIMER_MODE:
+        if os.environ.get("OIG_HOSTED_TIMER_BRIDGE") != "1":
+            raise RuntimeError("HOSTED_REAL_USER_TIMER_BRIDGE_UNAVAILABLE")
+        # The unchanged production arm() verifies the genuine *inactive*
+        # imported NM UUID, saves a byte-identical durable runner and then
+        # registers a user timer. Only systemd-run/systemctl cross the test
+        # bridge: real nmcli remains untouched inside Docker.
+        binary = STATE / "timer-bin"
+        binary.mkdir(mode=0o700)
+        for tool, action in (("systemd-run", "--client-run"),
+                             ("systemctl", "--client-check")):
+            wrapper = binary / tool
+            wrapper.write_text(
+                "#!/bin/sh\nexec /usr/bin/python3 -B "
+                "/work/app/tests/hosted-linux-user-timer-bridge.py "
+                + action + ' "$@"\n', encoding="utf8")
+            wrapper.chmod(0o700)
+        os.environ["PATH"] = str(binary) + ":" + os.environ["PATH"]
+        receipt = rollback.arm(uuid, name, 100, name, str(cert_dir), hashes)
+        durable = Path(rollback.durable_rollback_helper())
+        if (not receipt.get("timerArmed") or receipt.get("connectionActivated")
+                or durable.read_bytes() != Path(rollback.__file__).read_bytes()):
+            raise RuntimeError("PRODUCT_DURABLE_USER_TIMER_NOT_CONFIRMED")
+        store(STATE / "timer-armed.json", {
+            "productArmVerifiedBeforeActivation": True,
+            "durableRunnerByteIdentical": True,
+            "realHostedUserSystemdTimerArmed": True
+        })
+    else:
+        # The prior independent-process watchdog acceptance stays unchanged.
+        watcher = subprocess.Popen(
+            [sys.executable, "-B", str(Path(__file__)), "--watch"],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            stderr=(STATE / "watcher-errors.log").open("wb"),
+            start_new_session=True)
+        store(STATE / "watcher-armed.json", {"watcherSpawnedBeforeActivation": True})
     modified = required(["nmcli", "--wait", "5", "connection", "modify",
                          "--temporary", "uuid", uuid,
                          "connection.autoconnect", "no", "vpn.user-name", "vpnbook",
@@ -221,8 +254,11 @@ def activate():
 
 def supervise():
     out = {
-        "schema": "oig-hosted-native-nm-active-crash-rollback-v1",
-        "scope": "Disposable GitHub Docker netns with real NM+OpenVPN; independent subprocess watchdog, NOT systemd timer",
+        "schema": ("oig-hosted-native-nm-active-user-timer-rollback-v1" if TIMER_MODE
+                   else "oig-hosted-native-nm-active-crash-rollback-v1"),
+        "scope": ("Disposable Docker real NM TUN; product arm bridged to real GitHub hosted user-systemd manager"
+                  if TIMER_MODE else
+                  "Disposable GitHub Docker netns with real NM+OpenVPN; independent subprocess watchdog, NOT systemd timer"),
         "pass": False, "productionCrashRollbackVerified": False,
         "systemDnsLeakContainmentVerified": False,
         "productionKillSwitchVerified": False
@@ -235,7 +271,8 @@ def supervise():
     child = None
     stage = "ACTIVATION"
     try:
-        child = subprocess.Popen([sys.executable, "-B", str(Path(__file__)), "--activate"],
+        child = subprocess.Popen([sys.executable, "-B", str(Path(__file__)),
+                                  "--timer-activate" if TIMER_MODE else "--activate"],
                                  stdout=subprocess.DEVNULL,
                                  stderr=(STATE / "activator-errors.log").open("wb"))
         deadline = time.monotonic() + 105
@@ -252,26 +289,37 @@ def supervise():
                 "realNmTunnelActive", "tunnelBoundHttpsSucceeded",
                 "ownedRouteVerified", "pinnedPeerVerifiedByNM")):
             raise RuntimeError("ACTIVE_TUN_RECEIPT_NOT_VERIFIED")
-        if not (STATE / "watcher-armed.json").is_file():
-            raise RuntimeError("WATCHDOG_NOT_ARMED_BEFORE_ACTIVATION")
+        if not (STATE / ("timer-armed.json" if TIMER_MODE else "watcher-armed.json")).is_file():
+            raise RuntimeError("INDEPENDENT_ROLLBACK_NOT_ARMED_BEFORE_ACTIVATION")
         stage = "SIGKILL_ACTIVATOR"
         child.kill()
         if child.wait(timeout=6) != -signal.SIGKILL:
             raise RuntimeError("ACTIVATOR_NOT_SIGKILL_TERMINATED")
         out["activatorKilledAfterRealTunHttps"] = True
-        stage = "INDEPENDENT_REAL_NM_CLEANUP"
-        deadline = time.monotonic() + 40
+        stage = "REAL_USER_TIMER_CLEANUP" if TIMER_MODE else "INDEPENDENT_REAL_NM_CLEANUP"
+        cleanup_file = (BRIDGE / "fired.json" if TIMER_MODE
+                        else STATE / "watcher-result.json")
+        deadline = time.monotonic() + (175 if TIMER_MODE else 40)
         while time.monotonic() < deadline:
-            if (STATE / "watcher-result.json").is_file():
+            if cleanup_file.is_file() and not cleanup_file.is_symlink():
                 break
             time.sleep(.25)
         else:
-            raise RuntimeError("WATCHER_CLEANUP_TIMEOUT")
-        receipt = json.loads((STATE / "watcher-result.json").read_text())
-        if not (receipt.get("ok") and receipt.get("usedUnmodifiedRollbackHelper")
-                and receipt.get("observedActivatorGone")):
-            raise RuntimeError("WATCHDOG_ROLLBACK_FAILED")
-        out["independentWatcherSurvivedSIGKILL"] = True
+            raise RuntimeError("INDEPENDENT_CLEANUP_TIMEOUT")
+        receipt = json.loads(cleanup_file.read_text())
+        if TIMER_MODE:
+            if not (receipt.get("realHostedUserTimerFired")
+                    and receipt.get("unmodifiedDurableHelperCleanup")
+                    and receipt.get("scopedUuidCleaned")
+                    and receipt.get("dockerExecExitCode") == 0):
+                raise RuntimeError("REAL_USER_TIMER_ROLLBACK_FAILED")
+            out["realHostedUserSystemdTimerFiredAfterSIGKILL"] = True
+            out["productArmAndDurableHelperVerified"] = True
+        else:
+            if not (receipt.get("ok") and receipt.get("usedUnmodifiedRollbackHelper")
+                    and receipt.get("observedActivatorGone")):
+                raise RuntimeError("WATCHDOG_ROLLBACK_FAILED")
+            out["independentWatcherSurvivedSIGKILL"] = True
         meta = metadata()
         pro = environment()[0]
         if meta["uuid"] in pro._connection_uuids():
@@ -325,11 +373,11 @@ def supervise():
 if __name__ == "__main__":
     scope()
     mode = sys.argv[1]
-    if mode == "--supervise":
+    if mode in ("--supervise", "--timer-supervise"):
         raise SystemExit(supervise())
     if not STATE.is_dir() or STATE.is_symlink() or STATE.stat().st_mode & 0o077:
         raise SystemExit("REFUSED: private crash QA state unavailable")
-    if mode == "--activate":
+    if mode in ("--activate", "--timer-activate"):
         activate()
     else:
         watch()

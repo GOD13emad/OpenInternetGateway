@@ -87,7 +87,7 @@ NMCONF
     # The container creates its private receipt as 0600/root. Transfer only
     # the artifact's ownership to the runner user for actions/upload-artifact.
     # Never loosen permissions or mount owner-host sensitive directories.
-    for receipt in /out/oig-hosted-native-nm.json /out/oig-hosted-native-nm-live.json /out/oig-hosted-native-nm-fullipv4.json /out/oig-hosted-active-crash-rollback.json; do
+    for receipt in /out/oig-hosted-native-nm.json /out/oig-hosted-native-nm-live.json /out/oig-hosted-native-nm-fullipv4.json /out/oig-hosted-active-crash-rollback.json /out/oig-hosted-active-timer-rollback.json; do
       if [[ -f "$receipt" ]]; then
         chown "${OIG_RUNNER_UID:?}:${OIG_RUNNER_GID:?}" "$receipt"
         chmod 0600 "$receipt"
@@ -285,6 +285,10 @@ PYRESTORE
   # unchanged production rollback helper on that exact UUID. This does NOT
   # claim a real systemd timer in the Docker container.
   python3 -B /work/app/tests/hosted-linux-nm-active-crash-rollback.py --supervise
+  # The next gate exercises the same REAL NM/TUN lifecycle with the actual
+  # product arm(), real hosted user-systemd timer and durable helper. Only the
+  # timer transport is bridged across the disposable Docker user-bus boundary.
+  python3 -B /work/app/tests/hosted-linux-nm-active-crash-rollback.py --timer-supervise
   exit 0
 fi
 
@@ -296,19 +300,40 @@ command -v docker >/dev/null
 name="oig-hosted-nm-${GITHUB_RUN_ID}"
 out="$RUNNER_TEMP/oig-hosted-nm"
 mkdir -m 700 "$out"
+mkdir -m 700 "$out/oig-hosted-timer-bridge"
+# A real GitHub-hosted user-systemd manager schedules a single, scoped cleanup
+# inside the isolated container. No host network namespace is entered.
+python3 -B app/tests/hosted-linux-user-timer-bridge.py --host-agent \
+  "$out/oig-hosted-timer-bridge" "$name" > "$out/hosted-timer-agent.log" 2>&1 &
+timer_agent_pid=$!
+trap 'docker rm -f "$name" >/dev/null 2>&1 || true; kill "$timer_agent_pid" >/dev/null 2>&1 || true' EXIT
+for _ in $(seq 1 40); do
+  [[ -f "$out/oig-hosted-timer-bridge/ready.json" ]] && break
+  kill -0 "$timer_agent_pid" 2>/dev/null || break
+  sleep .25
+done
+[[ -f "$out/oig-hosted-timer-bridge/ready.json" ]] || {
+  echo 'HOSTED_USER_SYSTEMD_MANAGER_UNAVAILABLE_BEFORE_DOCKER' >&2
+  tail -n 12 "$out/hosted-timer-agent.log" >&2
+  exit 78
+}
 # The only writable mount is a fresh artifact folder. Source is read-only.
 # Docker has its own separate network namespace and only CAP_NET_ADMIN and
 # /dev/net/tun, not --privileged or host networking.
-trap 'docker rm -f "$name" >/dev/null 2>&1 || true' EXIT
 timeout 600s docker run --rm --name "$name" \
   --cap-add=NET_ADMIN --device=/dev/net/tun \
   --network bridge --security-opt no-new-privileges \
   -v "$PWD:/work:ro" -v "$out:/out:rw" \
-  -e OIG_HOSTED_CONTAINER=1 \
+  -e OIG_HOSTED_CONTAINER=1 -e OIG_HOSTED_TIMER_BRIDGE=1 \
   -e OIG_RUNNER_UID="$(id -u)" -e OIG_RUNNER_GID="$(id -g)" \
   -e GITHUB_ACTIONS -e RUNNER_ENVIRONMENT -e GITHUB_REPOSITORY \
   -e GITHUB_EVENT_NAME -e GITHUB_RUN_ID \
   ubuntu:24.04 bash /work/app/tests/hosted-linux-native-nm.sh --inner
+wait "$timer_agent_pid" || {
+  echo 'HOSTED_REAL_USER_SYSTEMD_TIMER_BRIDGE_FAILED' >&2
+  tail -n 12 "$out/hosted-timer-agent.log" >&2
+  exit 78
+}
 test -s "$out/oig-hosted-native-nm.json"
 python3 -B - "$out/oig-hosted-native-nm.json" <<'PY'
 import json,sys
@@ -386,3 +411,20 @@ assert r.get("systemDnsLeakContainmentVerified") is False
 assert r.get("productionKillSwitchVerified") is False
 print("HOSTED_DISPOSABLE_REAL_ACTIVE_OPENVPN_SIGKILL_CLEANUP_PASS")
 PYCRASH
+
+test -s "$out/oig-hosted-active-timer-rollback.json"
+python3 -B - "$out/oig-hosted-active-timer-rollback.json" <<'PYTIMER'
+import json,sys
+r=json.load(open(sys.argv[1],encoding="utf8"))
+assert r.get("pass") is True
+assert r.get("activatorKilledAfterRealTunHttps") is True
+assert r.get("realHostedUserSystemdTimerFiredAfterSIGKILL") is True
+assert r.get("productArmAndDurableHelperVerified") is True
+assert r.get("realActiveVpnProfileAndCertificatesRemoved") is True
+assert r.get("containerNetworkRestored") is True
+assert r.get("independentBasePreserved") is True
+assert r.get("productionCrashRollbackVerified") is False
+assert r.get("systemDnsLeakContainmentVerified") is False
+assert r.get("productionKillSwitchVerified") is False
+print("HOSTED_REAL_USER_SYSTEMD_TIMER_AND_REAL_NM_ACTIVE_TUN_ROLLBACK_PASS")
+PYTIMER
