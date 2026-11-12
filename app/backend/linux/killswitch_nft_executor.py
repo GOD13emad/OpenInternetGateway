@@ -81,10 +81,17 @@ def verify_sole_lockdown_table(raw, *, table_name=NFT_TABLE):
         raise NftSafetyError("UNTRUSTED_LOCKDOWN_TABLE_NAME")
     if not isinstance(raw, bytes) or not raw or len(raw) > MAX_NFT_OUTPUT:
         raise NftSafetyError("UNTRUSTED_LOCKDOWN_TABLE_JSON")
+    def unique_pairs(pairs):
+        names = [key for key, _ in pairs]
+        if len(names) != len(set(names)):
+            raise ValueError("Duplicate NFT JSON keys")
+        return dict(pairs)
+
     try:
-        doc = json.loads(raw)
-        if not isinstance(doc, dict) or not isinstance(doc.get("nftables"), list):
-            raise ValueError("Missing NFT inventory")
+        doc = json.loads(raw, object_pairs_hook=unique_pairs)
+        if (type(doc) is not dict or set(doc) != {"nftables"}
+                or type(doc["nftables"]) is not list):
+            raise ValueError("Missing or ambiguous NFT inventory")
         kind_counts = {"table": 0, "chain": 0, "rule": 0}
         chain_names = []
         rule_names = []
@@ -102,6 +109,13 @@ def verify_sole_lockdown_table(raw, *, table_name=NFT_TABLE):
             if kind == "table":
                 if data.get("name") != table_name:
                     raise ValueError("Wrong table name")
+                # A dormant inet table retains convincing-looking chains
+                # but does NOT filter traffic. A process-owned table can
+                # vanish on service exit. Neither is acceptable as a locked
+                # root boot firewall (or disposable lockdown evidence).
+                if ("flags" in data and (
+                        type(data["flags"]) is not list or data["flags"])):
+                    raise ValueError("Inactive or transient NFT table")
             elif kind == "chain":
                 chain_names.append(data.get("name"))
             else:

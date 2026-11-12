@@ -166,19 +166,86 @@ class NativeBootBackend:
         return proc.stdout
 
     def _inventory(self, argv):
+        """Parse only nft JSON variants for our fixed read-only commands.
+
+        Refuse duplicate JSON keys, unknown object families and misplaced
+        rule/chain objects instead of silently dropping them. No nft command
+        is executed until the separately checked _run boundary.
+        """
+        def unique_pairs(pairs):
+            keys = [key for key, _ in pairs]
+            if len(keys) != len(set(keys)):
+                raise ValueError("Duplicate nft JSON keys")
+            return dict(pairs)
+
+        if argv == ["-j", "list", "tables"]:
+            permitted = frozenset(("metainfo", "table"))
+        elif argv in (
+                ["-j", "list", "chain", "inet", TABLE, "output"],
+                ["-j", "list", "chain", "inet", TABLE, "forward"]):
+            permitted = frozenset(("metainfo", "chain", "rule"))
+        else:
+            raise BootRefused("Invalid nft inventory query")
         try:
-            doc = json.loads(self._run(argv))
+            doc = json.loads(self._run(argv), object_pairs_hook=unique_pairs)
+            if type(doc) is not dict or set(doc) != {"nftables"}:
+                raise ValueError("Unexpected NFT document structure")
             rows = doc["nftables"]
-            if not isinstance(rows, list):
-                raise TypeError
+            if type(rows) is not list or len(rows) > 128:
+                raise ValueError("Unbounded NFT inventory")
+            seen_meta = False
+            for row in rows:
+                if type(row) is not dict or len(row) != 1:
+                    raise ValueError("Ambiguous NFT inventory row")
+                kind, value = next(iter(row.items()))
+                if kind not in permitted or type(value) is not dict:
+                    raise ValueError("Unexpected NFT inventory object")
+                if kind == "metainfo":
+                    if seen_meta:
+                        raise ValueError("Duplicate nft metadata")
+                    seen_meta = True
             return rows
-        except (ValueError, KeyError, TypeError) as exc:
+        except (ValueError, KeyError, TypeError, UnicodeError) as exc:
             raise BootRefused("Invalid nft JSON response") from exc
 
     def tables(self):
-        return [(x["table"]["family"], x["table"]["name"])
-                for x in self._inventory(["-j", "list", "tables"])
-                if isinstance(x, dict) and "table" in x]
+        found = []
+        for row in self._inventory(["-j", "list", "tables"]):
+            if "metainfo" in row:
+                continue
+            data = row["table"]
+            # nft's documented JSON may include a numeric handle, flags
+            # and a comment on table objects. Do not reject valid foreign
+            # tables merely because they have a harmless handle.
+            valid_keys = {"family", "name", "handle", "flags", "comment"}
+            if (not {"family", "name"} <= set(data)
+                    or not set(data) <= valid_keys
+                    or type(data["family"]) is not str
+                    or data["family"] not in (
+                        "inet", "ip", "ip6", "arp", "bridge", "netdev")
+                    or type(data["name"]) is not str
+                    or not data["name"] or len(data["name"]) > 64
+                    or ("handle" in data and
+                        (type(data["handle"]) is not int or data["handle"] < 0))
+                    or ("flags" in data and not (
+                        data["flags"] in ("dormant", "owner", "persist")
+                        if type(data["flags"]) is str
+                        else (type(data["flags"]) is list
+                              and all(type(x) is str and x in (
+                                  "dormant", "owner", "persist"
+                              ) for x in data["flags"]))))
+                    or ("comment" in data and type(data["comment"]) is not str)):
+                raise BootRefused("Untrusted nft table identity")
+            identity = (data["family"], data["name"])
+            if identity in found:
+                raise BootRefused("Duplicate nft table identity")
+            # A dormant (or process-owned) boot table DOES NOT guarantee
+            # fail-closed packet filtering even with exact stored rules.
+            # All boot-guard-specific flags must be absent or empty.
+            if identity == ("inet", TABLE) and data.get("flags"):
+                raise BootRefused("Boot table has unsafe flags")
+            found.append(identity)
+        return found
 
     def verify_sole_table(self):
         raw = self._run(["-j", "list", "table", "inet", TABLE])

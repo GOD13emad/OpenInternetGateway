@@ -7,6 +7,8 @@ import runpy
 import subprocess
 import sys
 import tempfile
+import stat
+from unittest.mock import patch
 
 BACKEND = Path(__file__).resolve().parents[1] / "backend/linux"
 sys.path.insert(0, str(BACKEND))
@@ -93,10 +95,170 @@ def must_refuse(fn, label):
     raise AssertionError("BOOT_FAIL_OPEN_" + label)
 
 
+def malformed_root_nft_inventory_tests():
+    """Parse adversarial nft JSON offline; no nft executable is spawned."""
+    candidate = object.__new__(boot.NativeBootBackend)
+    raw = None
+
+    def feed(value):
+        candidate._run = lambda _argv: value
+        return candidate.tables()
+
+    valid = {
+        "nftables": [
+            {"metainfo": {"version": "1.1.6", "json_schema_version": 1}},
+            {"table": {"family": "inet", "name": "foreign", "handle": 4}},
+            {"table": {"family": "inet", "name": boot.TABLE,
+                       "handle": 6, "flags": []}},
+        ]
+    }
+    assert feed(json.dumps(valid).encode()) == [
+        ("inet", "foreign"), ("inet", boot.TABLE)
+    ]
+    good_other_flags = copy.deepcopy(valid)
+    good_other_flags["nftables"][1]["table"]["flags"] = ["dormant"]
+    assert feed(json.dumps(good_other_flags).encode())[-1] == (
+        "inet", boot.TABLE
+    )
+    # The official nft JSON schema allows a singleton string OR array.
+    good_other_flags["nftables"][1]["table"]["flags"] = "dormant"
+    assert feed(json.dumps(good_other_flags).encode())[-1] == (
+        "inet", boot.TABLE
+    )
+
+    examples = [
+        b"not-json", b"[]", b'{"nftables":{}}',
+        b'{"nftables":[],"nftables":[]}',
+        b'{"nftables":[],"foreign":false}',
+        b'{"nftables":[{"table":{"name":"oig_guard","name":"foreign","family":"inet"}}]}',
+        b'{"nftables":[{"metainfo":{}},{"metainfo":{}}]}',
+        b'{"nftables":[{"chain":{"family":"inet","name":"bad"}}]}',
+        b'{"nftables":[{"rule":{}}]}',
+        b'{"nftables":[{"table":{"family":"inet"}}]}',
+        b'{"nftables":[{"table":{"family":"inet","name":false}}]}',
+        b'{"nftables":[{"table":{"family":"inet","name":"oig_guard","handle":true}}]}',
+        b'{"nftables":[{"table":{"family":"inet","name":"oig_guard","flags":true}}]}',
+        b'{"nftables":[{"table":{"family":"inet","name":"oig_guard","flags":["dormant"]}}]}',
+        b'{"nftables":[{"table":{"family":"inet","name":"oig_guard","flags":["owner"]}}]}',
+        b'{"nftables":[{"table":{"family":"inet","name":"oig_guard","flags":["persist"]}}]}',
+        b'{"nftables":[{"table":{"family":"inet","name":"oig_guard","flags":["owner","persist"]}}]}',
+        b'{"nftables":[{"table":{"family":"inet","name":"oig_guard","unknown":1}}]}',
+        b'{"nftables":[{"table":{"family":"bogus","name":"oig_guard"}}]}',
+        b'{"nftables":[{"table":{"family":"inet","name":"oig_guard","handle":-1}}]}',
+        b'{"nftables":[{"table":{"family":"inet","name":"oig_guard"}},{"table":{"family":"inet","name":"oig_guard"}}]}',
+    ]
+    for i, payload in enumerate(examples):
+        must_refuse(lambda raw=payload: feed(raw), f"nft_json_inventory_{i}")
+
+    for payload in (b'{"nftables":null}', b'{"nftables":[{}]}'):
+        must_refuse(lambda raw=payload: feed(raw), "invalid_root_inventory")
+
+    # The locked-readback verifier must reject dormant and transient tables
+    # even if the stored output/forward rules appear perfect.
+    table = {"family": "inet", "name": boot.TABLE}
+    locked = [
+        {"table": table},
+        {"chain": {"family": "inet", "table": boot.TABLE, "name": "output"}},
+        {"chain": {"family": "inet", "table": boot.TABLE, "name": "forward"}},
+        *[{"rule": {"family": "inet", "table": boot.TABLE, "chain": "output"}}
+          for _ in range(4)],
+        {"rule": {"family": "inet", "table": boot.TABLE, "chain": "forward"}},
+    ]
+    verifier.verify_sole_lockdown_table(
+        json.dumps({"nftables": locked}).encode(), table_name=boot.TABLE
+    )
+    valid_table_json = json.dumps({"nftables": locked}).encode()
+    # Ensure these are otherwise-valid policies: absent duplicate-key checks,
+    # normal JSON would silently overwrite the first member and PASS.
+    duplicated_top = valid_table_json.replace(
+        b'{"nftables": [', b'{"nftables": [], "nftables": [', 1
+    )
+    duplicated_nested = valid_table_json.replace(
+        b'"family": "inet", "name": "oig_guard"',
+        b'"family": "ip", "family": "inet", "name": "oig_guard"', 1
+    )
+    for payload in (duplicated_top, duplicated_nested):
+        must_refuse(lambda raw=payload: verifier.verify_sole_lockdown_table(
+            raw, table_name=boot.TABLE
+        ), "duplicate_locked_nft_json_keys")
+
+    for flags in (["dormant"], ["owner"], ["persist"],
+                  ["owner", "persist"], "dormant", None, True):
+        mutated = copy.deepcopy(locked)
+        mutated[0]["table"]["flags"] = flags
+        must_refuse(lambda mutated=mutated: verifier.verify_sole_lockdown_table(
+            json.dumps({"nftables": mutated}).encode(), table_name=boot.TABLE
+        ), "inactive_table_is_not_lockdown")
+
+    print("OIG_BOOT_NFT_JSON_STRICT_FAIL_CLOSED_PASS",
+          len(examples) + 2, "malformed_inventory_cases")
+
+
+def mocked_native_boot_transaction_boundary():
+    """Exercise true NativeBootBackend subprocess argv, not real nft."""
+    args = (
+        APPROVED.tunnel, APPROVED.underlay, APPROVED.peer_ipv4,
+        APPROVED.peer_port, APPROVED.transport,
+    )
+    locked = policy.render_lockdown(*args, table=boot.TABLE)
+    calls = []
+
+    def fake_kernel(argv, **kwargs):
+        assert argv[0] == boot.NFT
+        assert argv[1:3] in (["-c", "-f"], ["-f", argv[-1]])
+        assert kwargs["stdin"] == subprocess.DEVNULL
+        assert kwargs["timeout"] == 8
+        assert kwargs["check"] is False
+        assert "shell" not in kwargs
+        assert "LC_ALL" in kwargs["env"]
+        file = Path(argv[-1])
+        assert file.is_file() and file.read_text() == locked
+        assert stat.S_IMODE(file.stat().st_mode) == 0o600
+        calls.append(tuple(argv))
+        return subprocess.CompletedProcess(argv, 0, b"", b"")
+
+    with (patch.object(boot, "validate_installed_root_runtime"),
+          patch.object(boot.subprocess, "run", side_effect=fake_kernel)):
+        backend = boot.NativeBootBackend(APPROVED, policy, verifier, contract)
+        backend.apply(locked)
+        assert len(calls) == 2
+        assert calls[0][1:3] == ("-c", "-f")
+        assert calls[1][1] == "-f"
+        assert calls[0][-1] == calls[1][-1]
+        assert backend.active_batch is None
+        assert not Path(calls[0][-1]).exists()
+        must_refuse(lambda: backend._run(["flush", "ruleset"]),
+                    "arbitrary_nft_shellless_command")
+        must_refuse(lambda: backend._run(["delete", "table", "inet", boot.TABLE]),
+                    "delete_owned_table")
+        must_refuse(lambda: backend.apply(
+            policy.render_transition(*args, tunnel_allowed=True, table=boot.TABLE)
+        ), "unverified_tunnel_unlocked")
+        assert len(calls) == 2
+
+    preflight = []
+
+    def failed_check(argv, **_options):
+        preflight.append(tuple(argv))
+        return subprocess.CompletedProcess(argv, 1, b"", b"invalid")
+
+    with (patch.object(boot, "validate_installed_root_runtime"),
+          patch.object(boot.subprocess, "run", side_effect=failed_check)):
+        backend = boot.NativeBootBackend(APPROVED, policy, verifier, contract)
+        must_refuse(lambda: backend.apply(locked), "nft_preflight_failed")
+        assert len(preflight) == 1 and preflight[0][1:3] == ("-c", "-f")
+        assert backend.active_batch is None
+        assert not Path(preflight[0][-1]).exists()
+
+    print("OIG_ROOT_BOOT_MOCKED_NFT_0600_CHECK_THEN_COMMIT_PASS")
+
+
 def main():
+    mocked_native_boot_transaction_boundary()
     assert boot.INSTALLED_SCRIPT.as_posix() == (
         "/opt/open-internet-gateway/resources/backend/linux/killswitch_bootstrap.py"
     )
+    malformed_root_nft_inventory_tests()
     assert boot.TABLE == "oig_guard"
     assert boot.TABLE == policy.BOOT_TABLE
     assert verifier.NFT_TABLE == policy.TABLE
