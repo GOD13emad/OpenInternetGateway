@@ -60,3 +60,17 @@ test('elevated Ensure requires committed SHA and matching foreign location befor
   assert.match(block,/\$observed\.Trim\(\) -eq \$profileCountry/);
   assert.ok(block.indexOf('$observed.Trim() -eq $profileCountry') < block.indexOf('ELEVATED ENSURE PASS'));
 });
+
+test('Windows Disconnect reconciles coalesced scheduled Ensure before accepting rollback',()=>{
+  const off=disconnect.indexOf("desired='off'");
+  const trigger=disconnect.indexOf('schtasks.exe /Run /TN OpenInternetGateway-AutoRecovery');
+  const taskState=disconnect.indexOf("if([string]$current.State -ne 'Running')");
+  const retries=disconnect.indexOf('$requeued -lt 6');
+  const deadline=disconnect.indexOf('AddSeconds(180)');
+  const completed=disconnect.indexOf("Write-Host 'DISCONNECTED'",trigger);
+  assert.ok(off>=0 && trigger>off && retries>trigger && taskState>retries && deadline>trigger);
+  assert.ok(completed>trigger && completed<taskState,'actual stopped routes/service required before success');
+  assert.match(disconnect,/Headless disconnect task did not settle within 180 seconds; desired=off retained/);
+  assert.match(disconnect,/Could not requeue elevated Open Internet Gateway disconnect/);
+  assert.doesNotMatch(disconnect,/Stop-Process|Unregister-ScheduledTask|Start-Process[^\r\n]*RunAs/);
+});
