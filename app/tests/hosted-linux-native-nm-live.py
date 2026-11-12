@@ -138,6 +138,16 @@ def main():
             fail_stage("NO_TRUSTED_HTTPS_PROBE_TARGET")
         probe_ip = sorted(public_targets)[0]
         if is_full_ipv4:
+            # Pre-resolve the single public speed source before installing
+            # VPN default routes; data transfer still binds only to the TUN.
+            speed_addresses = sorted({
+                item[4][0] for item in socket.getaddrinfo(
+                    "speed.cloudflare.com", 443, socket.AF_INET, socket.SOCK_STREAM)
+                if ipaddress.ip_address(item[4][0]).is_global
+            })
+            if not speed_addresses:
+                fail_stage("SPEED_SOURCE_DNS_NOT_TRUSTED")
+            speed_ip = speed_addresses[0]
             # Docker-only: pin provider peer to the original eth0 gateway
             # before NM introduces an owned default path.
             stage = "PINNED_PROVIDER_UNDERLAY_ROUTE"
@@ -329,13 +339,21 @@ def main():
                 # Bind each transfer to the identified TUN; no physical ISP
                 # retry or alternative source is permitted.
                 stage = "NATIVE_NM_VPN_BOUND_DOWNLOAD"
-                dl = cmd(["curl", "-4", "--noproxy", "*", "--interface", tunnel,
-                          "--connect-timeout", "6", "--max-time", "30",
-                          "--fail", "--silent", "--show-error",
-                          "--output", "/dev/null",
-                          "--write-out", "%{size_download} %{time_total} %{http_code}",
-                          "https://speed.cloudflare.com/__down?bytes=1000000"],
-                         timeout=35)
+                # At most one bounded retry on exactly the same pinned
+                # endpoint/interface. Never retry via Docker's physical link.
+                for attempt in range(2):
+                    dl = cmd(["curl", "-4", "--noproxy", "*",
+                              "--resolve", "speed.cloudflare.com:443:" + speed_ip,
+                              "--interface", tunnel,
+                              "--connect-timeout", "12", "--max-time", "35",
+                              "--fail", "--silent", "--show-error",
+                              "--output", "/dev/null",
+                              "--write-out", "%{size_download} %{time_total} %{http_code}",
+                              "https://speed.cloudflare.com/__down?bytes=1000000"],
+                             timeout=41)
+                    if dl.returncode == 0:
+                        break
+                out["nmDownloadAttempts"] = attempt + 1
                 out["nmDownloadCurlExitCode"] = dl.returncode
                 try:
                     dbytes, dsecs, dstatus = dl.stdout.decode("ascii").strip().split()
@@ -350,13 +368,19 @@ def main():
                 sample = Path(folder) / "upload-test.bin"
                 sample.write_bytes(os.urandom(262144))
                 sample.chmod(0o600)
-                ul = cmd(["curl", "-4", "--noproxy", "*", "--interface", tunnel,
-                          "--connect-timeout", "6", "--max-time", "30",
-                          "--fail", "--silent", "--show-error",
-                          "--data-binary", "@" + str(sample),
-                          "--output", "/dev/null",
-                          "--write-out", "%{size_upload} %{time_total} %{http_code}",
-                          "https://speed.cloudflare.com/__up"], timeout=35)
+                for attempt in range(2):
+                    ul = cmd(["curl", "-4", "--noproxy", "*",
+                              "--resolve", "speed.cloudflare.com:443:" + speed_ip,
+                              "--interface", tunnel,
+                              "--connect-timeout", "12", "--max-time", "35",
+                              "--fail", "--silent", "--show-error",
+                              "--data-binary", "@" + str(sample),
+                              "--output", "/dev/null",
+                              "--write-out", "%{size_upload} %{time_total} %{http_code}",
+                              "https://speed.cloudflare.com/__up"], timeout=41)
+                    if ul.returncode == 0:
+                        break
+                out["nmUploadAttempts"] = attempt + 1
                 out["nmUploadCurlExitCode"] = ul.returncode
                 try:
                     ubytes, usecs, ustatus = ul.stdout.decode("ascii").strip().split()
