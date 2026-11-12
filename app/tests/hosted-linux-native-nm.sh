@@ -33,6 +33,12 @@ if [[ "${1:-}" == '--inner' ]]; then
   dbus-daemon --system --fork
   # Run a genuine disposable systemd-resolved D-Bus service. Without this,
   # NetworkManager profile DNS priority proves only saved properties.
+  # Docker does not run PID 1 systemd/RuntimeDirectory: the Ubuntu package
+  # may leave /run/systemd/resolve root-owned while the daemon runs as the
+  # dedicated systemd-resolve user. Repair ONLY this private container path.
+  [[ ! -L /run/systemd/resolve ]] || exit 74
+  id -u systemd-resolve >/dev/null 2>&1 || exit 74
+  install -d -m 0755 -o systemd-resolve -g systemd-resolve /run/systemd/resolve
   resolved_bin=/usr/lib/systemd/systemd-resolved
   [[ -x "$resolved_bin" ]] || {
     echo 'HOSTED_RESOLVED_EXECUTABLE_UNAVAILABLE' >&2
