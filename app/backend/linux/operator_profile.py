@@ -324,6 +324,16 @@ def cleanup_nm_import_artifacts(stem, content, certificate_directory=None):
     """Remove only our unique, unreferenced, unopened NM certificate copies."""
     if not re.fullmatch(r"(?:oig-native-[a-f0-9]{24}|OIG-Operator-QA-[a-f0-9]{12})", stem):
         raise UnsafeProfile("Temporary NetworkManager artifact identity is invalid")
+    if certificate_directory is None:
+        # The importer may have created inline PEM copies before failing to
+        # return a UUID. The actual storage location is then unknowable from
+        # VPN data, so reconcile BOTH known NM-owned stores, never arbitrary
+        # paths. Each candidate is independently owner/identity/byte verified.
+        xdg = _nm_certificate_directory()
+        legacy = _nm_certificate_directory(Path.home() / ".cert" / "nm-openvpn")
+        for candidate in dict.fromkeys((xdg, legacy)):
+            cleanup_nm_import_artifacts(stem, content, candidate)
+        return True
     directory = _nm_certificate_directory(certificate_directory)
     blocks = _inline_identity_blocks(content)
     paths = {name: directory / f"{stem}-{name}.pem" for name in ("ca", "cert", "key")}

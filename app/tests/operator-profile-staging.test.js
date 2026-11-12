@@ -208,7 +208,9 @@ elif a[:3]==["connection","import","--temporary"] and a[3:6]==["type","openvpn",
     source=pathlib.Path(a[6]); assert source.is_file()
     stem=source.stem
     content=source.read_text()
-    certdir=pathlib.Path(os.environ["XDG_DATA_HOME"])/"networkmanagement/certificates/nm-openvpn"
+    certdir=(pathlib.Path(os.environ["HOME"])/".cert/nm-openvpn"
+             if os.environ.get("OIG_NATIVE_STUB_LEGACY")=="1"
+             else pathlib.Path(os.environ["XDG_DATA_HOME"])/"networkmanagement/certificates/nm-openvpn")
     certdir.mkdir(parents=True,exist_ok=True)
     files={}
     for name in ("ca","cert","key"):
@@ -324,6 +326,19 @@ else:
       assert.equal(postImportFail.status, 2);
       assert.equal(fs.existsSync(fakeState), false,
         'An import with nonzero exit after profile creation must be cleaned');
+      const legacyHome = path.join(root, 'isolated-legacy-home');
+      fs.mkdirSync(legacyHome, {mode: 0o700});
+      const legacyEnv = {...fakeEnv, HOME: legacyHome, OIG_NATIVE_STUB_LEGACY: '1'};
+      const legacyDir = path.join(legacyHome, '.cert', 'nm-openvpn');
+      const legacySuccess = checkNative(legacyEnv);
+      assert.equal(legacySuccess.status, 0, legacySuccess.stderr);
+      assert.deepEqual(fs.readdirSync(legacyDir), [],
+        'Successful legacy import must clean its exact private certificate copies');
+      const legacyPartial = checkNative({...legacyEnv, OIG_NATIVE_STUB_IMPORT_FAIL_AFTER: '1'});
+      assert.equal(legacyPartial.status, 2);
+      assert.equal(fs.existsSync(fakeState), false);
+      assert.deepEqual(fs.readdirSync(legacyDir), [],
+        'Nonzero legacy import must still clean imported private PEM material');
       const failedDelete = checkNative({ ...fakeEnv, OIG_NATIVE_STUB_DELETE_FAIL: '1' });
       assert.equal(failedDelete.status, 2, 'Deletion failure must block success');
       assert.doesNotMatch(failedDelete.stdout, /nativeImportCompatible/);
