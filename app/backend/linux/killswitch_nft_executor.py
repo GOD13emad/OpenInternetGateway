@@ -289,12 +289,18 @@ def verify_locked_nft_rules(approved, output, forward):
     port = ("payload", (approved.transport, "dport"), approved.peer_port)
     dhcp_sport = ("payload", ("udp", "sport"), 68)
     dhcp_dport = ("payload", ("udp", "dport"), 67)
-    expected = (
-        oif("lo"),
-        [nfproto, *oif(approved.underlay), ip_peer, port],
-        [nfproto, *oif(approved.underlay), dhcp_sport, dhcp_dport],
-    )
-    if not all(_accept_rule(rule, specs) for rule, specs in zip(output[:3], expected)):
+    # The real nft 1.1.6 kernel JSON canonicalizes away a redundant
+    # explicit "meta nfproto ipv4" preceding an "ip daddr" predicate:
+    # the IPv4 payload match itself constrains the family. Accept ONLY
+    # these two equivalent, pinned forms (not a generic missing selector).
+    peer_explicit = [nfproto, *oif(approved.underlay), ip_peer, port]
+    peer_implicit = [*oif(approved.underlay), ip_peer, port]
+    if (not _accept_rule(output[0], oif("lo"))
+            or not (_accept_rule(output[1], peer_explicit)
+                    or _accept_rule(output[1], peer_implicit))
+            or not _accept_rule(output[2], [
+                nfproto, *oif(approved.underlay), dhcp_sport, dhcp_dport
+            ])):
         raise NftSafetyError("Output ACCEPT not exactly pinned")
     if not _counter_drop(output[3]) or not _counter_drop(forward[0]):
         raise NftSafetyError("Output or forward DROP missing")

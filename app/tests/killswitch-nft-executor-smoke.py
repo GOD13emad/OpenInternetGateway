@@ -480,6 +480,39 @@ def main():
     forward = [{"expr": [{"counter": {"packets": 0, "bytes": 0}},
                          {"drop": None}]}]
     assert executor.verify_locked_nft_rules(APPROVED, good, forward)
+    # REAL isolated nftables 1.1.6 JSON: nft canonicalizes the redundant
+    # IPv4 family check away on an "ip daddr" rule. A payload ip/daddr
+    # predicate remains and still pins the packet to IPv4. This is not
+    # permission to remove the IPv4 guard on the DHCP-only rule.
+    kernel_normalized = copy.deepcopy(good)
+    assert kernel_normalized[1]["expr"].pop(0) == eq(
+        "meta", "nfproto", "ipv4"
+    )
+    assert executor.verify_locked_nft_rules(
+        APPROVED, kernel_normalized, forward
+    ), "GENUINE_KERNEL_NFT_1_1_6_CANONICALIZATION"
+    forged_peer = copy.deepcopy(kernel_normalized)
+    forged_peer[1]["expr"][1] = eq(
+        "payload", ("ip", "daddr"), "8.8.8.8"
+    )
+    refuse(lambda: executor.verify_locked_nft_rules(
+        APPROVED, forged_peer, forward), "implicit_wrong_peer")
+    forged_port = copy.deepcopy(kernel_normalized)
+    forged_port[1]["expr"][2] = eq(
+        "payload", ("tcp", "dport"), 80
+    )
+    refuse(lambda: executor.verify_locked_nft_rules(
+        APPROVED, forged_port, forward), "implicit_wrong_port")
+    wrong_underlay = copy.deepcopy(kernel_normalized)
+    wrong_underlay[1]["expr"][0] = eq(
+        "meta", "oifname", "tun7"
+    )
+    refuse(lambda: executor.verify_locked_nft_rules(
+        APPROVED, wrong_underlay, forward), "implicit_wrong_underlay")
+    missing_dhcp_family = copy.deepcopy(kernel_normalized)
+    missing_dhcp_family[2]["expr"].pop(0)
+    refuse(lambda: executor.verify_locked_nft_rules(
+        APPROVED, missing_dhcp_family, forward), "dhcp_missing_ipv4_guard")
     refuse(lambda: executor.verify_locked_nft_rules(
         APPROVED, good + [{"expr": [{"accept": None}]}], forward), "extra_allow")
     refuse(lambda: executor.verify_locked_nft_rules(
