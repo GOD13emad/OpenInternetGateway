@@ -46,6 +46,34 @@ def local_port():
         return s.getsockname()[1]
 
 
+def wait_for_server_listener(process, port, log, seconds=5):
+    """Observe the local kernel LISTEN socket without consuming a TLS session.
+
+    Fixed sleeps cause intermittent under-load false negatives: the client
+    connects before the one-shot OpenVPN tcp-server finishes binding. Do not
+    open a test connection here; that could consume --tls-exit's one session.
+    Only Linux localhost sockets are inspected, with a bounded deadline.
+    """
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        if process.poll() is not None:
+            break
+        with open("/proc/net/tcp", encoding="ascii") as f:
+            for entry in f.readlines()[1:]:
+                fields = entry.split()
+                if len(fields) < 4:
+                    continue
+                ip, sep, hexport = fields[1].partition(":")
+                if (sep and ip == "0100007F" and fields[3] == "0A"
+                        and int(hexport, 16) == port):
+                    return
+        time.sleep(0.06)
+    tail = log.read_text(errors="replace") if log.exists() else ""
+    raise AssertionError(
+        "Private localhost OpenVPN server did not enter TCP LISTEN; " +
+        " | ".join(tail.splitlines()[-5:]))
+
+
 def terminate(process):
     if process is None:
         return
@@ -119,7 +147,7 @@ def main():
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 start_new_session=True)
             try:
-                time.sleep(0.35)
+                wait_for_server_listener(server, port, server_log)
                 actual, client_log = attempt(
                     root, common, port, client_cert, client_key, identity)
                 if should_connect and not actual:

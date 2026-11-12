@@ -380,14 +380,32 @@ def main():
                 if not re.search(rb"\bdev\s+" + re.escape(tunnel.encode()) + rb"\b", path):
                     fail_stage("CONTAINER_DEFAULT_RESOLVER_NOT_TUN_BOUND")
                 stage = "CONTAINER_ORDINARY_DEFAULT_DNS"
-                normal = cmd(["dig", "-4", "+time=4", "+tries=1",
-                              "+short", "example.com", "A"], timeout=9)
-                normal_answers = normal.stdout.decode("ascii", "replace").splitlines()
-                if (normal.returncode or len(normal.stdout) > 2048
-                        or not normal_answers or not all(
+                # A single public recursive UDP DNS exchange can suffer
+                # transient loss. Permit one bounded retry using exactly the
+                # same container resolver and TUN route; never query eth0,
+                # switch DNS servers, or accept an invalid/non-global answer.
+                ordinary_valid = False
+                for dns_attempt in range(2):
+                    path = required(["ip", "-4", "route", "get", "1.1.1.1"], timeout=7)
+                    if not re.search(rb"\bdev\s+" + re.escape(tunnel.encode()) + rb"\b", path):
+                        fail_stage("CONTAINER_DEFAULT_DNS_ROUTE_CHANGED")
+                    normal = cmd(["dig", "-4", "+time=4", "+tries=1",
+                                  "+short", "example.com", "A"], timeout=9)
+                    out["containerDefaultDnsAttempts"] = dns_attempt + 1
+                    out["containerDefaultDnsDigExitCode"] = normal.returncode
+                    answers = normal.stdout.decode("ascii", "replace").splitlines()
+                    if normal.returncode or len(normal.stdout) > 2048 or not answers:
+                        continue
+                    try:
+                        ordinary_valid = all(
                             ipaddress.ip_address(address).version == 4
                             and ipaddress.ip_address(address).is_global
-                            for address in normal_answers)):
+                            for address in answers)
+                    except ValueError:
+                        ordinary_valid = False
+                    if ordinary_valid:
+                        break
+                if not ordinary_valid:
                     fail_stage("CONTAINER_DEFAULT_DNS_QUERY_NOT_VERIFIED")
                 out["containerDefaultDnsViaTunVerified"] = True
                 stage = "CONTAINER_DEFAULT_RESOLVER_RESTORE"
