@@ -113,7 +113,13 @@ managed_full_ipv4_route() {
 # Detect public IPv6 egress outside the OIG-owned tunnel without sending packets.
 # An absent IPv6 route is safe, but unexpected command failures fail closed.
 managed_ipv6_egress_safe() {
-  local owned="$1" destination response
+  local owned="$1" destination response routes
+  # Two representative route-get targets alone miss specific/policy IPv6
+  # routes. Check ALL tables before reporting an owned full-device path.
+  # This never changes host routes; any unavailable inventory fails closed.
+  routes="$(ip -6 route show table all 2>/dev/null)" || return 1
+  [[ "${#routes}" -le 262144 ]] || return 1
+  printf '%s\n' "$routes" | python3 -B "$OIG_HOME/linux/ipv6_route_guard.py" "$owned" >/dev/null 2>&1 || return 1
   for destination in 2606:4700:4700::1111 2001:4860:4860::8888; do
     if response="$(ip -6 route get "$destination" 2>&1)"; then
       response="$(printf '%s\n' "$response" | head -1)"

@@ -18,9 +18,13 @@ import signal
 import socket
 import ssl
 import subprocess
+import sys
 import tempfile
 import time
 import urllib.request
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'backend' / 'linux'))
+from ipv6_route_guard import verify_ipv6_route_inventory
 
 SOURCE = 'https://www.vpnbook.com/freevpn/openvpn'
 PROFILE_URL = 'https://www.vpnbook.com/api/openvpn?hostname=uk205.vpnbook.com&protocol=tcp443'
@@ -201,29 +205,6 @@ def verify_dns_route_owned(route, resolver='1.1.1.1'):
     return True
 
 
-def verify_ipv6_route_inventory(routes):
-    """Reject every non-local IPv6 route not owned by the test TUN, including policy tables."""
-    for line in routes.splitlines():
-        tokens = line.split()
-        if not tokens:
-            continue
-        if tokens[0] in ('unreachable', 'prohibit', 'blackhole', 'throw'):
-            continue
-        destination = tokens[1] if tokens[0] in ('local', 'anycast', 'multicast') and len(tokens) > 1 else tokens[0]
-        try:
-            prefix = ipaddress.ip_network('::/0' if destination == 'default' else destination, strict=False)
-        except ValueError as exc:
-            raise RuntimeError('IPv6 route inventory has an unrecognized prefix') from exc
-        if prefix.version != 6:
-            raise RuntimeError('Non-IPv6 entry in IPv6 routing inventory')
-        if prefix.is_link_local or prefix.is_multicast or prefix.is_loopback:
-            continue
-        match = re.search(r'\bdev\s+([A-Za-z0-9_.:-]+)(?:\s|$)', line)
-        if not match or match.group(1) != 'tun1':
-            raise RuntimeError('Foreign global or private IPv6 route remains outside TUN')
-    return True
-
-
 def offline_leak_guard_regression():
     safe = 'local ::1 dev lo table local\nfe80::/64 dev guest0 proto kernel\nff00::/8 dev guest0\nunreachable default dev lo\n'
     assert verify_ipv6_route_inventory(safe)
@@ -239,7 +220,7 @@ def offline_leak_guard_regression():
     for route in dangerous:
         try:
             verify_ipv6_route_inventory(safe + route + '\n')
-        except RuntimeError:
+        except (RuntimeError, ValueError):
             pass
         else:
             raise RuntimeError('Fail-closed IPv6 leak guard accepted foreign route')
@@ -250,7 +231,7 @@ def offline_leak_guard_regression():
     ):
         try:
             verify_dns_route_owned(route, resolver)
-        except RuntimeError:
+        except (RuntimeError, ValueError):
             pass
         else:
             raise RuntimeError('Fail-closed DNS leak guard accepted bypass or ambiguous source')

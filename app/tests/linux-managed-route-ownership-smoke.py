@@ -6,6 +6,7 @@ No real connections, routes, DNS, network probes, or credentials are used.
 import json
 import os
 import pathlib
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -68,6 +69,18 @@ elif cmd=='ip':
         target=args[3]
         iface='tun1' if scenario=='upper_effective_foreign' and target=='208.67.222.222' else 'tun0'
         print(target+' dev '+iface+' src '+source+' uid 1000')
+    elif args==['-6','route','show','table','all']:
+        if scenario=='ipv6_inventory_error':
+            sys.stderr.write('Cannot enumerate policy tables\\n')
+            sys.exit(2)
+        print('local ::1 dev lo table local')
+        print('fe80::/64 dev enp1s0 proto kernel')
+        if scenario=='foreign_ipv6_specific':
+            print('2001:db8:321::/48 dev enp1s0 table 123')
+        elif scenario=='owned_ipv6_specific':
+            print('2001:db8:321::/48 dev tun0 table 123')
+        elif scenario=='ipv6_inventory_malformed':
+            print('unrecognized-route-prefix dev enp1s0')
     elif args[:3]==['-6','route','get']:
         target=args[3]
         if scenario=='foreign_ipv6' or (scenario=='foreign_ipv6_upper' and target=='2001:4860:4860::8888'):
@@ -110,6 +123,10 @@ def verify_case(name, expect_connected, recovery='disabled'):
             (stubs / tool).symlink_to(shim)
         state = root / "home" / "state"
         state.mkdir(parents=True)
+        guard_dir = root / "home" / "linux"
+        guard_dir.mkdir(parents=True)
+        shutil.copyfile(SOURCE.parent / "ipv6_route_guard.py",
+                        guard_dir / "ipv6_route_guard.py")
         (state / "desired-state").write_text("off\n")
         env = {**os.environ, "PATH": str(stubs) + os.pathsep + os.environ["PATH"],
                "OIG_HOME": str(root / "home"),
@@ -126,9 +143,9 @@ def verify_case(name, expect_connected, recovery='disabled'):
         expected_state = 'Missing' if recovery == 'disabled' else ('active' if recovery == 'owned' else 'Unverified')
         assert status["autoRecoveryState"] == expected_state, (name, recovery, status)
         assert status["managedTunnelActive"] == (name != "foreign_tun"), (name,status)
-        assert status["fullRoutes"] == (2 if expect_connected or name in ("foreign_ipv6","foreign_ipv6_upper","ipv6_probe_error") else 0), (name,status)
+        assert status["fullRoutes"] == (2 if expect_connected or name in ("foreign_ipv6","foreign_ipv6_upper","foreign_ipv6_specific","ipv6_probe_error","ipv6_inventory_error","ipv6_inventory_malformed") else 0), (name,status)
         assert status["connected"] == expect_connected, (name,status)
-        assert status["ipv6LeakRisk"] == (name in ("foreign_ipv6","foreign_ipv6_upper","ipv6_probe_error")), (name,status)
+        assert status["ipv6LeakRisk"] == (name in ("foreign_ipv6","foreign_ipv6_upper","foreign_ipv6_specific","ipv6_probe_error","ipv6_inventory_error","ipv6_inventory_malformed")), (name,status)
         assert (state / "desired-state").read_text() == "off\n"
         assert not (state / "benchmark-upload.bin").exists()
 
@@ -147,9 +164,13 @@ if __name__ == "__main__":
         ("foreign_ipv6", False),
         ("foreign_ipv6_upper", False),
         ("owned_ipv6", True),
+        ("owned_ipv6_specific", True),
+        ("foreign_ipv6_specific", False),
+        ("ipv6_inventory_error", False),
+        ("ipv6_inventory_malformed", False),
         ("ipv6_probe_error", False),
     ):
         verify_case(case, accepted)
     for recovery in ('owned','foreign','wrong_exec','missing_env','missing_service'):
         verify_case('foreign_tun', False, recovery)
-    print("PASS: only managed VPN source with owned full IPv4 routes can claim tunnel health (13 offline cases), plus 5 systemd recovery-ownership cases")
+    print("PASS: only managed VPN source with owned full IPv4 routes can claim tunnel health (17 offline cases), plus 5 systemd recovery-ownership cases")
