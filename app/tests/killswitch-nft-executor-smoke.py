@@ -306,6 +306,21 @@ def hosted_main_receipt_integration():
     baseline = ("route4", "route6", "dns")
 
     def invoke(*, snapshot, backend):
+        class SimulatedIsolatedBackend(executor.IsolatedNftBackend):
+            # Retain genuine isinstance relationship used by the controller.
+            # All operations delegate to this test-only FakeBackend; never
+            # invoke nft or the host network.
+            def __init__(self, approved):
+                self.approved = approved
+            def tables(self):
+                return backend.tables()
+            def chain(self, name):
+                return backend.chain(name)
+            def rules(self, name="output"):
+                return backend.rules(name)
+            def apply(self, script):
+                return backend.apply(script)
+
         with tempfile.TemporaryDirectory(prefix="oig-nft-receipt-fixture-") as root:
             receipt = Path(root) / "receipt.json"
             with (patch.object(sys, "argv", [
@@ -313,7 +328,7 @@ def hosted_main_receipt_integration():
                       "--isolated-docker-only"]),
                   patch.object(executor, "disposable_scope", return_value=None),
                   patch.object(executor, "IsolatedNftBackend",
-                               side_effect=lambda _: backend),
+                               new=SimulatedIsolatedBackend),
                   patch.dict(globals_for_main, {
                       "RECEIPT": receipt,
                       "snapshot": snapshot,
