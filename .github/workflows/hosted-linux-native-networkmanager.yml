@@ -1,0 +1,64 @@
+name: Disposable Linux native NetworkManager import QA
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/hosted-linux-native-networkmanager.yml'
+      - 'app/tests/hosted-linux-native-nm.py'
+      - 'app/tests/hosted-linux-native-nm.sh'
+      - 'app/backend/linux/operator_profile.py'
+      - 'app/backend/linux/operator_full_device.py'
+      - 'app/backend/linux/ipv6_route_guard.py'
+
+permissions:
+  contents: read
+
+jobs:
+  isolated-native-networkmanager-import:
+    if: ${{ github.event.pull_request.head.repo.full_name == github.repository && github.head_ref == 'qa/v2.5.20-operator-safety-20261019' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Confirm exact hosted source and no owner-host execution
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$RUNNER_ENVIRONMENT" = "github-hosted"
+          test "$GITHUB_ACTIONS" = "true"
+          test "$GITHUB_REPOSITORY" = "GOD13emad/OpenInternetGateway"
+          test "$GITHUB_BASE_REF" = "integration/qa-v2520-20261019"
+          test "$(git rev-parse HEAD)" = "${{ github.event.pull_request.head.sha }}"
+          test "$(git status --porcelain)" = ""
+          bash -n app/tests/hosted-linux-native-nm.sh
+          python3 -B - <<'PY'
+          import ast,pathlib
+          ast.parse(pathlib.Path('app/tests/hosted-linux-native-nm.py').read_text())
+          print('DISPOSABLE_NATIVE_NM_IMPORT_AST_PASS')
+          PY
+          set +e
+          result="$(env -u GITHUB_ACTIONS -u RUNNER_ENVIRONMENT -u GITHUB_REPOSITORY bash app/tests/hosted-linux-native-nm.sh --run-hosted-container 2>&1)"
+          code=$?
+          set -e
+          test "$code" -ne 0
+          test "$result" = "REFUSED: owner host or non-disposable runner"
+          echo 'OWNER_HOST_REFUSED=PASS'
+      - name: Real OIG NetworkManager plugin import and pinned CA/CN in isolated Docker netns
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -c /dev/net/tun
+          docker info --format '{{.ServerVersion}}' >/dev/null
+          bash app/tests/hosted-linux-native-nm.sh --run-hosted-container
+      - name: Upload bounded native NetworkManager receipt
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: linux-native-networkmanager-import-receipt
+          path: ${{ runner.temp }}/oig-hosted-nm/oig-hosted-native-nm.json
+          if-no-files-found: warn
+          retention-days: 7
