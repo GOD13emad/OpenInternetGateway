@@ -518,7 +518,7 @@ def main():
                         ["resolvectl", "dns", "eth0"], timeout=8).decode(
                             "utf8", "replace").strip()
                     foreign_line = re.fullmatch(
-                        r"Link\\s+\\d+\\s+\\(eth0\\):\\s*",
+                        r"Link\s+\d+\s+\(eth0\):\s*",
                         foreign_before)
                     if not foreign_line:
                         fail_stage("FOREIGN_LINK_DNS_BASELINE_NOT_EMPTY")
@@ -534,7 +534,7 @@ def main():
                             ["resolvectl", "dns"], timeout=8).decode(
                                 "utf8", "replace")
                         if not re.search(
-                                r"(?m)^Link\\s+\\d+\\s+\\(eth0\\):\\s*9\\.9\\.9\\.9\\s*$",
+                                r"(?m)^Link\s+\d+\s+\(eth0\):\s*9\.9\.9\.9\s*$",
                                 effective):
                             fail_stage("FOREIGN_LINK_INJECTION_NOT_EFFECTIVE")
                         rejected = cmd(
