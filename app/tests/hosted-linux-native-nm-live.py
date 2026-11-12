@@ -199,7 +199,13 @@ def main():
                       "ipv4.ignore-auto-dns", "yes",
                       "ipv6.ignore-auto-dns", "yes",
                       "ipv4.ignore-auto-routes", "no" if is_full_ipv4 else "yes",
-                      "ipv6.ignore-auto-routes", "yes"], timeout=12)
+                      "ipv6.ignore-auto-routes", "yes",
+                      # VPNBook's imported profile does not necessarily push
+                      # redirect-gateway. Ask NM to own the exact OIG half
+                      # routes, rather than manipulating system routes from
+                      # the test harness after activation.
+                      *(["ipv4.routes", "0.0.0.0/1,128.0.0.0/1"]
+                        if is_full_ipv4 else [])], timeout=12)
             operator_profile.verify_nm_import(
                 uuid, stem, checked, endpoint, proto,
                 provider.EXPECTED_CA, provider.EXPECTED_CN)
