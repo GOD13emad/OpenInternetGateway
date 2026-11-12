@@ -364,6 +364,46 @@ def main():
                 if not resolved_ok:
                     fail_stage("RESOLVED_DEFAULT_QUERY_NOT_VERIFIED")
                 out["resolvedQueryViaVpnVerified"] = True
+                stage = "PRODUCT_LINUX_LIVE_DNS_GUARD"
+                # The real installed product guard authorizes only the
+                # OIG-VPN-LIVE connection name. Rename ONLY this disposable
+                # GitHub Docker-owned temporary NM profile for the check;
+                # restore its original unique identity in finally. Neither
+                # the runner's nor the owner's NM profile is ever touched.
+                original_name = required(
+                    ["nmcli", "--wait", "5", "-g", "connection.id",
+                     "connection", "show", "uuid", uuid],
+                    timeout=8).decode("utf8", "replace").strip()
+                if original_name != stem:
+                    fail_stage("TEST_PROFILE_IDENTITY_CHANGED_BEFORE_DNS_GUARD")
+                existing = required(
+                    ["nmcli", "-t", "-f", "NAME", "connection", "show"],
+                    timeout=8).decode("utf8", "replace").splitlines()
+                if "OIG-VPN-LIVE" in existing:
+                    fail_stage("TEST_OIG_CONNECTION_NAME_ALREADY_PRESENT")
+                try:
+                    required(
+                        ["nmcli", "--wait", "5", "connection", "modify",
+                         "--temporary", "uuid", uuid, "connection.id",
+                         "OIG-VPN-LIVE"], timeout=10)
+                    verified = cmd(
+                        ["python3", "-B", str(BACKEND / "dns_route_guard.py"),
+                         "--managed-name", "OIG-VPN-LIVE",
+                         "--interface", tunnel], timeout=16)
+                    if verified.returncode != 0:
+                        fail_stage("PRODUCT_DNS_ROUTE_GUARD_REJECTED_REAL_TUN")
+                    out["productionDnsGuardRealNmResolvedVerified"] = True
+                finally:
+                    restored = cmd(
+                        ["nmcli", "--wait", "5", "connection", "modify",
+                         "--temporary", "uuid", uuid,
+                         "connection.id", original_name], timeout=10)
+                    if restored.returncode != 0:
+                        fail_stage("TEST_PROFILE_IDENTITY_RESTORE_FAILED")
+                operator_profile.verify_nm_import(
+                    uuid, stem, checked, endpoint, proto,
+                    provider.EXPECTED_CA, provider.EXPECTED_CN)
+                out["temporaryNmAliasRestored"] = True
                 stage = "FULL_IPV4_ROUTE_OWNERSHIP"
                 # No test-specific data /32: the real NM default path must
                 # cover two independent public resolvers and HTTPS itself.
@@ -657,6 +697,8 @@ def main():
                            and out.get("nmActiveDnsRoutingPolicyVerified") is True
                            and out.get("resolvedVpnDnsOnlyPolicyVerified") is True
                            and out.get("resolvedQueryViaVpnVerified") is True
+                           and out.get("productionDnsGuardRealNmResolvedVerified") is True
+                           and out.get("temporaryNmAliasRestored") is True
                            and out.get("resolvedDnsPolicyRestored") is True
                            and out.get("containerDefaultDnsViaTunVerified") is True
                            and out.get("containerDefaultResolverRestoredExact") is True))
