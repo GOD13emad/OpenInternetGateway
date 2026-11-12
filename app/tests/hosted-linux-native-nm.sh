@@ -175,9 +175,34 @@ if p.read_bytes()!=b"nameserver 127.0.0.53\n":
     raise SystemExit("REFUSED: Docker-only resolved stub file mismatch")
 print("HOSTED_DISPOSABLE_DOCKER_RESOLVED_STUB_MODE_CONFIGURED")
 PYSTUB
-  # SIGHUP makes the real D-Bus daemon reload its resolver inputs, while
-  # preserving its NM-linked configuration and active Docker base interface.
-  kill -HUP "$resolved_pid"
+  # The standalone service in a Docker container does NOT install a
+  # SIGHUP reload handler (observed 4452ea8: it died from Hangup). Restart
+  # only this already-owned disposable daemon so it discovers the stub
+  # resolver mode with no inherited Docker Global DNS. No host systemd unit
+  # or DNS state is involved.
+  kill -TERM "$resolved_pid" 2>/dev/null || true
+  wait "$resolved_pid" 2>/dev/null || true
+  "$resolved_bin" >/out/resolved-service-stub.log 2>&1 &
+  resolved_pid="$!"
+  stub_resolved_ready=false
+  for _ in $(seq 1 40); do
+    if resolvectl status >/dev/null 2>&1; then
+      stub_resolved_ready=true
+      break
+    fi
+    kill -0 "$resolved_pid" 2>/dev/null || break
+    sleep .25
+  done
+  [[ "$stub_resolved_ready" == true ]] || {
+    echo 'HOSTED_DOCKER_RESOLVED_STUB_RESTART_FAILED' >&2
+    exit 73
+  }
+  # NM remains the ONLY manager of the dummy-base link DNS. Explicitly
+  # reapply that owned link, not the runner's Docker eth0 underlay.
+  nmcli --wait 12 device reapply oigqa0 >/out/nm-stub-dns-reapply.log 2>&1 || {
+    echo 'HOSTED_DOCKER_NM_BASE_DNS_REAPPLY_FAILED' >&2
+    exit 73
+  }
   for _ in $(seq 1 15); do
     if python3 -B - <<'PYCHECK'
 import re,subprocess,sys
@@ -222,7 +247,9 @@ with p.open("wb") as f:
 assert p.read_bytes()==raw
 print("HOSTED_DOCKER_RESOLVER_BOOTSTRAP_RESTORED_EXACT")
 PYRESTORE
-  kill -HUP "$resolved_pid"
+  # No daemon reload required after restoring Docker's own libc resolver:
+  # the scoped crash QA uses Docker bootstrap directly and the container is
+  # destroyed after this last independent test.
   # Separate proof: a real authenticated OpenVPN TUN is active while its
   # owning process is SIGKILLed. An independent watchdog then executes the
   # unchanged production rollback helper on that exact UUID. This does NOT
