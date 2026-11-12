@@ -81,6 +81,79 @@ def dns_drop_probe():
     return denied, delta
 
 
+def new_receipt():
+    """All required gate fields exist even if the very first nft action fails."""
+    return {
+        "schema": "oig-hosted-nft-executor-v1",
+        "pass": False,
+        "productionKillSwitchVerified": False,
+        "bootPersistenceVerified": False,
+        "physicalHostNetworkChanged": False,
+        "authorizedTunnelUnlockVerified": False,
+        "forwardPacketProbeVerified": False,
+        "physicalIPv6EgressProbeVerified": False,
+        "initialKernelLockdownVerified": False,
+        "initialDnsDropDelta": 0,
+        "unverifiedTunnelRefused": False,
+        "realKernelRelockVerified": False,
+        "relockedDnsDropDelta": 0,
+        "forwardPolicyDropVerified": False,
+        "isolatedOwnedTableRemoved": False,
+        "containerRouteDnsBaselineRestored": False,
+    }
+
+
+def finalize_receipt(out):
+    """Fail closed after any partial result; retain original failure context."""
+    required = (
+        "initialKernelLockdownVerified",
+        "unverifiedTunnelRefused",
+        "realKernelRelockVerified",
+        "forwardPolicyDropVerified",
+        "isolatedOwnedTableRemoved",
+        "containerRouteDnsBaselineRestored",
+    )
+    out["pass"] = (
+        out["pass"] is True
+        and all(out.get(k) is True for k in required)
+        and type(out.get("initialDnsDropDelta")) is int
+        and out["initialDnsDropDelta"] >= 8
+        and type(out.get("relockedDnsDropDelta")) is int
+        and out["relockedDnsDropDelta"] >= 8
+        and "failureClass" not in out
+        and out.get("schema") == "oig-hosted-nft-executor-v1"
+        and all(out.get(k) is False for k in (
+            "productionKillSwitchVerified", "bootPersistenceVerified",
+            "physicalHostNetworkChanged", "authorizedTunnelUnlockVerified",
+            "forwardPacketProbeVerified", "physicalIPv6EgressProbeVerified",
+        ))
+    )
+    return out["pass"]
+
+
+def cleanup_disposable_session(out, *, created, state, baseline,
+                               snapshot_fn, remove_fn):
+    """Record cleanup/restore failures without hiding the primary failure.
+
+    All injected functions are for disposable QA only; no production caller
+    is permitted. A missing or failed intermediate field can never PASS.
+    """
+    if created and state == "LOCKED" and out.get("pass") is True:
+        try:
+            out["isolatedOwnedTableRemoved"] = remove_fn() is True
+        except Exception as exc:
+            out.setdefault("failureStage", "ISOLATED_TABLE_CLEANUP")
+            out.setdefault("failureClass", type(exc).__name__)
+    if baseline is not None:
+        try:
+            out["containerRouteDnsBaselineRestored"] = snapshot_fn() == baseline
+        except Exception as exc:
+            out.setdefault("failureStage", "CONTAINER_NETWORK_RESTORE_CHECK")
+            out.setdefault("failureClass", type(exc).__name__)
+    # When the baseline could not be read, restoration cannot be claimed.
+    return finalize_receipt(out)
+
+
 def main():
     if sys.argv[1:] != ["--isolated-docker-only"]:
         raise SystemExit("REFUSED: owner host or non-disposable runner")
@@ -91,24 +164,18 @@ def main():
 
     if RECEIPT.exists():
         raise SystemExit("REFUSED: existing nft executor receipt")
-    baseline = snapshot()
-    backend = exe.IsolatedNftBackend(APPROVED)
-    if ("inet", exe.NFT_TABLE) in backend.tables():
-        raise SystemExit("REFUSED: existing nft test table")
-    ctl = exe.LockdownOnlyController(APPROVED, backend)
-    out = {
-        "schema": "oig-hosted-nft-executor-v1",
-        "pass": False,
-        "productionKillSwitchVerified": False,
-        "bootPersistenceVerified": False,
-        "physicalHostNetworkChanged": False,
-        "authorizedTunnelUnlockVerified": False,
-        "forwardPacketProbeVerified": False,
-        "physicalIPv6EgressProbeVerified": False,
-    }
+    out = new_receipt()
+    baseline = None
+    ctl = None
     created = False
-    stage = "NEW"
+    stage = "BASELINE_SNAPSHOT"
     try:
+        baseline = snapshot()
+        stage = "ISOLATED_EXECUTOR_PREFLIGHT"
+        backend = exe.IsolatedNftBackend(APPROVED)
+        if ("inet", exe.NFT_TABLE) in backend.tables():
+            raise exe.NftSafetyError("Existing nft table: ownership ambiguous")
+        ctl = exe.LockdownOnlyController(APPROVED, backend)
         stage = "LOCKDOWN_INSTALL"
         ctl.install_lockdown()
         created = True
@@ -141,21 +208,21 @@ def main():
         out["failureStage"] = stage
         out["failureClass"] = type(exc).__name__
     finally:
-        # Never remove a table in an unknown state. It is confined to the
-        # disposable container and disappears when that namespace dies.
-        if created and ctl.state == "LOCKED" and out["pass"]:
+        # No deletion in an unknown state: the disposable namespace itself
+        # is destroyed when this CI job ends.
+        def remove_verified_test_table():
             deletion = subprocess.run(
                 [exe.NFT_BINARY, "delete", "table", "inet", exe.NFT_TABLE],
                 capture_output=True, timeout=8, check=False
             )
-            out["isolatedOwnedTableRemoved"] = deletion.returncode == 0
-        else:
-            out["isolatedOwnedTableRemoved"] = False
-        out["containerRouteDnsBaselineRestored"] = snapshot() == baseline
-        out["pass"] = (out["pass"] and out["isolatedOwnedTableRemoved"]
-                       and out["containerRouteDnsBaselineRestored"]
-                       and out["initialDnsDropDelta"] >= 8
-                       and out["relockedDnsDropDelta"] >= 8)
+            return deletion.returncode == 0
+
+        cleanup_disposable_session(
+            out, created=created,
+            state=ctl.state if ctl is not None else "UNKNOWN",
+            baseline=baseline, snapshot_fn=snapshot,
+            remove_fn=remove_verified_test_table
+        )
         fd = os.open(RECEIPT, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
         with os.fdopen(fd, "w", encoding="utf8") as target:
             json.dump(out, target, sort_keys=True)

@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """Offline transaction/state regression; never executes nft on owner host."""
 from pathlib import Path
+import copy
 import os
+import runpy
 import stat
 import subprocess
 import sys
@@ -164,6 +166,112 @@ def isolated_nft_subprocess_simulation():
     print("NFT_EXECUTOR_MOCKED_SUBPROCESS_ORDER_AND_0600_PASS")
 
 
+def hosted_receipt_failure_regressions():
+    """Run failure-path receipt logic, not a privileged nft action."""
+    fixture = runpy.run_path(str(Path(__file__).with_name(
+        "hosted-linux-nft-executor-smoke.py"
+    )))
+    new = fixture["new_receipt"]
+    clean = fixture["cleanup_disposable_session"]
+    baseline = ("route4", "route6", "dns")
+    calls = []
+
+    def remove_ok():
+        calls.append("remove")
+        return True
+
+    def untouched():
+        calls.append("snapshot")
+        return baseline
+
+    # First nft batch fails before any DNS counter exists. Must still emit
+    # a negative receipt with the true first failure and no deletion.
+    premature = new()
+    premature["failureStage"] = "LOCKDOWN_INSTALL"
+    premature["failureClass"] = "NftSafetyError"
+    assert not clean(premature, created=False, state="UNKNOWN", baseline=baseline,
+                     snapshot_fn=untouched, remove_fn=remove_ok)
+    assert premature["initialDnsDropDelta"] == 0
+    assert premature["relockedDnsDropDelta"] == 0
+    assert premature["failureStage"] == "LOCKDOWN_INSTALL"
+    assert calls == ["snapshot"], calls
+
+    no_baseline = new()
+    no_baseline["failureStage"] = "BASELINE_SNAPSHOT"
+    no_baseline["failureClass"] = "RuntimeError"
+    calls.clear()
+    assert not clean(no_baseline, created=False, state="UNKNOWN", baseline=None,
+                     snapshot_fn=lambda: calls.append("invalid_baseline_probe"),
+                     remove_fn=remove_ok)
+    assert calls == []
+    assert no_baseline["containerRouteDnsBaselineRestored"] is False
+    assert no_baseline["failureStage"] == "BASELINE_SNAPSHOT"
+
+    good = new()
+    good.update({
+        "pass": True,
+        "initialKernelLockdownVerified": True,
+        "initialDnsDropDelta": 8,
+        "unverifiedTunnelRefused": True,
+        "realKernelRelockVerified": True,
+        "relockedDnsDropDelta": 8,
+        "forwardPolicyDropVerified": True,
+    })
+    calls.clear()
+    clean(good, created=True, state="LOCKED", baseline=baseline,
+          snapshot_fn=untouched, remove_fn=remove_ok)
+    assert good["pass"] is True
+    assert calls == ["remove", "snapshot"]
+
+    def failed_remove():
+        raise subprocess.TimeoutExpired("nft", 8)
+
+    removed = copy.deepcopy(good)
+    calls.clear()
+    assert not clean(removed, created=True, state="LOCKED", baseline=baseline,
+                     snapshot_fn=untouched, remove_fn=failed_remove)
+    assert removed["failureClass"] == "TimeoutExpired"
+    assert removed["failureStage"] == "ISOLATED_TABLE_CLEANUP"
+    assert calls == ["snapshot"]
+
+    def failed_snapshot():
+        raise RuntimeError("ISOLATED_ROUTE_READ_FAILED")
+
+    bad_snapshot = copy.deepcopy(good)
+    assert not clean(bad_snapshot, created=True, state="LOCKED", baseline=baseline,
+                     snapshot_fn=failed_snapshot, remove_fn=remove_ok)
+    assert bad_snapshot["failureClass"] == "RuntimeError"
+    assert bad_snapshot["failureStage"] == "CONTAINER_NETWORK_RESTORE_CHECK"
+
+    no_cleanup = copy.deepcopy(good)
+    assert not clean(no_cleanup, created=True, state="LOCKED", baseline=baseline,
+                     snapshot_fn=untouched, remove_fn=lambda: False)
+    assert no_cleanup["isolatedOwnedTableRemoved"] is False
+
+    changed_network = copy.deepcopy(good)
+    assert not clean(changed_network, created=True, state="LOCKED", baseline=baseline,
+                     snapshot_fn=lambda: ("changed", "route6", "dns"),
+                     remove_fn=remove_ok)
+    assert changed_network["containerRouteDnsBaselineRestored"] is False
+
+    claim_production = copy.deepcopy(good)
+    claim_production["productionKillSwitchVerified"] = True
+    assert not clean(claim_production, created=True, state="LOCKED", baseline=baseline,
+                     snapshot_fn=untouched, remove_fn=remove_ok)
+
+    forged_delta = copy.deepcopy(good)
+    forged_delta["relockedDnsDropDelta"] = True  # bool is NOT an integer counter
+    assert not clean(forged_delta, created=True, state="LOCKED", baseline=baseline,
+                     snapshot_fn=untouched, remove_fn=remove_ok)
+
+    not_accepted = copy.deepcopy(good)
+    not_accepted.pop("initialDnsDropDelta")
+    assert not clean(not_accepted, created=True, state="LOCKED", baseline=baseline,
+                     snapshot_fn=untouched, remove_fn=remove_ok)
+
+    print("NFT_EXECUTOR_HOSTED_RECEIPT_FAILURE_PATHS_PASS")
+
+
 def main():
     a = FakeBackend()
     controller = executor.LockdownOnlyController(APPROVED, a)
@@ -280,6 +388,7 @@ def main():
     else:
         raise AssertionError("OWNER_HOST_NFT_EXECUTOR_NOT_REFUSED")
     isolated_nft_subprocess_simulation()
+    hosted_receipt_failure_regressions()
     source = Path(executor.__file__).read_text()
     assert "shell=True" not in source and "Nft arguments not in isolated allowlist" in source
     assert "sudo " not in source and "pkexec " not in source
