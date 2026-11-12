@@ -60,7 +60,7 @@ test('Linux Debian packaging keeps Electron dependencies and adds native OpenVPN
     assert.ok(deps.includes(name), 'Missing Chromium/Electron dependency: ' + name);
   }
   for (const name of ['network-manager','network-manager-openvpn','openvpn (>= 2.6)',
-    'python3','curl','iproute2','systemd','ca-certificates']) {
+    'python3','curl','iproute2','nftables','systemd','systemd-resolved','ca-certificates']) {
     assert.ok(deps.includes(name), name + ' must be an apt dependency');
   }
   const launcher = fs.readFileSync(path.join(__dirname, '..', 'build/linux-oneclick-installer.sh'), 'utf8');

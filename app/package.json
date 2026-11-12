@@ -113,6 +113,7 @@
         "python3",
         "curl",
         "iproute2",
+        "nftables",
         "systemd",
         "systemd-resolved",
         "ca-certificates"

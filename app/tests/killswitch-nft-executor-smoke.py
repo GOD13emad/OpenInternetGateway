@@ -2,7 +2,10 @@
 """Offline transaction/state regression; never executes nft on owner host."""
 from pathlib import Path
 import os
+import stat
+import subprocess
 import sys
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend/linux"))
 import killswitch_lifecycle_contract as contract
@@ -101,6 +104,64 @@ def refuse(call, label):
     except executor.NftSafetyError:
         return
     raise AssertionError("FAIL_OPEN_" + label)
+
+
+def isolated_nft_subprocess_simulation():
+    """Exercise actual executor argv/file lifecycle without ever running nft.
+
+    Both the scope guard AND subprocess are patched together; the host's
+    firewall/kernel are never queried or modified by this test.
+    """
+    args = (APPROVED.tunnel, APPROVED.underlay,
+            APPROVED.peer_ipv4, APPROVED.peer_port, APPROVED.transport)
+    policy = executor.nft.render_lockdown(*args)
+    observed = []
+
+    def fake_kernel(command, **options):
+        path = Path(command[-1])
+        assert path.is_file()
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600
+        assert path.read_text() == policy
+        assert command[0] == executor.NFT_BINARY
+        assert options["timeout"] == 8
+        assert options["check"] is False
+        assert options["input"] == b""
+        observed.append(tuple(command[1:]))
+        return subprocess.CompletedProcess(command, 0, b"", b"")
+
+    with (patch.object(executor, "disposable_scope"),
+          patch.object(executor.subprocess, "run", side_effect=fake_kernel)):
+        backend = executor.IsolatedNftBackend(APPROVED)
+        backend.apply(policy)
+        assert len(observed) == 2
+        assert observed[0][:2] == ("-c", "-f")
+        assert observed[1][0] == "-f"
+        assert observed[0][-1] == observed[1][-1]
+        assert backend._active_policy_file is None
+        assert not Path(observed[0][-1]).exists(), "Temporary batch survived"
+        refuse(lambda: backend._call([
+            "-f", "/tmp/oig-qa-nft-fake/policy.nft"
+        ]), "not_current_batch")
+        refuse(lambda: backend.apply(
+            executor.nft.render_transition(*args, tunnel_allowed=True)
+        ), "tunnel_activation_without_attestation")
+        assert len(observed) == 2, "Forbidden command reached subprocess"
+
+    invoked = []
+
+    def reject_check(command, **_options):
+        invoked.append(tuple(command[1:]))
+        return subprocess.CompletedProcess(command, 1, b"", b"error")
+
+    with (patch.object(executor, "disposable_scope"),
+          patch.object(executor.subprocess, "run", side_effect=reject_check)):
+        backend = executor.IsolatedNftBackend(APPROVED)
+        refuse(lambda: backend.apply(policy), "check_failure")
+        assert len(invoked) == 1 and invoked[0][0:2] == ("-c", "-f")
+        assert backend._active_policy_file is None
+        assert not Path(invoked[0][-1]).exists()
+
+    print("NFT_EXECUTOR_MOCKED_SUBPROCESS_ORDER_AND_0600_PASS")
 
 
 def main():
@@ -218,6 +279,7 @@ def main():
         assert "non-disposable runner" in str(err)
     else:
         raise AssertionError("OWNER_HOST_NFT_EXECUTOR_NOT_REFUSED")
+    isolated_nft_subprocess_simulation()
     source = Path(executor.__file__).read_text()
     assert "shell=True" not in source and "Nft arguments not in isolated allowlist" in source
     assert "sudo " not in source and "pkexec " not in source
