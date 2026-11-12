@@ -260,9 +260,19 @@ ExecStart=/usr/bin/python3 -I /opt/open-internet-gateway/resources/backend/linux
 RemainAfterExit=yes
 NoNewPrivileges=true
 CapabilityBoundingSet=CAP_NET_ADMIN
+UMask=0077
 ProtectSystem=strict
 ProtectHome=true
 PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_UNIX AF_NETLINK
+RestrictNamespaces=true
+LockPersonality=true
+RestrictRealtime=true
+SystemCallArchitectures=native
 # No [Install] section until audited boot ordering and loss coverage.
 """
 

@@ -31,6 +31,12 @@ test('Linux optional root systemd unit parses but is deliberately not installabl
     assert.doesNotMatch(unit.stdout, /^\[Install\]$/m);
     assert.match(unit.stdout, /Before=network-pre.target NetworkManager.service/);
     assert.match(unit.stdout, /CapabilityBoundingSet=CAP_NET_ADMIN/);
+    assert.match(unit.stdout, /UMask=0077/);
+    assert.match(unit.stdout, /RestrictAddressFamilies=AF_UNIX AF_NETLINK/);
+    assert.match(unit.stdout, /PrivateDevices=true/);
+    assert.match(unit.stdout, /ProtectKernelTunables=true/);
+    assert.match(unit.stdout, /RestrictNamespaces=true/);
+    assert.doesNotMatch(unit.stdout, /^PrivateNetwork=true$/m);
     const gate = spawnSync('python3', [
       '-B', '-I', python, '--print-noninstallable-nm-gate-preview'
     ], { encoding: 'utf8', timeout: 5000 });
