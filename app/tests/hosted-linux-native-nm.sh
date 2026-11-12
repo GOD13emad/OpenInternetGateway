@@ -55,7 +55,7 @@ NMCONF
     # The container creates its private receipt as 0600/root. Transfer only
     # the artifact's ownership to the runner user for actions/upload-artifact.
     # Never loosen permissions or mount owner-host sensitive directories.
-    for receipt in /out/oig-hosted-native-nm.json /out/oig-hosted-native-nm-live.json; do
+    for receipt in /out/oig-hosted-native-nm.json /out/oig-hosted-native-nm-live.json /out/oig-hosted-native-nm-fullipv4.json; do
       if [[ -f "$receipt" ]]; then
         chown "${OIG_RUNNER_UID:?}:${OIG_RUNNER_GID:?}" "$receipt"
         chmod 0600 "$receipt"
@@ -114,6 +114,7 @@ NMCONF
   # Only the disposable container progresses to real NM/OpenVPN activation.
   # The native live receipt is deliberately separate from the import receipt.
   python3 -B /work/app/tests/hosted-linux-native-nm-live.py --native-scoped-live
+  python3 -B /work/app/tests/hosted-linux-native-nm-live.py --native-fullipv4
   exit 0
 fi
 
@@ -165,3 +166,19 @@ assert d.get('systemDnsLeakContainmentVerified') is False
 assert d.get('productionKillSwitchVerified') is False
 print('HOSTED_DISPOSABLE_NATIVE_NM_SCOPED_LIVE_TUN_AND_ROLLBACK_PASS')
 PYLIVE
+
+test -s "$out/oig-hosted-native-nm-fullipv4.json"
+python3 -B - "$out/oig-hosted-native-nm-fullipv4.json" <<'PYFULL'
+import json,sys
+d=json.load(open(sys.argv[1],encoding='utf-8'))
+assert d.get('pass') is True
+assert d.get('nativeNmAuthenticated') is True
+assert d.get('fullIPv4RoutesOwned') is True
+assert d.get('tunnelBoundHttpsSucceeded') is True
+assert d.get('containerNetworkRestored') is True
+assert d.get('temporaryProfileAndPEMCleanupVerified') is True
+assert d.get('fullDeviceTunnelVerified') is False
+assert d.get('systemDnsLeakContainmentVerified') is False
+assert d.get('productionKillSwitchVerified') is False
+print('HOSTED_NATIVE_NM_DISPOSABLE_IPV4_FULL_ROUTE_AND_ROLLBACK_PASS')
+PYFULL

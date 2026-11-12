@@ -21,11 +21,12 @@ import tempfile
 
 HERE = Path(__file__).resolve().parent
 BACKEND = HERE.parent / "backend" / "linux"
-RECEIPT = Path("/out/oig-hosted-native-nm-live.json")
+SCOPED_RECEIPT = Path("/out/oig-hosted-native-nm-live.json")
+FULL_IPV4_RECEIPT = Path("/out/oig-hosted-native-nm-fullipv4.json")
 
 
 def check_scope():
-    if (sys.argv[1:] != ["--native-scoped-live"]
+    if (sys.argv[1:] not in (["--native-scoped-live"], ["--native-fullipv4"])
             or os.geteuid() != 0
             or os.environ.get("OIG_HOSTED_CONTAINER") != "1"
             or os.environ.get("GITHUB_ACTIONS") != "true"
@@ -36,6 +37,7 @@ def check_scope():
             or not Path("/.dockerenv").exists()
             or not Path("/work/app/backend/linux/operator_profile.py").is_file()):
         raise SystemExit("REFUSED: owner host or non-disposable runner")
+    return sys.argv[1] == "--native-fullipv4"
 
 
 def cmd(argv, timeout=15, *, pass_fds=()):
@@ -63,15 +65,18 @@ def snapshot():
     return entries
 
 
-def put_receipt(data):
-    RECEIPT.parent.mkdir(parents=True, exist_ok=True)
+def put_receipt(data, is_full_ipv4):
+    receipt = FULL_IPV4_RECEIPT if is_full_ipv4 else SCOPED_RECEIPT
+    receipt.parent.mkdir(parents=True, exist_ok=True)
     payload = (json.dumps(data, sort_keys=True) + "\n").encode()
-    fd = os.open(RECEIPT, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    fd = os.open(receipt, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
     with os.fdopen(fd, "wb") as writer:
         writer.write(payload)
         writer.flush()
         os.fsync(writer.fileno())
-    print("HOSTED_NATIVE_NM_SCOPED_LIVE_RECEIPT=" + json.dumps(data, sort_keys=True))
+    marker = ("HOSTED_NATIVE_NM_FULL_IPV4_RECEIPT=" if is_full_ipv4
+              else "HOSTED_NATIVE_NM_SCOPED_LIVE_RECEIPT=")
+    print(marker + json.dumps(data, sort_keys=True))
 
 
 def fail_stage(label):
@@ -79,7 +84,7 @@ def fail_stage(label):
 
 
 def main():
-    check_scope()
+    is_full_ipv4 = check_scope()
     sys.path.insert(0, str(BACKEND))
     import operator_profile
     import operator_trial
@@ -90,7 +95,8 @@ def main():
     spec.loader.exec_module(provider)
 
     out = {
-        "schema": "oig-hosted-native-networkmanager-scoped-live-v1",
+        "schema": ("oig-hosted-native-networkmanager-full-ipv4-v1" if is_full_ipv4
+                   else "oig-hosted-native-networkmanager-scoped-live-v1"),
         "scope": "Disposable Docker netns, real OIG native NM OpenVPN transport; no owner VPN",
         "fullDeviceTunnelVerified": False,
         "systemDnsLeakContainmentVerified": False,
@@ -104,6 +110,7 @@ def main():
     before = None
     authenticated = False
     owned_probe_route = None
+    owned_underlay_routes = []
     try:
         # Host preconditions are checked before any provider secret is fetched.
         if not Path("/dev/net/tun").exists():
@@ -129,6 +136,32 @@ def main():
         if not public_targets:
             fail_stage("NO_TRUSTED_HTTPS_PROBE_TARGET")
         probe_ip = sorted(public_targets)[0]
+        if is_full_ipv4:
+            # Docker-only: pin provider peer to the original eth0 gateway
+            # before NM introduces an owned default path.
+            stage = "PINNED_PROVIDER_UNDERLAY_ROUTE"
+            peer_ips = sorted({
+                item[4][0] for item in socket.getaddrinfo(
+                    provider.ENDPOINT, 443, socket.AF_INET, socket.SOCK_STREAM)
+                if ipaddress.ip_address(item[4][0]).is_global
+            })
+            if not peer_ips:
+                fail_stage("PROVIDER_IP_INVENTORY_EMPTY")
+            for peer_ip in peer_ips:
+                route = required(["ip", "-4", "route", "get", peer_ip], timeout=7)
+                parts = route.decode("utf8", "replace").split()
+                if ("dev" not in parts or "via" not in parts
+                        or parts[parts.index("dev")+1] != "eth0"):
+                    fail_stage("PROVIDER_UNDERLAY_ROUTE_UNVERIFIED")
+                gateway = parts[parts.index("via")+1]
+                if ipaddress.ip_address(gateway).is_global:
+                    fail_stage("PROVIDER_GATEWAY_UNEXPECTED")
+                prefix = peer_ip + "/32"
+                if required(["ip", "-4", "route", "show", "exact", prefix], timeout=7).strip():
+                    fail_stage("PROVIDER_HOST_ROUTE_ALREADY_PRESENT")
+                required(["ip", "-4", "route", "add", prefix, "via", gateway,
+                          "dev", "eth0"], timeout=7)
+                owned_underlay_routes.append((prefix, gateway))
         with tempfile.TemporaryDirectory(prefix="oig-native-live-") as folder:
             os.chmod(folder, 0o700)
             stem = "oig-native-" + os.urandom(12).hex()
@@ -154,18 +187,18 @@ def main():
                 uuid, stem, checked, endpoint, proto,
                 provider.EXPECTED_CA, provider.EXPECTED_CN)
 
-            # Scoped until native transport and teardown are proven. Do NOT
-            # install a default route or change physical DNS on this gate.
-            stage = "SCOPED_POLICY"
+            # Full IPv4 is allowed only in the disposable, verified Docker
+            # namespace. IPv6 and DNS remain independently unaccepted.
+            stage = "NM_FULL_IPV4_POLICY" if is_full_ipv4 else "SCOPED_POLICY"
             required(["nmcli", "--wait", "5", "connection", "modify",
                       "--temporary", "uuid", uuid,
                       "connection.autoconnect", "no",
                       "vpn.user-name", "vpnbook",
-                      "ipv4.never-default", "yes",
+                      "ipv4.never-default", "no" if is_full_ipv4 else "yes",
                       "ipv6.never-default", "yes",
                       "ipv4.ignore-auto-dns", "yes",
                       "ipv6.ignore-auto-dns", "yes",
-                      "ipv4.ignore-auto-routes", "yes",
+                      "ipv4.ignore-auto-routes", "no" if is_full_ipv4 else "yes",
                       "ipv6.ignore-auto-routes", "yes"], timeout=12)
             operator_profile.verify_nm_import(
                 uuid, stem, checked, endpoint, proto,
@@ -221,17 +254,34 @@ def main():
                 fail_stage("TUN_INTERFACE_AMBIGUOUS")
             tunnel = candidates[0]
             out["ownedTunPresent"] = True
-            # The test installs only ONE exact /32 route, in the disposable
-            # Docker namespace, for the bound HTTPS target. It must be gone
-            # before comparing the namespace with its original snapshot.
-            probe_prefix = probe_ip + "/32"
-            if required(["ip", "-4", "route", "show", "exact", probe_prefix], timeout=7).strip():
-                fail_stage("PROBE_ROUTE_ALREADY_PRESENT")
-            required(["ip", "-4", "route", "add", probe_prefix, "dev", tunnel], timeout=7)
-            owned_probe_route = (probe_prefix, tunnel)
-            effective = required(["ip", "-4", "route", "get", probe_ip], timeout=7)
-            if not re.search(rb"\bdev\s+" + re.escape(tunnel.encode()) + rb"\b", effective):
-                fail_stage("PROBE_ROUTE_NOT_TUNNEL_OWNED")
+            if is_full_ipv4:
+                stage = "FULL_IPV4_ROUTE_OWNERSHIP"
+                # No test-specific data /32: the real NM default path must
+                # cover two independent public resolvers and HTTPS itself.
+                for target in ("1.1.1.1", "9.9.9.9", probe_ip):
+                    effective = required(["ip", "-4", "route", "get", target], timeout=7)
+                    if not re.search(rb"\bdev\s+" + re.escape(tunnel.encode()) + rb"\b", effective):
+                        fail_stage("FULL_IPV4_ROUTE_NOT_TUNNEL_OWNED")
+                for peer_ip in peer_ips:
+                    effective = required(["ip", "-4", "route", "get", peer_ip], timeout=7)
+                    if not re.search(rb"\bdev\s+eth0\b", effective):
+                        fail_stage("PROVIDER_CONTROL_CHANNEL_NOT_UNDERLAY_BOUND")
+                from ipv6_route_guard import verify_ipv6_route_inventory
+                ipv6_routes = required(["ip", "-6", "route", "show", "table", "all"], timeout=7)
+                verify_ipv6_route_inventory(ipv6_routes.decode("utf8", "replace"), owned=tunnel)
+                out["fullIPv4RoutesOwned"] = True
+                out["ipv6RouteInventoryScoped"] = True
+            else:
+                # Scoped mode owns only one temporary /32 route, no default.
+                probe_prefix = probe_ip + "/32"
+                if required(["ip", "-4", "route", "show", "exact", probe_prefix],
+                            timeout=7).strip():
+                    fail_stage("PROBE_ROUTE_ALREADY_PRESENT")
+                required(["ip", "-4", "route", "add", probe_prefix, "dev", tunnel], timeout=7)
+                owned_probe_route = (probe_prefix, tunnel)
+                effective = required(["ip", "-4", "route", "get", probe_ip], timeout=7)
+                if not re.search(rb"\bdev\s+" + re.escape(tunnel.encode()) + rb"\b", effective):
+                    fail_stage("PROBE_ROUTE_NOT_TUNNEL_OWNED")
             http = cmd(["curl", "-4", "--resolve", "www.cloudflare.com:443:" + probe_ip,
                         "--interface", tunnel, "--connect-timeout", "9",
                         "--max-time", "24", "--fail", "--silent", "--show-error",
@@ -289,15 +339,27 @@ def main():
                 cleanup_ok = cleanup_ok and uuid not in operator_profile._connection_uuids()
             except Exception:
                 cleanup_ok = False
+        # The original Docker provider-control /32 routes are removed after
+        # NM has been disconnected. Never delete another route or global table.
+        for prefix, gateway in reversed(owned_underlay_routes):
+            try:
+                removed_underlay = cmd(
+                    ["ip", "-4", "route", "del", prefix, "via", gateway, "dev", "eth0"],
+                    timeout=7)
+                if removed_underlay.returncode:
+                    cleanup_ok = False
+            except Exception:
+                cleanup_ok = False
         out["temporaryProfileAndPEMCleanupVerified"] = cleanup_ok
         try:
             out["containerNetworkRestored"] = before is not None and before == snapshot()
         except Exception:
             out["containerNetworkRestored"] = False
         out["pass"] = (authenticated and out.get("tunnelBoundHttpsSucceeded") is True
+                       and (not is_full_ipv4 or out.get("fullIPv4RoutesOwned") is True)
                        and out["temporaryProfileAndPEMCleanupVerified"]
                        and out["containerNetworkRestored"])
-        put_receipt(out)
+        put_receipt(out, is_full_ipv4)
     return 0 if out["pass"] else 1
 
 

@@ -56,6 +56,12 @@ jobs:
           set -e
           test "$live_code" -ne 0
           test "$live_result" = "REFUSED: owner host or non-disposable runner"
+          set +e
+          full_result="$(env -u GITHUB_ACTIONS -u RUNNER_ENVIRONMENT -u GITHUB_REPOSITORY             python3 -B app/tests/hosted-linux-native-nm-live.py --native-fullipv4 2>&1)"
+          full_code=$?
+          set -e
+          test "$full_code" -ne 0
+          test "$full_result" = "REFUSED: owner host or non-disposable runner"
           echo 'OWNER_HOST_REFUSED=PASS'
       - name: Real OIG NetworkManager import plus scoped live OpenVPN TUN in isolated Docker netns
         shell: bash
@@ -72,5 +78,6 @@ jobs:
           path: |
             ${{ runner.temp }}/oig-hosted-nm/oig-hosted-native-nm.json
             ${{ runner.temp }}/oig-hosted-nm/oig-hosted-native-nm-live.json
+            ${{ runner.temp }}/oig-hosted-nm/oig-hosted-native-nm-fullipv4.json
           if-no-files-found: warn
           retention-days: 7
