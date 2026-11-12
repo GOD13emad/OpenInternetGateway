@@ -68,14 +68,17 @@ def nft_argv_permitted(args, active_policy_file=None):
     )
 
 
-def verify_sole_lockdown_table(raw):
-    """Reject extra chains/sets/maps/foreign rules in the disposable table.
+def verify_sole_lockdown_table(raw, *, table_name=NFT_TABLE):
+    """Reject extra chains/sets/maps/foreign rules in one exact owned table.
 
     Merely checking output/forward chains would miss a malicious extra
     chain (possibly attached to a second hook) in the same table.
     This validation is limited to our disposable QA table and does not
     attest to all other host firewall tables.
     """
+    if type(table_name) is not str or table_name not in (
+            NFT_TABLE, nft.BOOT_TABLE):
+        raise NftSafetyError("UNTRUSTED_LOCKDOWN_TABLE_NAME")
     if not isinstance(raw, bytes) or not raw or len(raw) > MAX_NFT_OUTPUT:
         raise NftSafetyError("UNTRUSTED_LOCKDOWN_TABLE_JSON")
     try:
@@ -93,11 +96,11 @@ def verify_sole_lockdown_table(raw):
                 continue
             if kind not in kind_counts or not isinstance(data, dict):
                 raise ValueError("Unknown NFT object in owned table")
-            if data.get("family") != "inet" or data.get("table", data.get("name")) != NFT_TABLE:
+            if data.get("family") != "inet" or data.get("table", data.get("name")) != table_name:
                 raise ValueError("Wrong table identity")
             kind_counts[kind] += 1
             if kind == "table":
-                if data.get("name") != NFT_TABLE:
+                if data.get("name") != table_name:
                     raise ValueError("Wrong table name")
             elif kind == "chain":
                 chain_names.append(data.get("name"))

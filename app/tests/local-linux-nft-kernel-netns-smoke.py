@@ -27,6 +27,7 @@ BACKEND = Path(__file__).resolve().parents[1] / "backend/linux"
 sys.path.insert(0, str(BACKEND))
 import killswitch_lifecycle_contract as contract
 import killswitch_nft_executor as nft_test
+import killswitch_bootstrap as boot
 import nft_killswitch_plan as plan
 
 IP = "/usr/sbin/ip"
@@ -358,6 +359,93 @@ def synthetic_tunnel_transition_probe(backend):
     }
 
 
+class BootTableNamespaceAdapter:
+    """Actual kernel adapter ONLY for the disposable test netns.
+
+    This is NOT NativeBootBackend: that class requires a root-owned /opt
+    installation and /etc manifest. The core start_locked() behavior is
+    exercised here without relaxing those production preconditions.
+    """
+
+    def __init__(self):
+        if (os.geteuid() != 0
+                or os.stat("/proc/self/ns/net").st_ino ==
+                os.stat("/proc/1/ns/net").st_ino
+                or boot.TABLE != plan.BOOT_TABLE):
+            raise RuntimeError("REFUSED: isolated root boot table required")
+
+    def tables(self):
+        return [(x["table"]["family"], x["table"]["name"])
+                for x in jlist(["tables"]) if "table" in x]
+
+    def verify_sole_table(self):
+        data = json.dumps({"nftables": jlist([
+            "table", "inet", boot.TABLE
+        ])}).encode("utf8")
+        return nft_test.verify_sole_lockdown_table(
+            data, table_name=boot.TABLE
+        )
+
+    def chain(self, name):
+        if name not in ("output", "forward"):
+            raise RuntimeError("Unknown boot chain")
+        chains = [x["chain"] for x in jlist([
+            "chain", "inet", boot.TABLE, name
+        ]) if "chain" in x]
+        if len(chains) != 1:
+            raise RuntimeError("Invalid boot chain cardinality")
+        c = chains[0]
+        return c["hook"], c["policy"], c["prio"]
+
+    def rules(self, name):
+        if name not in ("output", "forward"):
+            raise RuntimeError("Unknown boot rules")
+        return [x["rule"] for x in jlist([
+            "chain", "inet", boot.TABLE, name
+        ]) if "rule" in x]
+
+    def apply(self, script):
+        approved = MANIFEST
+        expected = plan.render_lockdown(
+            approved.tunnel, approved.underlay, approved.peer_ipv4,
+            approved.peer_port, approved.transport, table=boot.TABLE
+        )
+        if type(script) is not str or script != expected:
+            raise RuntimeError("Refused non-lockdown boot policy")
+        with tempfile.TemporaryDirectory(prefix="oig-netns-root-boot-") as folder:
+            path = Path(folder) / "boot.nft"
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+            with os.fdopen(fd, "w", encoding="utf8") as out:
+                out.write(script)
+                out.flush()
+                os.fsync(out.fileno())
+            call([NFT, "-c", "-f", str(path)])
+            call([NFT, "-f", str(path)])
+
+
+def isolated_boot_lockdown_kernel_probe():
+    """Same pure boot core, separate namespace adapter and production table."""
+    backend = BootTableNamespaceAdapter()
+    if ("inet", boot.TABLE) in backend.tables():
+        raise RuntimeError("Foreign boot table already exists")
+    first = boot.boot_lockdown_core(
+        MANIFEST, backend, plan, nft_test, contract
+    )
+    second = boot.boot_lockdown_core(
+        MANIFEST, backend, plan, nft_test, contract
+    )
+    if first != "NEW_LOCKED" or second != "ALREADY_LOCKED":
+        raise RuntimeError("Native boot lockdown not idempotent")
+    return {
+        "isolatedBootTableKernelLockdown": True,
+        "isolatedBootTableIdempotentVerified": True,
+        "isolatedBootOutputDefaultDrop": (
+            backend.chain("output") == ("output", "drop", -150)),
+        "isolatedBootForwardDefaultDrop": (
+            backend.chain("forward") == ("forward", "drop", -150)),
+    }
+
+
 def main():
     receipt = {
         "schema": SCHEMA, "pass": False,
@@ -366,6 +454,11 @@ def main():
         "ownerHostVpnChanged": False,
         "vpnAuthenticated": False,
         "bootPersistenceVerified": False,
+        "rootBootServiceInstalled": False,
+        "isolatedBootTableKernelLockdown": False,
+        "isolatedBootTableIdempotentVerified": False,
+        "isolatedBootOutputDefaultDrop": False,
+        "isolatedBootForwardDefaultDrop": False,
         "authorizedTunnelUnlockVerified": False,
         "dnsOwnedByVpnVerified": False,
         "independentLoopbackTlsValidCnAccepted": False,
@@ -422,6 +515,8 @@ def main():
         receipt["relockedV6DnsDropDelta"] = probe_drop_counter(probe_local_v6, "output")
         stage = "SYNTHETIC_KERNEL_TUNNEL_TRANSITION_AND_RELOCK"
         receipt.update(synthetic_tunnel_transition_probe(backend))
+        stage = "ISOLATED_NATIVE_ROOT_BOOT_TABLE_LOCKDOWN"
+        receipt.update(isolated_boot_lockdown_kernel_probe())
         receipt["pass"] = (
             receipt["isolatedNetnsVerified"]
             and receipt["kernelInitialLockdownVerified"]
@@ -432,6 +527,11 @@ def main():
             and receipt["unverifiedTunnelUnlockDenied"]
             and receipt["syntheticTunnelAllowKernelVerified"]
             and receipt["syntheticTunnelToRelockKernelVerified"]
+            and receipt["isolatedBootTableKernelLockdown"]
+            and receipt["isolatedBootTableIdempotentVerified"]
+            and receipt["isolatedBootOutputDefaultDrop"]
+            and receipt["isolatedBootForwardDefaultDrop"]
+            and receipt["rootBootServiceInstalled"] is False
             and all(type(receipt[k]) is int and receipt[k] >= 8 for k in (
                 "initialV4DnsDropDelta", "initialV6DnsDropDelta",
                 "initialForwardDropDelta", "relockedV4DnsDropDelta",

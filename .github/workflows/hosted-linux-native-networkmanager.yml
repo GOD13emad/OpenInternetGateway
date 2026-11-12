@@ -34,6 +34,9 @@ on:
       - 'app/tests/hosted-linux-nft-executor-smoke.py'
       - 'app/tests/local-linux-nft-kernel-netns-smoke.py'
       - 'app/tests/local-linux-nft-kernel-netns.test.js'
+      - 'app/backend/linux/killswitch_bootstrap.py'
+      - 'app/tests/killswitch-bootstrap-smoke.py'
+      - 'app/tests/killswitch-bootstrap.test.js'
       - 'app/tests/hosted-linux-provider-data-plane.py'
       - 'app/backend/linux/operator_profile.py'
       - 'app/backend/linux/operator_full_device.py'
@@ -88,6 +91,8 @@ jobs:
           ast.parse(pathlib.Path('app/tests/killswitch-nft-executor-smoke.py').read_text())
           ast.parse(pathlib.Path('app/tests/hosted-linux-nft-executor-smoke.py').read_text())
           ast.parse(pathlib.Path('app/tests/local-linux-nft-kernel-netns-smoke.py').read_text())
+          ast.parse(pathlib.Path('app/backend/linux/killswitch_bootstrap.py').read_text())
+          ast.parse(pathlib.Path('app/tests/killswitch-bootstrap-smoke.py').read_text())
           print('DISPOSABLE_NATIVE_NM_IMPORT_AST_PASS')
           PY
           set +e
@@ -135,6 +140,8 @@ jobs:
           python3 -B app/tests/killswitch-systemd-socket-activation-smoke.py
           python3 -B app/tests/killswitch-nft-executor-smoke.py
           node --test app/tests/local-linux-nft-kernel-netns.test.js
+          python3 -B app/tests/killswitch-bootstrap-smoke.py
+          node --test app/tests/killswitch-bootstrap.test.js
           set +e
           executor_result="$(env -u GITHUB_ACTIONS -u RUNNER_ENVIRONMENT -u GITHUB_REPOSITORY python3 -B app/tests/hosted-linux-nft-executor-smoke.py --isolated-docker-only 2>&1)"
           executor_code=$?
