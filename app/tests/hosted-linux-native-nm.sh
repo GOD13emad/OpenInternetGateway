@@ -87,7 +87,7 @@ NMCONF
     # The container creates its private receipt as 0600/root. Transfer only
     # the artifact's ownership to the runner user for actions/upload-artifact.
     # Never loosen permissions or mount owner-host sensitive directories.
-    for receipt in /out/oig-hosted-native-nm.json /out/oig-hosted-native-nm-live.json /out/oig-hosted-native-nm-fullipv4.json /out/oig-hosted-active-crash-rollback.json /out/oig-hosted-active-timer-rollback.json /out/oig-hosted-nft-killswitch-smoke.json; do
+    for receipt in /out/oig-hosted-native-nm.json /out/oig-hosted-native-nm-live.json /out/oig-hosted-native-nm-fullipv4.json /out/oig-hosted-active-crash-rollback.json /out/oig-hosted-active-timer-rollback.json /out/oig-hosted-nft-killswitch-smoke.json /out/oig-hosted-nft-executor.json; do
       if [[ -f "$receipt" ]]; then
         chown "${OIG_RUNNER_UID:?}:${OIG_RUNNER_GID:?}" "$receipt"
         chmod 0600 "$receipt"
@@ -292,6 +292,9 @@ PYRESTORE
   # PROTOTYPE only: temporary nftables table is applied and removed INSIDE
   # this disposable Docker netns, after every real VPN test has finished.
   python3 -B /work/app/tests/hosted-linux-nft-killswitch-smoke.py --isolated-docker-only
+  # Exercise the independently scoped, test-only command executor against
+  # the disposable kernel's nft state (never on the owner host).
+  python3 -B /work/app/tests/hosted-linux-nft-executor-smoke.py --isolated-docker-only
   exit 0
 fi
 
@@ -454,3 +457,23 @@ assert r.get("persistentBootTimeEnforcementVerified") is False
 assert r.get("physicalOwnerNetworkChanged") is False
 print("HOSTED_DISPOSABLE_NFT_OUTPUT_DROP_AND_ROLLBACK_PASS")
 PYNFT
+
+test -s "$out/oig-hosted-nft-executor.json"
+python3 -B - "$out/oig-hosted-nft-executor.json" <<'PYEXEC'
+import json,sys
+r=json.load(open(sys.argv[1],encoding="utf8"))
+assert r.get("pass") is True
+assert r.get("initialKernelLockdownVerified") is True
+assert r.get("unverifiedTunnelRefused") is True
+assert r.get("realKernelRelockVerified") is True
+assert r.get("initialDnsDropDelta", 0) >= 8
+assert r.get("relockedDnsDropDelta", 0) >= 8
+assert r.get("forwardPolicyDropVerified") is True
+assert r.get("isolatedOwnedTableRemoved") is True
+assert r.get("containerRouteDnsBaselineRestored") is True
+assert r.get("productionKillSwitchVerified") is False
+assert r.get("bootPersistenceVerified") is False
+assert r.get("authorizedTunnelUnlockVerified") is False
+assert r.get("physicalHostNetworkChanged") is False
+print("HOSTED_DISPOSABLE_LOCKDOWN_ENGINE_REAL_KERNEL_PASS")
+PYEXEC
