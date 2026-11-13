@@ -20,10 +20,12 @@ It will not accept a root-prompt under a user-owned source checkout.
 import json
 import os
 from pathlib import Path
+import socket
 import stat
 import subprocess
 import sys
 import tempfile
+import time
 
 
 INSTALLED_SCRIPT = Path(
@@ -38,6 +40,8 @@ MODULE_NAMES = (
 NFT = "/usr/sbin/nft"
 TABLE = "oig_guard"
 MAX_NFT_OUTPUT = 65536
+WATCHDOG_USEC = 20_000_000
+POLL_SECONDS = 1
 
 
 class BootRefused(RuntimeError):
@@ -306,6 +310,52 @@ class NativeBootBackend:
                 self.active_batch = None
 
 
+def verify_guard_snapshot(approved, raw, verifier):
+    """Verify shape, hooks, flags and rules from the SAME nft table dump."""
+    if verifier.verify_sole_lockdown_table(raw, table_name=TABLE) is not True:
+        raise BootRefused("Lockdown snapshot unverified")
+    rows = json.loads(raw)["nftables"]  # duplicate keys rejected above
+    for row in rows:
+        if "chain" in row:
+            chain = row["chain"]
+            if (chain.get("type") != "filter"
+                    or chain.get("hook") != chain["name"]
+                    or chain.get("policy") != "drop"
+                    or type(chain.get("prio")) is not int
+                    or chain["prio"] != -150
+                    or "dev" in chain or "devs" in chain):
+                raise BootRefused("Unexpected guard base chain")
+    rules = {name: [r["rule"] for r in rows
+                    if "rule" in r and r["rule"]["chain"] == name]
+             for name in ("output", "forward")}
+    if verifier.verify_locked_nft_rules(
+            approved, rules["output"], rules["forward"]) is not True:
+        raise BootRefused("Lockdown rules unverified")
+    return True
+
+
+def watchdog_address(env, pid):
+    address = env.get("NOTIFY_SOCKET", "")
+    if (env.get("WATCHDOG_PID", str(pid)) != str(pid)
+            or env.get("WATCHDOG_USEC") != str(WATCHDOG_USEC)
+            or len(address) < 2 or address[0] not in "/@"
+            or len(os.fsencode(address)) > 107 or "\x00" in address):
+        raise BootRefused("Expected systemd notify and watchdog activation")
+    return "\x00" + address[1:] if address.startswith("@") else address
+
+
+def supervise_locked(verify, notify, pause=time.sleep):
+    """No repair or unlock. Missing or uncertain state terminates the unit."""
+    if verify() is not True:
+        raise BootRefused("Guard not locked at readiness")
+    notify(b"READY=1")
+    while True:
+        pause(POLL_SECONDS)
+        if verify() is not True:
+            raise BootRefused("Guard no longer verified")
+        notify(b"WATCHDOG=1")
+
+
 def service_unit_preview():
     """Contract review only. The ordinary installer does NOT deploy this."""
     return """# REVIEW PREVIEW ONLY. DO NOT INSTALL OR ENABLE.
@@ -320,11 +370,14 @@ Before=network-pre.target NetworkManager.service
 Wants=network-pre.target
 
 [Service]
-Type=oneshot
+Type=notify
+NotifyAccess=main
+WatchdogSec=20s
+TimeoutStartSec=90s
+Restart=no
 User=root
 Group=root
-ExecStart=/usr/bin/python3 -I /opt/open-internet-gateway/resources/backend/linux/killswitch_bootstrap.py --bootstrap-lockdown
-RemainAfterExit=yes
+ExecStart=/usr/bin/python3 -I /opt/open-internet-gateway/resources/backend/linux/killswitch_bootstrap.py --supervise-lockdown
 NoNewPrivileges=true
 CapabilityBoundingSet=CAP_NET_ADMIN
 UMask=0077
@@ -365,11 +418,27 @@ def main(argv):
     if argv == ["--print-noninstallable-nm-gate-preview"]:
         sys.stdout.write(networkmanager_dependency_preview())
         return 0
-    if argv != ["--bootstrap-lockdown"]:
+    if argv not in (["--bootstrap-lockdown"], ["--supervise-lockdown"]):
         raise BootRefused("REFUSED: unknown root bootstrap request")
     policy, contract, verifier = _load_trusted_modules()
+    supervising = argv == ["--supervise-lockdown"]
+    address = watchdog_address(os.environ, os.getpid()) if supervising else None
     approved = contract.read_installed_root_manifest()
     backend = NativeBootBackend(approved, policy, verifier, contract)
+    if supervising:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as sock:
+            sock.settimeout(1)
+            sock.connect(address)
+            boot_lockdown_core(approved, backend, policy, verifier, contract)
+
+            def verify():
+                return verify_guard_snapshot(
+                    approved, backend._run(["-j", "list", "table", "inet", TABLE]),
+                    verifier,
+                )
+
+            supervise_locked(verify, sock.sendall)
+        raise BootRefused("Supervisor exited unexpectedly")
     result = boot_lockdown_core(approved, backend, policy, verifier, contract)
     print("OIG_ROOT_BOOT_LOCKED_ONLY=" + result)
     return 0

@@ -19,7 +19,8 @@ test('Linux root boot lockdown refuses owner checkout and passes offline fail-cl
     });
     assert.equal(qa.status, 0, qa.stderr || qa.stdout);
     assert.match(qa.stdout, /OIG_ROOT_BOOT_LOCKED_ONLY_OFFLINE_PASS/);
-    assert.match(qa.stdout, /OIG_HOSTED_BOOT_KERNEL_RECEIPT_FAIL_CLOSED_PASS 39/);
+    assert.match(qa.stdout, /OIG_LOCKDOWN_SUPERVISOR_ORDER_AND_LOSS_PASS/);
+    assert.match(qa.stdout, /OIG_HOSTED_BOOT_KERNEL_RECEIPT_FAIL_CLOSED_PASS 42/);
     assert.match(qa.stdout, /OIG_ROOT_BOOT_SYSTEMD_DEPENDENCY_REVIEW_PASS 17/);
     assert.match(qa.stdout, /OIG_BOOT_NFT_JSON_STRICT_FAIL_CLOSED_PASS/);
     assert.match(qa.stdout, /OIG_ROOT_BOOT_MOCKED_NFT_0600_CHECK_THEN_COMMIT_PASS/);
@@ -90,7 +91,7 @@ test('Linux optional root systemd unit parses but is deliberately not installabl
     assert.match(gate.stdout, /# REVIEW PREVIEW ONLY/);
     const pkg = JSON.parse(fs.readFileSync(path.join(__dirname, '../package.json'), 'utf8'));
     assert.equal(pkg.name, 'open-internet-gateway');
-    assert.match(unit.stdout, /ExecStart=\/usr\/bin\/python3 -I \/opt\/open-internet-gateway\/resources\/backend\/linux\/killswitch_bootstrap\.py --bootstrap-lockdown/);
+    assert.match(unit.stdout, /ExecStart=\/usr\/bin\/python3 -I \/opt\/open-internet-gateway\/resources\/backend\/linux\/killswitch_bootstrap\.py --supervise-lockdown/);
     const folder = fs.mkdtempSync(path.join(os.tmpdir(), 'oig-boot-unit-qa-'));
     try {
       const file = path.join(folder, 'openinternetgateway-lockdown.service');

@@ -268,6 +268,7 @@ def hosted_boot_kernel_receipt_negative_tests():
     for key in (
         "isolatedDockerScopeVerified", "kernelInitialLockdownVerified",
         "kernelIdempotentRestartVerified", "kernelTableContentsVerified",
+        "supervisorWithheldHeartbeatAfterKernelLoss",
         "outputDefaultDropVerified", "forwardDefaultDropVerified",
         "isolatedOwnedTableRemoved", "containerRouteDnsBaselineRestored",
     ):
@@ -279,6 +280,7 @@ def hosted_boot_kernel_receipt_negative_tests():
     for key in (
         "isolatedDockerScopeVerified", "kernelInitialLockdownVerified",
         "kernelIdempotentRestartVerified", "kernelTableContentsVerified",
+        "supervisorWithheldHeartbeatAfterKernelLoss",
         "outputDefaultDropVerified", "forwardDefaultDropVerified",
         "isolatedOwnedTableRemoved", "containerRouteDnsBaselineRestored",
     ):
@@ -362,8 +364,11 @@ def review_noninstalled_boot_ordering_contract():
                 "network-pre.target" in root_before,
                 "NetworkManager.service" in root_before,
                 unit.get("Wants") == "network-pre.target",
-                service.get("Type") == "oneshot",
-                service.get("RemainAfterExit") == "yes",
+                service.get("Type") == "notify",
+                service.get("NotifyAccess") == "main",
+                service.get("WatchdogSec") == "20s",
+                service.get("Restart") == "no",
+                service.get("RemainAfterExit") is None,
                 service.get("User") == "root",
                 service.get("Group") == "root",
                 service.get("NoNewPrivileges") == "true",
@@ -376,7 +381,7 @@ def review_noninstalled_boot_ordering_contract():
                 service.get("ExecStart") == (
                     "/usr/bin/python3 -I "
                     "/opt/open-internet-gateway/resources/backend/linux/"
-                    "killswitch_bootstrap.py --bootstrap-lockdown"
+                    "killswitch_bootstrap.py --supervise-lockdown"
                 ),
                 nm.get("BindsTo") == expected,
                 nm.get("After") == expected,
@@ -408,8 +413,7 @@ def review_noninstalled_boot_ordering_contract():
                       "After=network-online.target"), nm_gate),
         (root.replace("DefaultDependencies=no",
                       "DefaultDependencies=yes"), nm_gate),
-        (root.replace("RemainAfterExit=yes",
-                      "RemainAfterExit=no"), nm_gate),
+        (root.replace("WatchdogSec=20s", "WatchdogSec=0"), nm_gate),
         (root.replace("CapabilityBoundingSet=CAP_NET_ADMIN",
                       "CapabilityBoundingSet=CAP_NET_ADMIN CAP_SYS_ADMIN"), nm_gate),
         (root.replace("RestrictAddressFamilies=AF_UNIX AF_NETLINK",
@@ -432,7 +436,47 @@ def review_noninstalled_boot_ordering_contract():
           len(negative), "dangerous_dependency_mutations_rejected")
 
 
+def supervisor_tests():
+    rows = [{"table": {"family": "inet", "name": boot.TABLE}}]
+    for name, rules in (("output", SAMPLE_RULES()),
+                        ("forward", SimulatedBoot().rules("forward"))):
+        base = {"family": "inet", "table": boot.TABLE}
+        rows.append({"chain": dict(base, name=name, type="filter",
+                                   hook=name, policy="drop", prio=-150)})
+        rows.extend({"rule": dict(r, **base, chain=name)} for r in rules)
+    def verify(data):
+        return boot.verify_guard_snapshot(
+            APPROVED, json.dumps({"nftables": data}).encode(), verifier)
+    assert verify(rows)
+    bad = copy.deepcopy(rows)
+    bad[1]["chain"]["policy"] = "accept"
+    must_refuse(lambda: verify(bad), "changed_policy")
+    must_refuse(lambda: verify([]), "missing")
+    changed = copy.deepcopy(rows)
+    changed[-1]["rule"]["expr"] = [{"accept": None}]
+    must_refuse(lambda: verify(changed), "unexpected_forward_accept")
+    sent = []
+    must_refuse(lambda: boot.supervise_locked(lambda: False, sent.append),
+                "startup_invalid")
+    assert not sent
+    evidence = iter([True, True, False])
+    waits = []
+    must_refuse(lambda: boot.supervise_locked(
+        lambda: next(evidence), sent.append, waits.append), "lost_guard")
+    assert sent == [b"READY=1", b"WATCHDOG=1"]
+    assert waits == [boot.POLL_SECONDS] * 2
+    env = {"NOTIFY_SOCKET": "@notify", "WATCHDOG_PID": "123",
+           "WATCHDOG_USEC": "20000000"}
+    assert boot.watchdog_address(env, 123) == chr(0) + "notify"
+    for bad_env in ({"WATCHDOG_PID": "124"}, {"WATCHDOG_USEC": "0"},
+                    {"NOTIFY_SOCKET": "relative"}):
+        must_refuse(lambda: boot.watchdog_address(dict(env, **bad_env), 123),
+                    "notify_environment")
+    print("OIG_LOCKDOWN_SUPERVISOR_ORDER_AND_LOSS_PASS")
+
+
 def main():
+    supervisor_tests()
     review_noninstalled_boot_ordering_contract()
     hosted_boot_kernel_receipt_negative_tests()
     mocked_native_boot_transaction_boundary()

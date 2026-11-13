@@ -215,6 +215,7 @@ def new_receipt():
         "kernelInitialLockdownVerified": False,
         "kernelIdempotentRestartVerified": False,
         "kernelTableContentsVerified": False,
+        "supervisorWithheldHeartbeatAfterKernelLoss": False,
         "outputDefaultDropVerified": False,
         "forwardDefaultDropVerified": False,
         "physicalIpv4DnsDropDelta": 0,
@@ -235,6 +236,7 @@ def finalize_receipt(result):
         "kernelInitialLockdownVerified",
         "kernelIdempotentRestartVerified",
         "kernelTableContentsVerified",
+        "supervisorWithheldHeartbeatAfterKernelLoss",
         "outputDefaultDropVerified",
         "forwardDefaultDropVerified",
         "isolatedOwnedTableRemoved",
@@ -267,6 +269,7 @@ def main():
     baseline = None
     backend = None
     stage = "SNAPSHOT"
+    sent = []
     try:
         baseline = snapshot()
         stage = "NO_FOREIGN_BOOT_TABLE"
@@ -305,14 +308,44 @@ def main():
                 and result["kernelInitialLockdownVerified"] is True
                 and "failureClass" not in result):
             try:
-                deletion = subprocess.run(
-                    [verifier.NFT_BINARY, "delete", "table", "inet", boot.TABLE],
-                    capture_output=True, timeout=8, check=False
-                )
-                result["isolatedOwnedTableRemoved"] = (
-                    deletion.returncode == 0 and
-                    ("inet", boot.TABLE) not in backend.tables()
-                )
+                def verify():
+                    return boot.verify_guard_snapshot(
+                        APPROVED,
+                        nft_command(["-j", "list", "table", "inet", boot.TABLE]),
+                        verifier,
+                    )
+
+                def remove_fixture(_seconds):
+                    if sent == [b"READY=1"]:
+                        return  # confirm one verified heartbeat first
+                    if sent != [b"READY=1", b"WATCHDOG=1"]:
+                        raise AssertionError("Unexpected supervisor sequence")
+                    if result["isolatedOwnedTableRemoved"]:
+                        raise AssertionError("Heartbeat loop continued after deletion")
+                    delete_verified_fixture()
+
+                def delete_verified_fixture():
+                    assert verify() is True
+                    deletion = subprocess.run(
+                        [verifier.NFT_BINARY, "delete", "table", "inet", boot.TABLE],
+                        capture_output=True, timeout=8, check=False
+                    )
+                    result["isolatedOwnedTableRemoved"] = (
+                        deletion.returncode == 0 and
+                        ("inet", boot.TABLE) not in backend.tables()
+                    )
+                    if not result["isolatedOwnedTableRemoved"]:
+                        raise RuntimeError("Fixture table deletion unverified")
+
+                try:
+                    boot.supervise_locked(verify, sent.append, remove_fixture)
+                except RuntimeError:
+                    if not result["isolatedOwnedTableRemoved"]:
+                        raise
+                    result["supervisorWithheldHeartbeatAfterKernelLoss"] = (
+                        sent == [b"READY=1", b"WATCHDOG=1"]
+                        and ("inet", boot.TABLE) not in backend.tables()
+                    )
             except Exception as exc:
                 result.setdefault("failureStage", "ISOLATED_TABLE_CLEANUP")
                 result.setdefault("failureClass", type(exc).__name__)
