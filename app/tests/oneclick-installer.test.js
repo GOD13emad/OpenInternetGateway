@@ -268,7 +268,7 @@ test('Linux single-file installer acceptance launches the same packaged dashboar
 });
 
 
-test('Linux system-DEB online update selects the same one-file installer and hands off without running apt in Electron', async () => {
+test('Linux system-DEB online update selects the same one-file installer and hands off without running apt in Electron', { skip: process.platform !== 'linux' }, async () => {
   const vm=require('node:vm');
   const {EventEmitter}=require('node:events');
   const os=require('node:os');
@@ -360,7 +360,7 @@ test('Linux system-DEB online update selects the same one-file installer and han
   }
 });
 
-test('Linux native update helper only performs a one-file OS-authorized upgrade after app exit', () => {
+test('Linux native update helper only performs a one-file OS-authorized upgrade after app exit', { skip: process.platform !== 'linux' }, () => {
   const script=fs.readFileSync(path.join(__dirname,'../backend/linux/apply-oneclick-update.sh'),'utf8');
   assert.match(script,/while kill -0 "\$wait_pid"/);
   assert.match(script,/sha256sum -- "\$installer"/);
