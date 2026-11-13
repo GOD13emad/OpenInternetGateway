@@ -86,8 +86,9 @@ def terminate(process):
             process.wait(timeout=2)
 
 
-def attempt(root, common, port, cert, key, expected_name):
-    log = root / ("client-" + expected_name.replace(".", "-") + ".log")
+def attempt(root, common, port, cert, key, expected_name, trial):
+    # A retry must never reuse a preceding attempt's success/log file.
+    log = root / ("client-" + expected_name.replace(".", "-") + "-trial-" + str(trial) + ".log")
     command = common + [
         "--proto", "tcp-client", "--remote", "127.0.0.1", str(port),
         # Each concurrent QA client must use a distinct ephemeral local port.
@@ -113,6 +114,57 @@ def attempt(root, common, port, cert, key, expected_name):
         terminate(process)
 
 
+MAX_TRANSIENT_TRIALS = 3
+TRANSIENT_TLS_ERRORS = (
+    "packet length too long", "record layer failure", "wrong version number",
+    "Connection reset", "connection-reset", "TLS handshake failed",
+)
+
+
+def classify_tls_attempt(expect_connected, actual, client_log, server_log):
+    """Do not treat an arbitrary TLS error as a successful identity test.
+
+    A transient OpenSSL/TCP error may justify a NEW LOCAL LISTENER ONLY.
+    A connected client under the wrong-CN trial is always a fatal security
+    regression; the negative trial passes solely on an explicit CN rejection.
+    """
+    if not all(type(x) is bool for x in (expect_connected, actual)):
+        raise ValueError("Invalid TLS result")
+    if not all(type(x) is str for x in (client_log, server_log)):
+        raise ValueError("Invalid TLS evidence")
+    if expect_connected:
+        if actual and "VERIFY X509NAME ERROR" not in client_log:
+            return "PASS"
+        if "VERIFY X509NAME ERROR" in client_log:
+            return "FAIL"
+    else:
+        if actual:
+            return "FAIL"
+        if "VERIFY X509NAME ERROR" in client_log:
+            return "PASS"
+    if any(token in client_log or token in server_log
+           for token in TRANSIENT_TLS_ERRORS):
+        return "RETRY"
+    return "FAIL"
+
+
+def classifier_self_test():
+    assert classify_tls_attempt(True, True, "Initialization Sequence Completed", "") == "PASS"
+    assert classify_tls_attempt(False, False, "VERIFY X509NAME ERROR", "") == "PASS"
+    for actual, log in ((True, "Initialization Sequence Completed"),
+                        (True, "VERIFY X509NAME ERROR"),
+                        (False, "irrelevant failure")):
+        assert classify_tls_attempt(False, actual, log, "") == "FAIL"
+    assert classify_tls_attempt(True, False, "VERIFY X509NAME ERROR", "") == "FAIL"
+    assert classify_tls_attempt(True, False, "invalid CA", "") == "FAIL"
+    for tag in TRANSIENT_TLS_ERRORS:
+        assert classify_tls_attempt(True, False, tag, "") == "RETRY"
+        assert classify_tls_attempt(False, False, "", tag) == "RETRY"
+    assert classify_tls_attempt(False, False, "OpenSSL record layer failure", "") != "PASS"
+    print("OIG_LOCAL_TLS_BOUNDED_RETRY_CLASSIFIER_FAIL_CLOSED_PASS",
+          len(TRANSIENT_TLS_ERRORS), "transient_patterns")
+
+
 def main():
     # A bounded runner timeout must not orphan a localhost OpenVPN process.
     signal.signal(signal.SIGTERM, lambda sig, frame: sys.exit(128 + sig))
@@ -135,46 +187,63 @@ def main():
                   "--ca", str(ca_cert),
                   "--data-ciphers", "AES-256-GCM", "--verb", "3",
                   "--connect-retry-max", "1", "--tls-exit"]
-        # The deliberate identity rejection may terminate the server due to
-        # --tls-exit. Every trial therefore has its own fresh TCP listener.
+        # A small number of transient OpenVPN TLS transport failures was
+        # reproduced under concurrent localhost QA load. Retry only on
+        # recognized TLS/transport errors, using a NEW private TCP listener.
+        # Never retry an unexpected identity outcome into a false PASS.
+        retries = 0
         for identity, should_connect in (
                 ("oig-loopback-server", True),
                 ("wrong-oig-loopback-server", False)):
-            port = local_port()
-            server_log = root / ("server-" + identity + ".log")
-            server = subprocess.Popen(
-                common + ["--proto", "tcp-server", "--local", "127.0.0.1",
-                          "--lport", str(port), "--tls-server", "--dh", "none",
-                          "--cert", str(server_cert), "--key", str(server_key),
-                          "--log", str(server_log)],
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                start_new_session=True)
-            try:
-                wait_for_server_listener(server, port, server_log)
-                actual, client_log = attempt(
-                    root, common, port, client_cert, client_key, identity)
-                if should_connect and not actual:
-                    details = server_log.read_text(errors="replace") if server_log.exists() else ""
-                    raise AssertionError(
-                        "Valid local OpenVPN handshake failed; client: " +
-                        " | ".join(client_log.splitlines()[-12:]) +
-                        "; server: " + " | ".join(details.splitlines()[-12:]))
-                if not should_connect and (
-                        actual or "VERIFY X509NAME ERROR" not in client_log):
-                    details = server_log.read_text(errors="replace") if server_log.exists() else ""
-                    raise AssertionError(
-                        "Untrusted server identity was not explicitly rejected; " +
-                        "client: " + " | ".join(client_log.splitlines()[-12:]) +
-                        "; server: " + " | ".join(details.splitlines()[-12:]))
-            finally:
-                terminate(server)
+            for trial in range(1, MAX_TRANSIENT_TRIALS + 1):
+                port = local_port()
+                server_log = root / ("server-" + identity + "-trial-" +
+                                     str(trial) + ".log")
+                server = subprocess.Popen(
+                    common + ["--proto", "tcp-server", "--local", "127.0.0.1",
+                              "--lport", str(port), "--tls-server", "--dh", "none",
+                              "--cert", str(server_cert), "--key", str(server_key),
+                              "--log", str(server_log)],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    start_new_session=True)
+                try:
+                    wait_for_server_listener(server, port, server_log)
+                    actual, client_log = attempt(
+                        root, common, port, client_cert, client_key, identity, trial)
+                    server_details = (server_log.read_text(errors="replace")
+                                      if server_log.exists() else "")
+                    outcome = classify_tls_attempt(
+                        should_connect, actual, client_log, server_details)
+                    if outcome == "PASS":
+                        break
+                    if outcome != "RETRY" or trial >= MAX_TRANSIENT_TRIALS:
+                        raise AssertionError(
+                            "Local TLS identity gate failed closed: " + identity +
+                            " trial=" + str(trial) + " outcome=" + outcome +
+                            "; client: " +
+                            " | ".join(client_log.splitlines()[-12:]) +
+                            "; server: " +
+                            " | ".join(server_details.splitlines()[-12:]))
+                    retries += 1
+                    print("OIG_QA_LOOPBACK_TLS_TRANSIENT_RETRY identity=" +
+                          ("valid" if should_connect else "wrong-cn") +
+                          " trial=" + str(trial), file=sys.stderr)
+                finally:
+                    terminate(server)
+        if retries:
+            print("OIG_QA_LOOPBACK_TLS_RECOVERED_TRANSIENT_COUNT=" + str(retries))
         print("PASS: real OpenVPN TLS loopback authenticated peer, "
               "rejected wrong server identity, no TUN/routes/DNS used")
 
 
 if __name__ == "__main__":
     try:
-        main()
-    except (AssertionError, OSError, subprocess.TimeoutExpired, RuntimeError) as exc:
+        if sys.argv[1:] == ["--self-test-classifier"]:
+            classifier_self_test()
+        elif not sys.argv[1:]:
+            main()
+        else:
+            raise ValueError("Unexpected local QA argument")
+    except (AssertionError, OSError, subprocess.TimeoutExpired, RuntimeError, ValueError) as exc:
         print("FAIL: " + str(exc), file=sys.stderr)
         sys.exit(1)

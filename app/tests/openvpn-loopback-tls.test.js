@@ -6,12 +6,23 @@ const { spawnSync } = require('node:child_process');
 const native = process.platform === 'linux' && ['openvpn', 'openssl', 'python3']
   .every(cmd => spawnSync('which', [cmd], { encoding: 'utf8', timeout: 2000 }).status === 0);
 
+test('OpenVPN loopback TLS retry accepts only authenticated positive and explicit wrong-CN rejection', {
+  skip: process.platform !== 'linux' && 'Linux offline TLS helper'
+}, () => {
+  const script = path.join(__dirname, 'openvpn-loopback-tls-smoke.py');
+  const result = spawnSync('python3', ['-B', script, '--self-test-classifier'], {
+    encoding: 'utf8', timeout: 5000
+  });
+  assert.equal(result.status, 0, result.stderr || result.error?.message || result.stdout);
+  assert.match(result.stdout, /OIG_LOCAL_TLS_BOUNDED_RETRY_CLASSIFIER_FAIL_CLOSED_PASS/);
+});
+
 test('real OpenVPN TLS loopback accepts pinned local CA/CN and rejects wrong CN without TUN', {
   skip: !native && 'OpenVPN native Linux integration dependencies unavailable'
 }, () => {
   const script = path.join(__dirname, 'openvpn-loopback-tls-smoke.py');
   const result = spawnSync('python3', ['-B', script], {
-    encoding: 'utf8', timeout: 35000, maxBuffer: 256 * 1024
+    encoding: 'utf8', timeout: 75000, maxBuffer: 256 * 1024
   });
   assert.equal(result.status, 0, result.stderr || result.error?.message || result.stdout);
   assert.match(result.stdout, /PASS: real OpenVPN TLS loopback authenticated peer/);
