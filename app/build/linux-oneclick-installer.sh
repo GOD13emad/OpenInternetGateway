@@ -59,6 +59,17 @@ if command -v ip >/dev/null 2>&1; then
   if [[ "$active_dev" =~ ^(tun|tap|wg|tailscale|vpn)[A-Za-z0-9_.:-]*$ ]]; then
     fail 'The effective Internet route uses a VPN/tunnel. Refusing to change system packages during the session.'
   fi
+  # A split-tunnel VPN can leave the default Internet route on eth0 while
+  # serving sensitive IPv4/IPv6 prefixes through tun/wg. A package update
+  # may restart NetworkManager and disconnect that independent session.
+  # Observe kernel routes in ALL tables, never manipulate the route tables.
+  for family in -4 -6; do
+    routes="$(ip "$family" route show table all 2>/dev/null)" ||
+      fail "Cannot verify $family routes before package changes."
+    if grep -Eq '(^|[[:space:]])dev[[:space:]]+(tun|tap|wg|tailscale|vpn)[A-Za-z0-9_.:-]*([[:space:]]|$)' <<< "$routes"; then
+      fail "An active $family tunnel route exists. Refusing to change system packages during the session."
+    fi
+  done
 fi
 existing="$(dpkg-query -W -f='${Version}' open-internet-gateway 2>/dev/null || true)"
 if [[ -n "$existing" ]] && dpkg --compare-versions "$existing" gt "$OIG_VERSION"; then

@@ -202,6 +202,50 @@ test('Linux one-file builder verifies real embedded DEB and refuses tampering or
   assert.notEqual(refused.status, 0);
   assert.match(refused.stderr, /An active NetworkManager VPN exists/);
   assert.equal(fs.existsSync(sentinel), false, 'Never invoke apt/elevation during active VPN');
+
+  // Split-tunnel VPNs keep the default route on eth0. The installer must
+  // refuse both IPv4 and IPv6 protected routes BEFORE any sudo/pkexec/apt.
+  fs.writeFileSync(nmcli, '#!/bin/sh\nprintf "802-3-ethernet\\n"\n');
+  const ipMock = path.join(mock, 'ip');
+  fs.writeFileSync(ipMock, String.raw`#!/bin/sh
+if [ "$1" = "-4" ] && [ "$2" = "route" ] && [ "$3" = "get" ]; then
+  printf '1.1.1.1 via 192.0.2.1 dev eth0 src 192.0.2.20\n'
+  exit 0
+fi
+if [ "$2" = "route" ] && [ "$3" = "show" ] &&
+   [ "$4" = "table" ] && [ "$5" = "all" ]; then
+  if [ "$1" = "-4" ] && [ "$OIG_TEST_TUN_ROUTE" = "v4" ]; then
+    printf '198.51.100.0/24 dev tun7 proto static\n'
+  fi
+  if [ "$1" = "-6" ] && [ "$OIG_TEST_TUN_ROUTE" = "v6" ]; then
+    printf '2001:db8:7::/64 dev wg0 proto static\n'
+  fi
+  if [ "$1" = "-4" ] && [ "$OIG_TEST_TUN_ROUTE" = "unknown" ]; then
+    exit 91
+  fi
+  exit 0
+fi
+exit 91
+`);
+  fs.chmodSync(ipMock, 0o700);
+  for (const [variant, pattern] of [
+    ['v4', /An active -4 tunnel route exists/],
+    ['v6', /An active -6 tunnel route exists/],
+    ['unknown', /Cannot verify -4 routes before package changes/]
+  ]) {
+    const result = call('bash', [setup], {
+      env: {
+        ...process.env,
+        PATH: mock + path.delimiter + process.env.PATH,
+        DISPLAY: '', WAYLAND_DISPLAY: '', TMPDIR: root,
+        OIG_TEST_TUN_ROUTE: variant
+      }
+    });
+    assert.notEqual(result.status, 0, variant + ': installer must refuse');
+    assert.match(result.stderr, pattern, variant);
+    assert.equal(fs.existsSync(sentinel), false,
+      'Never invoke apt or elevation for split VPN route: ' + variant);
+  }
 });
 
 
