@@ -212,7 +212,7 @@ class Backend {
     if (this.resourcesPath) candidates.push(path.join(this.resourcesPath, 'pwsh', 'pwsh.exe'));
     if (process.env.ProgramFiles) candidates.push(path.join(process.env.ProgramFiles, 'PowerShell', '7', 'pwsh.exe'));
     if (process.env['ProgramFiles(x86)']) candidates.push(path.join(process.env['ProgramFiles(x86)'], 'PowerShell', '7', 'pwsh.exe'));
-    for (const dir of String(process.env.PATH || '').split(path.delimiter).filter(Boolean)) candidates.push(path.join(dir, 'pwsh.exe'));
+    // PATH can include user-writable directories; never resolve a privileged helper from it.
     return candidates.find(candidate => { try { return fs.existsSync(candidate); } catch { return false; } }) || '';
   }
 
