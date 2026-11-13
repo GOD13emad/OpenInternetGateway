@@ -69,6 +69,9 @@
       "shortcutName": "Open Internet Gateway",
       "allowElevation": false
     },
+    "appImage": {
+      "executableArgs": []
+    },
     "linux": {
       "target": [
         "AppImage",
@@ -93,7 +96,28 @@
     },
     "afterPack": "tools/afterPack.js",
     "deb": {
-      "afterInstall": "build/linux-after-install.sh"
+      "afterInstall": "build/linux-after-install.sh",
+      "depends": [
+        "libgtk-3-0",
+        "libnotify4",
+        "libnss3",
+        "libxss1",
+        "libxtst6",
+        "xdg-utils",
+        "libatspi2.0-0",
+        "libuuid1",
+        "libsecret-1-0",
+        "network-manager",
+        "network-manager-openvpn",
+        "openvpn (>= 2.6)",
+        "python3",
+        "curl",
+        "iproute2",
+        "nftables",
+        "systemd",
+        "systemd-resolved",
+        "ca-certificates"
+      ]
     },
     "afterAllArtifactBuild": "tools/afterAllArtifactBuild.js"
   },

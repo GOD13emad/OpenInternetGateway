@@ -1,0 +1,90 @@
+'use strict';
+// Native first Connect test for a fresh, disposable GitHub-hosted Windows runner only.
+const assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path'),os=require('node:os'),Module=require('node:module');
+
+for(const [k,v] of Object.entries({GITHUB_ACTIONS:'true',RUNNER_OS:'Windows',RUNNER_ENVIRONMENT:'github-hosted',GITHUB_REPOSITORY:'GOD13emad/OpenInternetGateway'}))assert.equal(process.env[k],v,'WRONG_RUNNER_'+k);
+assert.equal(process.platform,'win32','WINDOWS_ONLY');
+const asar=require('@electron/asar');
+const root=process.argv[2],receiptFile=process.argv[3];assert.ok(root&&receiptFile,'ARGUMENTS_REQUIRED');
+const res=path.join(root,'resources'),archive=path.join(res,'app.asar');
+const hits=asar.listPackage(archive).filter(s=>s.replaceAll('\\','/').replace(/^\/+/,'')==='src/main/platform-backend.js');
+assert.equal(hits.length,1,'PACKAGED_BACKEND_AMBIGUOUS');
+// The reusable Community management protocol is now in the product package,
+// but no Community VPN engine is activated by this passive integrity check.
+const normalizeAsarEntry=s=>s.split(String.fromCharCode(92)).join('/').replace(/^[/]+/,'');
+const managementHits=asar.listPackage(archive).filter(s=>
+  normalizeAsarEntry(s)==='src/main/openvpn-management-auth.js');
+assert.equal(managementHits.length,1,'PACKAGED_COMMUNITY_MANAGEMENT_PROTOCOL_MISSING');
+const shippedManagement=asar.extractFile(archive,managementHits[0].replace(/^[\\\\/]+/,''));
+const sourceManagement=fs.readFileSync(path.join(__dirname,'../src/main/openvpn-management-auth.js'));
+assert.equal(Buffer.compare(shippedManagement,sourceManagement),0,'PACKAGED_MANAGEMENT_PROTOCOL_MISMATCH');
+const m=new Module(path.join(os.tmpdir(),'oig-installed-backend.cjs'),module);
+m.filename=path.join(os.tmpdir(),'oig-installed-backend.cjs');m.paths=Module._nodeModulePaths(os.tmpdir());
+m._compile(asar.extractFile(archive,hits[0].replace(/^[\\/]+/,'')).toString('utf8'),m.filename);
+const Backend=m.exports;
+const appPackage=JSON.parse(asar.extractFile(archive,'package.json').toString('utf8'));
+const sanitize=value=>String(value??'').replace(/(password|token|secret|key)\s*[=:]\s*\S+/gi,'$1=[redacted]').replace(/[A-Za-z0-9+/]{64,}={0,2}/g,'[redacted]').slice(0,400);
+const report={schema:'oig-hosted-first-connect-v2',scope:'actual-packaged-backend-no-GUI',source:process.env.GITHUB_SHA,connectPass:false,rollbackPass:false,connectError:'',disconnectError:'',baseline:null,connected:null,throughput:null,serverIdentityVerified:null,serverIdentityStatus:'unreported',after:null};
+const b=new Backend({version:appPackage.version,resourcesPath:res,appPath:archive,userData:path.join(os.tmpdir(),'oig-test-userdata'),emit:()=>{}});
+(async()=>{
+  try{
+    await b.initialize();report.baseline=await b.status();
+    assert.equal(report.baseline.connected,false,'NOT_A_CLEAN_BASELINE');
+    console.log('FIRST_CONNECT_START');
+    await b.action('connect');await new Promise(r=>setTimeout(r,3000));
+    const initial=await b.status();report.connected=initial;
+    assert.equal(initial.connected,true,'CONNECT_STATUS_NOT_CONNECTED');
+    const measured=await b.benchmarkActive();
+    report.throughput={ok:measured?.ok===true,benchmark:measured?.benchmark||null};
+    report.connected=await b.status();const a=report.connected,z=report.baseline,bm=report.throughput.benchmark||{};
+    report.serverIdentityVerified=typeof a.serverIdentityVerified==='boolean'?a.serverIdentityVerified:null;
+    report.serverIdentityStatus=report.serverIdentityVerified===true?'verified':report.serverIdentityVerified===false?'not-independently-verified':'unreported';
+    report.checks={connected:a.connected===true,desiredOn:a.desiredState==='on',headless:a.engine==='HeadlessConnector',ipChanged:!!z.ip&&!!a.ip&&z.ip!==a.ip,foreign:!!a.country&&a.country!=='IR',routes:Number(a.fullRoutes)>=2,ipv6Safe:a.ipv6LeakRisk===false,dnsClean:a.poison===false,relay:!!a.relay,autoRecovery:a.autoRecovery===true,throughput:report.throughput.ok&&bm.throughputPath==='vpn-source-ip-bound'&&bm.tunnelRouteVerifiedAfterTransfer===true&&Number(bm.downloadMbps)>0&&Number(bm.uploadMbps)>0&&Number(bm.downloadBytes)===2000000&&Number(bm.uploadBytes)===512000,identityReported:typeof report.serverIdentityVerified==='boolean'};
+    report.connectPass=Object.values(report.checks).every(Boolean);
+    console.log('FIRST_CONNECT_THROUGHPUT='+JSON.stringify({downloadMbps:bm.downloadMbps??null,uploadMbps:bm.uploadMbps??null,throughputPath:bm.throughputPath??'',tunnelRouteVerifiedAfterTransfer:bm.tunnelRouteVerifiedAfterTransfer===true}));
+    console.log('FIRST_CONNECT_SERVER_IDENTITY_VERIFIED='+String(report.serverIdentityVerified));
+    console.log('FIRST_CONNECT_DATA_PLANE_VALIDATION='+String(report.connectPass));
+  }catch(e){
+    report.connectError=sanitize(e?.message||e);
+    try{report.connected=await b.status();report.serverIdentityVerified=typeof report.connected.serverIdentityVerified==='boolean'?report.connected.serverIdentityVerified:null;report.serverIdentityStatus=report.serverIdentityVerified===true?'verified':report.serverIdentityVerified===false?'not-independently-verified':'unreported'}catch{}
+    console.error('FIRST_CONNECT_ERROR='+report.connectError);
+    const snap=(relative,fields)=>{
+      try{
+        const full=path.join(b.backendRoot,relative);
+        if(!fs.existsSync(full))return {present:false};
+        const src=JSON.parse(fs.readFileSync(full,'utf8'));
+        const picked={present:true};
+        for(const k of fields){if(Object.hasOwn(src,k))picked[k]=typeof src[k]==='string'?sanitize(src[k]):src[k]}
+        return picked;
+      }catch(err){return {present:true,parseError:String(err?.message||err)}}
+    };
+    report.diagnostics={
+      bootstrap:snap('evidence/headless-bootstrap.json',['result','error','steps','service']),
+      ensureError:snap('evidence/ensure-last-error.json',['error']),
+      headless:snap('evidence/headless-control-last.json',['result','action']),
+      shadow:snap('evidence/shadow-handover-last.json',['result','native','dataPlane','error']),
+      desired:snap('state/desired-state.json',['desired']),
+      candidateFailures:(()=>{
+        try{
+          const file=path.join(b.backendRoot,'runtime/config-factory/failures.json');
+          if(!fs.existsSync(file))return {present:false};
+          const rows=Object.values(JSON.parse(fs.readFileSync(file,'utf8'))||{});
+          const counts={};
+          for(const r of rows){const reason=String(r?.reason||'UNSPECIFIED');counts[reason]=(counts[reason]||0)+1}
+          return {present:true,total:rows.length,reasons:counts};
+        }catch(err){return {present:true,parseError:String(err?.message||err)}}
+      })()
+    };
+    console.log('FIRST_CONNECT_DIAGNOSTICS='+JSON.stringify(report.diagnostics));
+  }
+  finally{
+    try{
+      if(b.backendRoot){await b.action('disconnect');await new Promise(r=>setTimeout(r,1600));report.after=await b.status();report.rollbackPass=report.after.connected===false&&Number(report.after.fullRoutes)===0&&report.after.desiredState==='off'&&report.after.ipv6LeakRisk===false;}
+    }catch(e){report.disconnectError=sanitize(e?.message||e)}
+    report.pass=report.connectPass&&report.rollbackPass;
+    fs.mkdirSync(path.dirname(receiptFile),{recursive:true});
+    fs.writeFileSync(receiptFile,JSON.stringify(report,null,2)+'\n');
+    console.log('FIRST_CONNECT_ROLLBACK='+String(report.rollbackPass));
+    if(!report.pass)process.exitCode=1;
+  }
+})().catch(e=>{console.error(e);process.exitCode=2});

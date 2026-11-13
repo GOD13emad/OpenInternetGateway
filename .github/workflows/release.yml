@@ -72,6 +72,9 @@ jobs:
           cache-dependency-path: app/package-lock.json
       - working-directory: app
         run: npm ci
+      - name: Seed verified Electron checksums
+        working-directory: app
+        run: node tools/prepareElectronChecksumCache.js
       - working-directory: app
         run: npm run dist:win
       - uses: actions/upload-artifact@v7
@@ -96,6 +99,9 @@ jobs:
           cache-dependency-path: app/package-lock.json
       - working-directory: app
         run: npm ci
+      - name: Seed verified Electron checksums
+        working-directory: app
+        run: node tools/prepareElectronChecksumCache.js
       - working-directory: app
         run: npm run dist:linux
       - uses: actions/upload-artifact@v7
@@ -104,6 +110,7 @@ jobs:
           path: |
             app/dist/OpenInternetGateway-*.AppImage
             app/dist/OpenInternetGateway-*.deb
+            app/dist/OpenInternetGateway-*.run
           if-no-files-found: error
 
   publish:

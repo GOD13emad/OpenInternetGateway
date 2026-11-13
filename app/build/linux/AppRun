@@ -1,0 +1,173 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+THIS="$0"
+args=("$@")
+
+if [[ -z "${APPDIR:-}" ]]; then
+  path="$(dirname "$(readlink -f "$THIS")")"
+  while [[ "$path" != "/" && ! -e "$path/AppRun" ]]; do
+    path="$(dirname "$path")"
+  done
+  APPDIR="$path"
+fi
+
+if [[ ! -d "$APPDIR" || ! -e "$APPDIR/AppRun" ]]; then
+  echo "Open Internet Gateway: could not locate the AppImage application directory." >&2
+  exit 1
+fi
+
+export PATH="$APPDIR:$APPDIR/usr/sbin${PATH:+:$PATH}"
+export XDG_DATA_DIRS="$APPDIR/usr/share/${XDG_DATA_DIRS:+:$XDG_DATA_DIRS}:/usr/share/gnome:/usr/local/share/:/usr/share/"
+export LD_LIBRARY_PATH="$APPDIR/usr/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+export GSETTINGS_SCHEMA_DIR="$APPDIR/usr/share/glib-2.0/schemas${GSETTINGS_SCHEMA_DIR:+:$GSETTINGS_SCHEMA_DIR}"
+
+BIN="$APPDIR/open-internet-gateway"
+if [[ ! -x "$BIN" ]]; then
+  echo "Open Internet Gateway: packaged Linux executable is missing." >&2
+  exit 1
+fi
+
+fail_closed() {
+  local message="$1"
+  if command -v kdialog >/dev/null 2>&1; then
+    kdialog --title "Open Internet Gateway" --error "$message" >/dev/null 2>&1 || true
+  elif command -v zenity >/dev/null 2>&1; then
+    zenity --error --title="Open Internet Gateway" --text="$message" >/dev/null 2>&1 || true
+  fi
+  printf '%s\n' "$message" >&2
+  exit 78
+}
+
+for arg in "${args[@]}"; do
+  if [[ "$arg" == "--no-sandbox" ]]; then
+    fail_closed "Open Internet Gateway refuses the --no-sandbox option. Reopen the application through its normal launcher."
+  fi
+done
+
+# The FUSE mount is read-only/nosuid. Give every invocation its own extraction
+# directory: extract-and-run reuses a shared cache and races when --quit starts
+# while --background is still alive. The wrapper waits for the app, then cleans
+# only the private directory it created.
+probe="$APPDIR/.oig-sandbox-write-test-$$"
+if ! (umask 077; : > "$probe") 2>/dev/null; then
+  if [[ -n "${APPIMAGE:-}" && -x "$APPIMAGE" ]]; then
+    base=""
+    for candidate in "${XDG_RUNTIME_DIR:-}" "/tmp" "${HOME:-}/.cache"; do
+      [[ -n "$candidate" && -d "$candidate" && -w "$candidate" ]] || continue
+      [[ "${#candidate}" -le 48 ]] || continue
+      options=""
+      if command -v findmnt >/dev/null 2>&1; then
+        options="$(findmnt -n -o OPTIONS -T "$candidate" 2>/dev/null || true)"
+      fi
+      case ",$options," in
+        *,noexec,*) continue ;;
+      esac
+      base="$candidate"
+      break
+    done
+    [[ -n "$base" ]] || fail_closed "Open Internet Gateway could not find a short writable executable temporary directory for secure AppImage extraction."
+
+    umask 077
+    tmp_root="$(mktemp -d "$base/oig.XXXXXX")"       || fail_closed "Open Internet Gateway could not create its private AppImage extraction directory."
+    chmod 700 "$tmp_root"
+    extract_log="$tmp_root/.extract.log"
+    if ! (cd "$tmp_root" && "$APPIMAGE" --appimage-extract >"$extract_log" 2>&1); then
+      tail -20 "$extract_log" >&2 2>/dev/null || true
+      rm -rf "$tmp_root"
+      fail_closed "Open Internet Gateway could not extract its AppImage into a private temporary directory."
+    fi
+
+    extracted="$tmp_root/squashfs-root"
+    if [[ ! -x "$extracted/AppRun" || ! -x "$extracted/open-internet-gateway" ]]; then
+      rm -rf "$tmp_root"
+      fail_closed "Open Internet Gateway's extracted AppImage is incomplete."
+    fi
+    rm -f "$extract_log"
+
+    export APPDIR="$extracted"
+    export TMPDIR="$tmp_root"
+    child_pid=""
+    cleanup_extraction() {
+      if [[ -n "$child_pid" ]] && kill -0 "$child_pid" 2>/dev/null; then
+        kill -TERM "$child_pid" 2>/dev/null || true
+        wait "$child_pid" 2>/dev/null || true
+      fi
+      rm -rf "$tmp_root" 2>/dev/null || true
+    }
+    trap cleanup_extraction EXIT
+    trap 'exit 143' TERM
+    trap 'exit 130' INT
+
+    "$APPDIR/AppRun" "${args[@]}" &
+    child_pid=$!
+    set +e
+    wait "$child_pid"
+    child_status=$?
+    set -e
+    child_pid=""
+    if ! rm -rf "$tmp_root"; then
+      printf '%s\n' "Open Internet Gateway could not clean its private AppImage extraction directory." >&2
+      exit 78
+    fi
+    trap - EXIT INT TERM
+    exit "$child_status"
+  fi
+  fail_closed "Open Internet Gateway needs a writable AppDir to prepare Chromium sandboxing. Relaunch the original AppImage; it will use an isolated temporary extraction and clean it up on exit."
+fi
+rm -f "$probe"
+
+# Chromium resolves its SUID helper next to the executable. CHROME_DEVEL_SANDBOX
+# alone is insufficient for packaged Electron builds; the local path must point
+# to the exact-hash, root-owned helper on a normal (not nosuid) filesystem.
+local_sandbox="$APPDIR/chrome-sandbox"
+local_hash=""
+if [[ -f "$local_sandbox" ]] && command -v sha256sum >/dev/null 2>&1; then
+  local_hash="$(sha256sum "$local_sandbox" 2>/dev/null | awk '{print $1}' || true)"
+fi
+
+helper=""
+candidates=("${OIG_CHROME_SANDBOX:-}" \
+  "/opt/open-internet-gateway/chrome-sandbox" \
+  "/opt/google/chrome/chrome-sandbox" \
+  "/usr/lib/chromium/chrome-sandbox" \
+  "/usr/lib/chromium-browser/chrome-sandbox")
+
+for candidate in "${candidates[@]}"; do
+  [[ -n "$candidate" && -x "$candidate" ]] || continue
+  helper_mode="$(stat -Lc '%u:%g:%a' "$candidate" 2>/dev/null || true)"
+  [[ "$helper_mode" == "0:0:4755" ]] || continue
+  candidate_hash="$(sha256sum "$candidate" 2>/dev/null | awk '{print $1}' || true)"
+  if [[ -n "$local_hash" && "$candidate_hash" == "$local_hash" ]]; then
+    helper="$(readlink -f "$candidate")"
+    break
+  fi
+done
+
+unset CHROME_DEVEL_SANDBOX
+if [[ -n "$helper" ]]; then
+  if [[ -d "$local_sandbox" && ! -L "$local_sandbox" ]]; then
+    fail_closed "Open Internet Gateway found an unexpected chrome-sandbox directory and will not replace it."
+  fi
+  if [[ "$(readlink -f "$local_sandbox" 2>/dev/null || true)" != "$helper" ]]; then
+    tmp_link="$APPDIR/.chrome-sandbox.oig-link-$$"
+    rm -f "$tmp_link"
+    ln -s "$helper" "$tmp_link"
+    mv -f "$tmp_link" "$local_sandbox"
+  fi
+  [[ "$(readlink -f "$local_sandbox" 2>/dev/null || true)" == "$helper" ]] \
+    || fail_closed "Open Internet Gateway could not install the verified Chromium sandbox helper."
+  CHROME_DEVEL_SANDBOX="$helper"
+  export CHROME_DEVEL_SANDBOX
+else
+  # A bundled helper on a nosuid mount is invalid. Remove it only in the
+  # writable extracted AppDir, then let Chromium use unprivileged userns.
+  if ! command -v unshare >/dev/null 2>&1 || ! unshare -Ur true 2>/dev/null; then
+    fail_closed "Open Internet Gateway could not verify a secure Chromium sandbox. No matching root-owned setuid helper was found and unprivileged user namespaces are unavailable. The AppImage will not run with --no-sandbox. Install the official Debian package or enable unprivileged user namespaces."
+  fi
+  rm -f "$local_sandbox"
+  [[ ! -e "$local_sandbox" && ! -L "$local_sandbox" ]] \
+    || fail_closed "Open Internet Gateway could not remove the unusable bundled Chromium helper."
+fi
+
+exec "$BIN" "${args[@]}"

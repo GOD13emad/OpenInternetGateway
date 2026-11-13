@@ -25,7 +25,7 @@ test('both Windows status paths use the same fail-closed OpenVPN route-pair vali
   for (const status of [backend, native]) {
     assert.match(status, /Test-OigFullRoutePair -Routes \$routes/);
     assert.match(status, /Test-OigIpv6EgressSafe -InterfaceIndex/);
-    assert.match(status, /connected=\(\$routes\.Count -ge 2 -and \$routePairValid/i);
+    assert.match(status, /connected=\(\$desired -eq 'on' -and \$routes\.Count -ge 2 -and \$routePairValid/i);
     assert.match(status, /FullRoutes=\$\(if\(\$routePairValid\)\{2\}else\{0\}\)/i);
   }
   assert.match(helper, /Get-NetAdapter -InterfaceIndex/);

@@ -1,5 +1,5 @@
 const $ = (id) => document.getElementById(id);
-const state = { status: null, busy: false, busyAction: '', platform: null, page: 'overview', profiles: [], countries: [], countryFilter: '', sortKey: 'rank', sortDir: 'asc', updateInfo: null, directBenchmark: null };
+const state = { status: null, busy: false, freeCredentialsBusy: false, busyAction: '', platform: null, page: 'overview', profiles: [], countries: [], countryFilter: '', sortKey: 'rank', sortDir: 'asc', updateInfo: null, directBenchmark: null };
 
 function setText(id, value) { const el = $(id); if (el) el.textContent = value ?? '—'; }
 function safeArray(v) { return Array.isArray(v) ? v : v ? [v] : []; }
@@ -160,15 +160,17 @@ async function refreshStatus(silent = true) {
 async function reconcileStartupTunnel(initialStatus) {
   const s = initialStatus || {};
   if (s.connected || s.desiredState !== 'on' || !s.autoRecovery) return s;
-  setBusy(true, 'ensure', 'Restoring the protected tunnel requested before the app was reopened…');
+  setBusy(true, 'ensure', 'Restoring the previously requested VPN tunnel…');
   try {
     const result = await window.gateway.action('ensure');
     const finalStatus = result?.status || await window.gateway.status();
     renderStatus(finalStatus);
-    if (finalStatus?.connected) showToast('Previous protected tunnel restored.');
+    if (finalStatus?.connected) showToast(finalStatus.serverIdentityVerified === true
+      ? 'Verified VPN tunnel restored.'
+      : 'VPN tunnel restored; relay identity remains unverified.');
     return finalStatus;
   } catch (e) {
-    showToast(e.message || 'Could not restore the previous protected tunnel.', true);
+    showToast(e.message || 'Could not restore the previously requested VPN tunnel.', true);
     return await refreshStatus(true);
   } finally {
     setBusy(false);
@@ -203,8 +205,8 @@ function renderDirectInternet() {
   setText('directIP', b?.publicIP || '—');
   setText('directCountry', b?.country || '—');
   const pathText = b
-    ? ((b.interface || 'Physical adapter') + ' · ' + (b.localIP || 'local IP unavailable') + (b.gateway ? (' · gateway ' + b.gateway) : '') + ' · proxy bypass ON')
-    : 'Not tested yet · VPN/proxy bypass is enforced by binding the physical adapter.';
+    ? ((b.interface || 'Physical adapter') + ' · ' + (b.localIP || 'local IP unavailable') + (b.gateway ? (' · gateway ' + b.gateway) : '') + ' · proxy bypass ON' + (b.effectiveRouteVerified ? ' · effective ISP route checked' : ''))
+    : 'Not tested yet · physical binding and (on Windows) effective-route verification occur during the test.';
   setText('directPath', pathText);
   const proof = $('directVerification');
   if (proof) {
@@ -507,6 +509,11 @@ function renderUpdateInfo(info) {
   setText('updatePublished', formatDate(info?.publishedAt));
   setText('updateAsset', info?.asset?.name || 'No compatible asset');
   setText('updateChecksum', info?.asset?.sha256 || '—');
+  setText('updateInstallScopeNote', info?.installScope === 'system-deb'
+    ? 'This Linux installation is managed by Debian/apt. Updates use the same verified one-file setup and request native OS authorization only during package installation. No duplicate AppImage is installed. Disconnect other VPNs before upgrading.'
+    : info?.installScope === 'user-appimage'
+      ? 'This Linux AppImage updates in your user directory without administrator/root approval. GitHub SHA-256 and the published checksum are checked when available.'
+      : 'Windows updates use the verified current-user NSIS installer without administrator approval. GitHub SHA-256 and the published checksum are checked when available.');
   if (pill) {
     pill.className = 'update-pill ' + (available ? 'ready' : (info?.upToDate ? 'current' : ''));
     pill.textContent = available ? 'Update available' : (info?.currentAhead ? 'Development build' : (info?.upToDate ? 'Up to date' : 'Checked'));
@@ -575,9 +582,231 @@ function setPage(name) {
   if (name === 'updates') loadUpdates(false);
 }
 
+async function loadOperatorProfileStatus() {
+  if (state.platform?.platform !== 'linux') return;
+  try {
+    const info = await window.gateway.operatorProfileStatus();
+    const label = info?.staged
+      ? ('Staged offline: VPNBook ' + String(info.remoteHost || '') + ':' +
+        String(info.remotePort || '') +
+        ' · local policy checked. NOT connected; TLS/traffic and auto-connect NOT verified.')
+      : 'No operator profile staged. Only locally validated profiles appear here; this is not a live VPN connection.';
+    setText('operatorStageStatus', label);
+    state.operatorStaged = !!info?.staged;
+    $('operatorNativeCheckButton').disabled = !info?.staged;
+    $('operatorFullDevicePreflightButton').disabled = !info?.staged;
+    $('operatorTrialButton').disabled = !info?.staged || !$('operatorTrialConsent').checked || state.freeCredentialsBusy;
+  } catch {
+    setText('operatorStageStatus', 'Offline operator-profile status unavailable; no connection was attempted.');
+    $('operatorFullDevicePreflightButton').disabled = true;
+  }
+}
+
+async function checkOperatorNativeCompatibility() {
+  if (state.busy || state.platform?.platform !== 'linux') return;
+  const button = $('operatorNativeCheckButton');
+  button.disabled = true;
+  try {
+    const result = await window.gateway.operatorNativeCheck();
+    if (!result?.nativeImportCompatible || !result?.temporaryProfileRemoved ||
+        result?.connectionActivated !== false) {
+      throw new Error('Native import did not finish with verified cleanup.');
+    }
+    setText('operatorStageStatus',
+      'Offline profile is NetworkManager-importable; temporary profile removed. No VPN connection or TLS/throughput verification.');
+    showToast('Temporary NetworkManager import succeeded and was removed; VPN was NOT connected.');
+  } catch (error) {
+    showToast(userErrorMessage(error, 'Native compatibility check rejected.'), true);
+    await loadOperatorProfileStatus();
+  } finally {
+    try {
+      const current = await window.gateway.operatorProfileStatus();
+      button.disabled = !current?.staged;
+    } catch {
+      button.disabled = true;
+    }
+  }
+}
+
+async function checkOperatorFullDevicePreflight() {
+  if (state.busy || state.platform?.platform !== 'linux') return;
+  const button = $('operatorFullDevicePreflightButton');
+  button.disabled = true;
+  try {
+    const result = await window.gateway.operatorFullDevicePreflight();
+    if (result?.ok !== true || result?.activationRequested !== false ||
+        result?.fullDevicePathEnabled !== false ||
+        result?.fullDeviceTunnelVerified !== false ||
+        result?.independentRollbackArmed !== false ||
+        !Array.isArray(result?.blockers)) {
+      throw new Error('Full-device readiness observation was incomplete.');
+    }
+    const messages = {
+      DESIRED_STATE_NOT_VERIFIED_OFF: 'OIG desired state is not verified OFF',
+      INDEPENDENT_TUNNEL_ACTIVE: 'another VPN/tunnel is active',
+      ACTIVE_TUNNEL_INVENTORY_UNKNOWN: 'active tunnel inventory is unavailable',
+      PUBLIC_IPV6_ROUTE_PRESENT: 'public IPv6 may bypass the intended tunnel',
+      IPV6_ROUTE_STATUS_UNKNOWN: 'IPv6 route status is unverified'
+    };
+    const reasons = result.blockers.map(reason => messages[reason] || 'unknown safety observation');
+    const observation = reasons.length
+      ? 'Blocked: ' + reasons.join('; ') + '.'
+      : 'No conflicting tunnel or representative public IPv6 route observed.';
+    setText('operatorFullDevicePreflightStatus', observation +
+      ' Read-only check: full-device activation and independent active-tunnel rollback are NOT enabled or verified.');
+    showToast('Full-device feasibility checked without connecting a VPN.');
+  } catch (error) {
+    setText('operatorFullDevicePreflightStatus',
+      'Full-device preflight unavailable. No VPN connection was attempted.');
+    showToast(userErrorMessage(error, 'Read-only full-device preflight rejected.'), true);
+  } finally {
+    button.disabled = !state.operatorStaged;
+  }
+}
+
+async function loadFreeVpnBookCredentials() {
+  if (state.busy || state.freeCredentialsBusy || state.platform?.platform !== 'linux') return;
+  const button = $('operatorFreeCredentialsButton');
+  state.freeCredentialsBusy = true;
+  button.disabled = true;
+  $('operatorTrialButton').disabled = true;
+  setText('operatorCredentialsStatus', 'Reading current free login from the official HTTPS page; no VPN connection.');
+  try {
+    const login = await window.gateway.freeVpnBookCredentials();
+    if (login?.username !== 'vpnbook' || !/^[A-Za-z0-9]{4,32}$/.test(login?.password || '') ||
+        !/^\d{4}-\d{2}-\d{2}$/.test(login?.lastUpdated || '')) {
+      throw new Error('Official free VPNBook login could not be verified.');
+    }
+    $('operatorUsername').value = login.username;
+    $('operatorPassword').value = login.password; // temporary; trial clears before IPC
+    setText('operatorCredentialsStatus',
+      'Free shared login refreshed (updated ' + login.lastUpdated +
+      '). In memory only. VPN NOT connected; separate trial consent still required.');
+  } catch (error) {
+    $('operatorUsername').value = '';
+    $('operatorPassword').value = '';
+    setText('operatorCredentialsStatus',
+      'Could not verify current free login. Check the official VPNBook OpenVPN page; no trial started.');
+    showToast(userErrorMessage(error, 'Unable to fetch current free login.'), true);
+  } finally {
+    state.freeCredentialsBusy = false;
+    button.disabled = false;
+    $('operatorTrialButton').disabled = !state.operatorStaged || !$('operatorTrialConsent').checked;
+  }
+}
+
+async function runOperatorTransportTrial() {
+  if (state.busy || state.freeCredentialsBusy || state.platform?.platform !== 'linux' ||
+      !state.operatorStaged || !$('operatorTrialConsent').checked) return;
+  const user = String($('operatorUsername').value || '').trim();
+  let password = $('operatorPassword').value;
+  $('operatorPassword').value = ''; // never persist provider secrets in the DOM
+  if (!/^[A-Za-z0-9._@+-]{1,96}$/.test(user) ||
+      password.length < 1 || password.length > 256 || /[^\x20-\x7e]/.test(password)) {
+    showToast('Enter valid temporary provider credentials.', true);
+    return;
+  }
+  $('operatorTrialConsent').checked = false;
+  $('operatorTrialButton').disabled = true;
+  setBusy(true, 'operator-trial',
+    'Starting a scoped Linux transport trial; independently armed timer will disconnect it.');
+  try {
+    const result = await window.gateway.operatorTrial(user, password);
+    password = '';
+    if (!result?.ok || !result?.tempProfileRemoved ||
+        !result?.certificateArtifactsRemoved ||
+        result?.trustConstraintsPreserved !== true ||
+        result?.liveTlsVerified !== true ||
+        result?.identityVerifiedByApp !== true ||
+        result?.fullDeviceTunnelVerified !== false) {
+      throw new Error('Trial did not verify TLS peer identity and complete temporary cleanup.');
+    }
+    setText('operatorTrialResult',
+      'TLS peer identity verified against the owner-pinned CA and exact server CN. Temporary transport trial and certificate cleanup completed. Full-device routing, DNS and throughput remain unverified.');
+    showToast('VPNBook TLS peer identity and scoped transport verified; full-device VPN remains unverified.');
+  } catch (error) {
+    password = '';
+    setText('operatorTrialResult',
+      'Trial failed or did not complete; inspect the Linux QA connection inventory before retrying.');
+    showToast(userErrorMessage(error, 'Temporary operator trial could not complete safely.'), true);
+  } finally {
+    setBusy(false);
+    await loadOperatorProfileStatus();
+  }
+}
+
+async function stageOperatorProfileFromPicker() {
+  if (state.busy || state.platform?.platform !== 'linux') return;
+  const rawPin = String($('operatorCaPin').value || '').trim();
+  const cn = String($('operatorPeerName').value || '').trim();
+  const normalized = rawPin.replace(/:/g, '');
+  if (!/^[0-9A-Fa-f]{64}$/.test(normalized) ||
+      !/^[A-Za-z0-9._-]{1,128}$/.test(cn)) {
+    showToast('Enter the independent CA SHA-256 and exact operator-approved server CN.', true);
+    return;
+  }
+  const button = $('operatorStageButton');
+  button.disabled = true;
+  try {
+    const result = await window.gateway.stageOperatorProfile(rawPin, cn);
+    if (result?.canceled) return;
+    if (!result?.imported || !result?.staged || result?.readyForAutomaticConnection !== false) {
+      throw new Error('Offline operator-profile import was not verified.');
+    }
+    await loadOperatorProfileStatus();
+    showToast('Profile staged offline. VPN was NOT connected; credentials were not entered.');
+  } catch (error) {
+    showToast(userErrorMessage(error, 'Operator profile rejected.'), true);
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function inspectWindowsPinnedAutologin() {
+  if (state.busy || state.platform?.platform !== 'win32') return;
+  const ca = String($('windowsPinnedCa').value || '').replace(/:/g, '').toLowerCase();
+  const cn = String($('windowsPinnedCN').value || '').trim();
+  const host = String($('windowsPinnedHost').value || '').trim();
+  const port = Number($('windowsPinnedPort').value);
+  const protocol = String($('windowsPinnedProtocol').value || '');
+  if (!/^[0-9a-f]{64}$/.test(ca) || !/^[A-Za-z0-9._-]{1,128}$/.test(cn) ||
+      !/^[A-Za-z0-9][A-Za-z0-9.-]{0,252}$/.test(host) ||
+      !Number.isSafeInteger(port) || port < 1 || port > 65535 ||
+      !['udp','tcp'].includes(protocol)) {
+    showToast('Enter independent CA SHA-256, exact CN, host, port and transport.', true);
+    return;
+  }
+  const button = $('windowsPinnedInspectButton');
+  button.disabled = true;
+  setText('windowsPinnedStatus', 'Inspecting selected file offline; no connection or key storage.');
+  try {
+    const result = await window.gateway.inspectWindowsPinnedAutologin({ caSha256: ca, peerCN: cn, host, port, protocol });
+    if (result?.canceled) {
+      setText('windowsPinnedStatus', 'File selection canceled. No profile was inspected or saved.');
+      return;
+    }
+    if (result?.valid !== true || result?.pinnedConstraintsMatch !== true ||
+        result?.inspectedOffline !== true || result?.transportAttempted !== false ||
+        result?.serverIdentityVerified !== false || result?.profilePersisted !== false ||
+        result?.readyForAutomaticConnection !== false) {
+      throw new Error('Offline AUTLOGIN inspection did not preserve the trust boundary.');
+    }
+    setText('windowsPinnedStatus',
+      'Offline AUTLOGIN syntax, CA pin, CN and client keypair match. Profile was not saved. ' +
+      'NO VPN connection or live server identity verified; not enabled for automatic connection.');
+    showToast('Offline pinned AUTLOGIN inspection passed; VPN NOT connected.');
+  } catch (error) {
+    setText('windowsPinnedStatus',
+      'Offline profile rejected or check unavailable. No VPN connection was attempted or saved.');
+    showToast(userErrorMessage(error, 'Offline Windows AUTLOGIN profile rejected.'), true);
+  } finally {
+    button.disabled = false;
+  }
+}
+
 async function init() {
   document.querySelectorAll('.nav-item').forEach(b => b.addEventListener('click', () => setPage(b.dataset.page)));
-  $('powerButton').addEventListener('click', () => runAction(state.status?.connected ? 'disconnect' : 'connect', state.status?.connected ? 'Disconnected.' : 'Connected and validated.'));
+  $('powerButton').addEventListener('click', () => runAction(state.status?.connected ? 'disconnect' : 'connect', state.status?.connected ? 'Disconnected.' : 'Connection attempt completed; check protection and relay identity status.'));
   $('reloadConnections').addEventListener('click', loadConnections);
   $('benchmarkCurrent').addEventListener('click', benchmarkCurrent);
   $('benchmarkDirect').addEventListener('click', benchmarkDirectInternet);
@@ -605,6 +834,15 @@ async function init() {
   $('installRecovery').addEventListener('click', () => runAction('auto-install', 'Auto-Recovery installed.'));
   $('removeRecovery').addEventListener('click', () => runAction('auto-remove', 'Auto-Recovery removed.'));
   $('openLogs').addEventListener('click', () => window.gateway.openLogs());
+  $('windowsPinnedInspectButton').addEventListener('click', inspectWindowsPinnedAutologin);
+  $('operatorStageButton').addEventListener('click', stageOperatorProfileFromPicker);
+  $('operatorNativeCheckButton').addEventListener('click', checkOperatorNativeCompatibility);
+  $('operatorFullDevicePreflightButton').addEventListener('click', checkOperatorFullDevicePreflight);
+  $('operatorFreeCredentialsButton').addEventListener('click', loadFreeVpnBookCredentials);
+  $('operatorTrialConsent').addEventListener('change', () => {
+    $('operatorTrialButton').disabled = !state.operatorStaged || !$('operatorTrialConsent').checked || state.freeCredentialsBusy;
+  });
+  $('operatorTrialButton').addEventListener('click', runOperatorTransportTrial);
   $('checkUpdates').addEventListener('click', () => loadUpdates(true));
   $('installUpdate').addEventListener('click', installUpdate);
   $('openRelease').addEventListener('click', () => window.gateway.openRelease());
@@ -641,6 +879,9 @@ async function init() {
   themeBtn?.click();
 
   state.platform = await window.gateway.platform();
+  $('windowsPinnedProfileCard').hidden = state.platform.platform !== 'win32';
+  $('operatorProfileCard').hidden = state.platform.platform !== 'linux';
+  if (state.platform.platform === 'linux') await loadOperatorProfileStatus();
   setText('platformBadge', (state.platform.platform === 'win32' ? 'Windows' : 'Linux') + ' · ' + state.platform.arch);
   setText('appVersion', 'v' + (state.platform.version || '—') + ' · Stable Headless');
   setText('updateCurrent', state.platform.version || '—');

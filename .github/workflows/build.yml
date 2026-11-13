@@ -41,7 +41,26 @@ jobs:
           cache: npm
           cache-dependency-path: app/package-lock.json
       - run: npm ci
+      - name: Seed verified Electron checksums
+        run: node tools/prepareElectronChecksumCache.js
       - run: npm test
+      - name: Probe GPG-pinned Community CLI and live pinned provider TLS (disposable QA only)
+        if: github.event_name == 'pull_request' && github.head_ref == 'qa/v2.5.20-operator-safety-20261019'
+        shell: pwsh
+        timeout-minutes: 10
+        run: |
+          $ErrorActionPreference='Stop'
+          & ./tests/windows-community-engine-offline-feasibility.ps1
+      - uses: actions/upload-artifact@v7
+        if: always() && github.event_name == 'pull_request' && github.head_ref == 'qa/v2.5.20-operator-safety-20261019'
+        with:
+          name: windows-community-engine-feasibility-receipt
+          path: |
+            ${{ runner.temp }}/oig-community-engine-feasibility.json
+            ${{ runner.temp }}/oig-community-loopback-receipt.json
+            ${{ runner.temp }}/oig-community-controller-loopback-receipt.json
+            ${{ runner.temp }}/oig-community-live-peer-receipt.json
+          if-no-files-found: warn
       - run: npm run dist:win
       - name: Smoke-test silent NSIS install on disposable runner
         shell: pwsh
@@ -117,6 +136,26 @@ jobs:
             throw 'NSIS silent uninstall left executable behind'
           }
           Write-Host 'NSIS silent uninstall PASS (disposable runner)'
+      - name: Verify published-stable to QA in-place Windows updater on disposable runner
+        shell: pwsh
+        timeout-minutes: 12
+        env:
+          GH_TOKEN: ${{ github.token }}
+        working-directory: app
+        run: |
+          $ErrorActionPreference='Stop'
+          $version=(Get-Content ./package.json -Raw|ConvertFrom-Json).version
+          $setup=Join-Path (Get-Location) ('dist/OpenInternetGateway-Setup-'+$version+'.exe')
+          if(!(Test-Path -LiteralPath $setup -PathType Leaf)){throw 'Updater QA setup missing'}
+          $hash=(Get-FileHash -LiteralPath $setup -Algorithm SHA256).Hash.ToLowerInvariant()
+          & ./tools/qaWindowsHostedUpdateApply.ps1 -Installer $setup -ExpectedSha256 $hash -Version $version
+          if($LASTEXITCODE -ne 0){throw 'NATIVE_WINDOWS_UPDATE_APPLY_NOT_ACCEPTED'}
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: windows-native-update-apply-receipt
+          path: ${{ runner.temp }}/oig-hosted-update-apply-receipt.json
+          if-no-files-found: warn
       - uses: actions/upload-artifact@v7
         with:
           name: windows-installer
@@ -135,14 +174,171 @@ jobs:
           cache: npm
           cache-dependency-path: app/package-lock.json
       - run: npm ci
+      - name: Seed verified Electron checksums
+        run: node tools/prepareElectronChecksumCache.js
       - run: npm run dist:linux
+      - name: Verify one-file Linux installer payload and apt prerequisites (no installation)
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(node -p 'require("./package.json").version')"
+          deb="dist/OpenInternetGateway-$version-amd64.deb"
+          setup="dist/OpenInternetGateway-Linux-Setup-$version-amd64.run"
+          test -s "$deb" && test -x "$setup"
+          bash "$setup" --verify-only
+          depends="$(dpkg-deb -f "$deb" Depends)"
+          if grep -Eq "(^|, )default(,|$)" <<< "$depends"; then
+            echo "Invalid literal default package in Debian dependencies" >&2
+            exit 1
+          fi
+          for package in network-manager network-manager-openvpn openvpn python3 curl iproute2 nftables systemd systemd-resolved ca-certificates libgtk-3-0 libnss3; do
+            grep -Eq "(^|, )$package([ ,(]|$)" <<< "$depends" || {
+              echo "Required native dependency missing in Debian package: $package" >&2
+              exit 1
+            }
+          done
+          echo 'Linux one-file setup checksum and native dependency metadata PASS'
+      - name: Validate actual offline Debian package layout without apt
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(node -p 'require("./package.json").version')"
+          bash tools/qaLinuxOfflineDebLayout.sh "dist/OpenInternetGateway-$version-amd64.deb" "dist/OpenInternetGateway-Linux-Setup-$version-amd64.run" "$version"
       - uses: actions/upload-artifact@v7
         with:
           name: linux-packages
           path: |
             app/dist/*.AppImage
             app/dist/*.deb
-
+            app/dist/*.run
+          if-no-files-found: error
+          retention-days: 7
+      - name: Prefer official Ubuntu archive on disposable hosted Linux
+        shell: bash
+        run: bash tools/prepareHostedUbuntuApt.sh
+      - name: Test packaged Linux Close/Hide/Reopen/Quit on disposable X11 runner
+        shell: bash
+        timeout-minutes: 10
+        run: |
+          set -euo pipefail
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          sudo apt-get update -qq
+          version="$(node -p 'require("./package.json").version')"
+          apt-get -s install --no-install-recommends "./dist/OpenInternetGateway-$version-amd64.deb" |
+            grep -F 'Inst open-internet-gateway'
+          sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends xvfb xauth xdotool wmctrl x11-utils openbox tint2 dbus-x11 libgtk-3-0 libnss3 libasound2t64 libgbm1
+          version="$(node -p 'require("./package.json").version')"
+          bash tools/qaLinuxHostedWindowLifecycle.sh "dist/OpenInternetGateway-${version}-amd64.deb"
+      - name: Install, verify, and purge one-file Linux setup on disposable hosted runner
+        if: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.head_ref == 'qa/v2.5.20-operator-safety-20261019' }}
+        shell: bash
+        timeout-minutes: 10
+        run: |
+          set -euo pipefail
+          [[ "${RUNNER_ENVIRONMENT:-}" == github-hosted &&
+             "${GITHUB_REPOSITORY:-}" == GOD13emad/OpenInternetGateway &&
+             -n "${GITHUB_RUN_ID:-}" && "$(id -u)" -ne 0 ]] || {
+            echo 'HOSTED_RUNNER_REQUIRED' >&2
+            exit 71
+          }
+          command -v script >/dev/null
+          [[ -z "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ]] || {
+            echo 'UNEXPECTED_DESKTOP_SESSION' >&2
+            exit 72
+          }
+          version="$(node -p 'require("./package.json").version')"
+          setup="$PWD/dist/OpenInternetGateway-Linux-Setup-${version}-amd64.run"
+          test -x "$setup"
+          installed() {
+            [[ "$(dpkg-query -W -f='${Status}' open-internet-gateway 2>/dev/null || true)" == "install ok installed" ]]
+          }
+          if installed; then
+            echo 'REFUSING_TO_REPLACE_PREEXISTING_PACKAGE' >&2
+            exit 73
+          fi
+          cleanup() {
+            rc=$?
+            trap - EXIT
+            if installed; then
+              sudo env DEBIAN_FRONTEND=noninteractive apt-get purge --yes --no-install-recommends -- open-internet-gateway || rc=74
+            fi
+            exit "$rc"
+          }
+          trap cleanup EXIT
+          printf -v quoted 'bash %q' "$setup"
+          output="$(script -q -e -c "timeout 240s $quoted" /dev/null)"
+          printf '%s\n' "$output"
+          grep -Fq 'OIG_LINUX_ONECLICK_INSTALLED_NO_DISPLAY' <<< "$output"
+          installed
+          dpkg --verify open-internet-gateway
+          test -x /opt/open-internet-gateway/open-internet-gateway
+          test -f /usr/share/applications/OpenInternetGateway.desktop
+          for required in network-manager network-manager-openvpn openvpn; do
+            dpkg-query -W -f='${Status}' "$required" | grep -qx 'install ok installed'
+          done
+          echo 'HOSTED_LINUX_ONEFILE_REAL_INSTALL_AND_DEPENDENCIES_PASS'
+          # The in-app Debian updater must be in the SAME installed payload.
+          # Exercise its handoff with a synthetic installer that can never
+          # call apt/pkexec: actual apt installation was already accepted above.
+          installed_helper="/opt/open-internet-gateway/resources/backend/linux/apply-oneclick-update.sh"
+          test -f "$installed_helper"
+          cmp backend/linux/apply-oneclick-update.sh "$installed_helper"
+          update_scratch="$(mktemp -d "$RUNNER_TEMP/oig-onefile-updater-XXXXXXXX")"
+          fake="$update_scratch/OpenInternetGateway-Linux-Setup-$version-amd64.run"
+          cat > "$fake" <<'SH'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          if [[ "${1:-}" == '--verify-only' ]]; then
+            printf 'OIG_LINUX_ONECLICK_EMBEDDED_DEB_VERIFIED version=%s sha256=%064d\n' "${OIG_FAKE_VERSION:?}" 0
+            exit 0
+          fi
+          [[ "$#" == 0 ]] || exit 61
+          printf 'FAKE_HELPER_NO_APT\n' > "${OIG_FAKE_SENTINEL:?}"
+          SH
+          chmod 700 "$fake"
+          export OIG_FAKE_VERSION="$version" OIG_FAKE_SENTINEL="$update_scratch/fake-only"
+          digest="$(sha256sum "$fake" | awk '{print $1}')"
+          result="$update_scratch/receipt.json"
+          bash "$installed_helper" "$fake" "$digest" "$version" 2147000000 "$result" /opt/open-internet-gateway/open-internet-gateway
+          python3 - "$result" "$version" <<'PY'
+          import json,sys
+          d=json.load(open(sys.argv[1],encoding='utf-8'))
+          assert d.get('ok') is True and d.get('version')==sys.argv[2]
+          assert d.get('installScope')=='system-deb' and d.get('requiresOsAuthorization') is True
+          assert d.get('reason')=='NATIVE_DEB_INSTALL_COMPLETE'
+          print('HOSTED_LINUX_ONEFILE_NATIVE_UPDATE_HANDOFF_ISOLATED_PASS')
+          PY
+          grep -Fqx FAKE_HELPER_NO_APT "$OIG_FAKE_SENTINEL"
+          rm -rf -- "$update_scratch"
+          # Black-box acceptance of the SAME installed /opt executable produced
+          # by the one-file installer, not just a separately extracted DEB.
+          # Xvfb, desktop and D-Bus are private; NetworkManager is read-only
+          # mocked and no provider VPN or user desktop is touched.
+          OIG_QA_EXPECTED_VERSION="$version" bash tools/qaLinuxHostedWindowLifecycle.sh --installed
+          test -s "$RUNNER_TEMP/oig-linux-onefile-installed-lifecycle-receipt.json"
+          python3 - "$RUNNER_TEMP/oig-linux-onefile-installed-lifecycle-receipt.json" <<'PY'
+          import json,sys
+          d=json.load(open(sys.argv[1],encoding='utf-8'))
+          assert d.get('pass') is True and d.get('oneFileAptInstalled') is True
+          assert d.get('sandboxEnabled') is True and d.get('quitExitedZero') is True
+          assert d.get('emptyNmFixtureReadOnly') is True and d.get('actualVpnDisconnectExercised') is False
+          print('HOSTED_LINUX_ONEFILE_REAL_INSTALLED_DASHBOARD_LIFECYCLE_PASS')
+          PY
+          sudo env DEBIAN_FRONTEND=noninteractive apt-get purge --yes --no-install-recommends -- open-internet-gateway
+          if installed; then
+            echo 'HOSTED_LINUX_ONEFILE_PURGE_FAILED' >&2
+            exit 75
+          fi
+          test ! -e /opt/open-internet-gateway/open-internet-gateway
+          echo 'HOSTED_LINUX_ONEFILE_UNINSTALL_PASS'
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: linux-window-lifecycle-receipt
+          path: |
+            ${{ runner.temp }}/oig-linux-window-lifecycle-receipt.json
+            ${{ runner.temp }}/oig-linux-onefile-installed-lifecycle-receipt.json
+          if-no-files-found: warn
   tls-loopback:
     name: Native OpenVPN TLS loopback (no TUN)
     runs-on: ubuntu-24.04
@@ -154,6 +350,7 @@ jobs:
         run: |
           set -euo pipefail
           if ! command -v openvpn >/dev/null 2>&1; then
+            bash app/tools/prepareHostedUbuntuApt.sh
             sudo apt-get update -qq
             sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends openvpn
           fi

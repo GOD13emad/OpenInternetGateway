@@ -19,16 +19,22 @@ test('Linux dns.google unexpected A and unavailable response fail closed', {skip
   assert.match(fs.readFileSync(script,'utf8'),/"poison":None if poison=="unknown" else poison=="true"/);
 });
 
-test('Windows status defaults explicit intent off and DNS unknown must fail closed',()=>{
+test('Windows DNS trust uses only answer-section records and unknown fails closed',()=>{
   const status=fs.readFileSync(path.join(base,'backend/windows/scripts/Status-OpenInternet.ps1'),'utf8');
   const health=fs.readFileSync(path.join(base,'backend/windows/scripts/Headless-Control.ps1'),'utf8');
   const backend=fs.readFileSync(path.join(base,'src/main/platform-backend.js'),'utf8');
-  for(const s of [status,health,backend]){
+  const ensure=fs.readFileSync(path.join(base,'backend/windows/scripts/Ensure-OpenInternet.ps1'),'utf8');
+  const consoleGateway=fs.readFileSync(path.join(base,'backend/windows/scripts/Console-Gateway.ps1'),'utf8');
+  for(const s of [status,health,backend,ensure,consoleGateway]){
+    assert.match(s,/Section -eq 'Answer'/);
+  }
+  for(const s of [status,health,backend,ensure]){
     assert.match(s,/8\.8\.8\.8/);
     assert.match(s,/8\.8\.4\.4/);
     assert.match(s,/\$poison -eq \$false/);
     assert.doesNotMatch(s,/10\.10\.34\.35/);
   }
+  assert.match(consoleGateway,/10\.10\.34\.35/);
   assert.match(backend,/\$desired='off';if\(Test-Path \$desiredPath\)/);
   assert.match(status,/\$desired='off'/);
 });

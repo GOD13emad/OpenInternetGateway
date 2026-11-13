@@ -1,0 +1,2 @@
+# Preserve immutable Electron checksum manifest bytes on Windows core.autocrlf checkouts.
+app/tools/electron-SHASUMS256-44.10.2.txt -text

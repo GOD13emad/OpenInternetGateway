@@ -50,3 +50,43 @@ test('unverified connection renders route and DNS as warnings rather than green 
   mark('icon','label',false,'route missing',false);
   assert.equal(icons.icon.className,'health-icon bad');
 });
+
+
+test('static Dashboard never promises Secure DNS or Protected routes for an unverified relay',()=>{
+  const html=fs.readFileSync(path.join(root,'src/renderer/index.html'),'utf8');
+  assert.match(html,/VPN TUNNEL/);
+  assert.match(html,/DNS responses/);
+  assert.match(html,/IPv4 VPN routes/);
+  assert.match(html,/Relay identity unverified/);
+  assert.doesNotMatch(html,/>SECURE TUNNEL<|>Secure DNS<|>Protected routes<|Dynamic validated endpoint/);
+  assert.match(html,/Relay identity may remain unverified/);
+});
+
+test('startup recovery labels unverified, verified, and missing VPN tunnels accurately',async()=>{
+  const js=fs.readFileSync(path.join(root,'src/renderer/app.js'),'utf8');
+  const m=js.match(/async function reconcileStartupTunnel\(initialStatus\) \{[\s\S]*?\n\}/);
+  assert.ok(m,'actual production startup reconciliation exists');
+  for(const [finalStatus,want] of [
+    [{connected:true,serverIdentityVerified:false},'VPN tunnel restored; relay identity remains unverified.'],
+    [{connected:true,serverIdentityVerified:true},'Verified VPN tunnel restored.'],
+    [{connected:false,serverIdentityVerified:false},null],
+  ]){
+    const toast=[],busy=[],rendered=[],actions=[];
+    const fn=vm.runInNewContext('('+m[0]+')',{
+      setBusy:(...args)=>busy.push(args),
+      showToast:(text)=>toast.push(text),
+      renderStatus:(s)=>rendered.push(s),
+      window:{gateway:{action:async(action)=>{actions.push(action);return {status:finalStatus};},status:async()=>finalStatus}},
+      refreshStatus:async()=>finalStatus
+    });
+    const result=await fn({connected:false,desiredState:'on',autoRecovery:true});
+    assert.equal(result,finalStatus);
+    assert.equal(actions.join(','),'ensure');
+    assert.equal(busy[0][0],true);
+    assert.equal(busy[busy.length-1][0],false);
+    assert.equal(rendered.length,1);
+    assert.equal(toast.length,want?1:0);
+    if(want)assert.equal(toast[0],want);
+    assert.doesNotMatch(busy[0][2],/protected/i,'pre-handshake restore cannot claim protection');
+  }
+});

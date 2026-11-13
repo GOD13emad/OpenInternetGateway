@@ -1,0 +1,217 @@
+name: Disposable Linux native NetworkManager import QA
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/hosted-linux-native-networkmanager.yml'
+      - 'app/tests/hosted-linux-native-nm.py'
+      - 'app/tests/hosted-linux-native-nm.sh'
+      - 'app/tests/hosted-linux-native-nm-live.py'
+      - 'app/tests/hosted-linux-nm-active-crash-rollback.py'
+      - 'app/tests/hosted-linux-user-timer-bridge.py'
+      - 'app/tests/hosted-linux-nft-killswitch-smoke.py'
+      - 'app/tests/nft-killswitch-plan.test.js'
+      - 'app/backend/linux/nft_killswitch_plan.py'
+      - 'app/backend/linux/killswitch_lifecycle_contract.py'
+      - 'app/backend/linux/killswitch_broker_protocol.py'
+      - 'app/backend/linux/killswitch_root_observer.py'
+      - 'app/backend/linux/killswitch_broker_ipc.py'
+      - 'app/tests/killswitch-lifecycle-contract-smoke.py'
+      - 'app/tests/killswitch-lifecycle-contract.test.js'
+      - 'app/tests/killswitch-broker-protocol-smoke.py'
+      - 'app/tests/killswitch-broker-protocol.test.js'
+      - 'app/tests/killswitch-root-observer-smoke.py'
+      - 'app/tests/killswitch-root-observer.test.js'
+      - 'app/tests/killswitch-broker-ipc-smoke.py'
+      - 'app/tests/killswitch-broker-ipc.test.js'
+      - 'app/backend/linux/killswitch_broker_service.py'
+      - 'app/tests/killswitch-broker-service-smoke.py'
+      - 'app/tests/killswitch-broker-service.test.js'
+      - 'app/tests/killswitch-systemd-socket-activation-smoke.py'
+      - 'app/backend/linux/killswitch_nft_executor.py'
+      - 'app/tests/killswitch-nft-executor-smoke.py'
+      - 'app/tests/killswitch-nft-executor.test.js'
+      - 'app/tests/hosted-linux-nft-executor-smoke.py'
+      - 'app/tests/hosted-linux-root-boot-kernel-smoke.py'
+      - 'app/tests/hosted-linux-systemd-dependency-loss.py'
+      - 'app/tests/local-linux-nft-kernel-netns-smoke.py'
+      - 'app/tests/local-linux-nft-kernel-netns.test.js'
+      - 'app/backend/linux/killswitch_bootstrap.py'
+      - 'app/tests/killswitch-bootstrap-smoke.py'
+      - 'app/tests/killswitch-bootstrap.test.js'
+      - 'app/tests/linux-disconnect-cancellation.test.js'
+      - 'app/tests/linux-backend-disconnect-recovery.test.js'
+      - 'app/backend/linux/oig-linux.sh'
+      - 'app/tests/hosted-linux-provider-data-plane.py'
+      - 'app/backend/linux/operator_profile.py'
+      - 'app/backend/linux/operator_full_device.py'
+      - 'app/backend/linux/ipv6_route_guard.py'
+      - 'app/backend/linux/dns_route_guard.py'
+
+permissions:
+  contents: read
+
+jobs:
+  isolated-native-networkmanager-import:
+    if: ${{ github.event.pull_request.head.repo.full_name == github.repository && github.head_ref == 'qa/v2.5.20-operator-safety-20261019' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Confirm exact hosted source and no owner-host execution
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$RUNNER_ENVIRONMENT" = "github-hosted"
+          test "$GITHUB_ACTIONS" = "true"
+          test "$GITHUB_REPOSITORY" = "GOD13emad/OpenInternetGateway"
+          test "$GITHUB_BASE_REF" = "integration/qa-v2520-20261019"
+          test "$(git rev-parse HEAD)" = "${{ github.event.pull_request.head.sha }}"
+          test "$(git status --porcelain)" = ""
+          bash -n app/tests/hosted-linux-native-nm.sh
+          python3 -B - <<'PY'
+          import ast,pathlib
+          ast.parse(pathlib.Path('app/tests/hosted-linux-native-nm.py').read_text())
+          ast.parse(pathlib.Path('app/tests/hosted-linux-native-nm-live.py').read_text())
+          ast.parse(pathlib.Path('app/tests/hosted-linux-nm-active-crash-rollback.py').read_text())
+          ast.parse(pathlib.Path('app/tests/hosted-linux-user-timer-bridge.py').read_text())
+          ast.parse(pathlib.Path('app/tests/hosted-linux-nft-killswitch-smoke.py').read_text())
+          ast.parse(pathlib.Path('app/backend/linux/nft_killswitch_plan.py').read_text())
+          ast.parse(pathlib.Path('app/backend/linux/killswitch_lifecycle_contract.py').read_text())
+          ast.parse(pathlib.Path('app/backend/linux/killswitch_broker_protocol.py').read_text())
+          ast.parse(pathlib.Path('app/backend/linux/killswitch_root_observer.py').read_text())
+          ast.parse(pathlib.Path('app/backend/linux/killswitch_broker_ipc.py').read_text())
+          ast.parse(pathlib.Path('app/tests/killswitch-lifecycle-contract-smoke.py').read_text())
+          ast.parse(pathlib.Path('app/tests/killswitch-broker-protocol-smoke.py').read_text())
+          ast.parse(pathlib.Path('app/tests/killswitch-root-observer-smoke.py').read_text())
+          ast.parse(pathlib.Path('app/tests/killswitch-broker-ipc-smoke.py').read_text())
+          ast.parse(pathlib.Path('app/backend/linux/killswitch_broker_service.py').read_text())
+          ast.parse(pathlib.Path('app/tests/killswitch-broker-service-smoke.py').read_text())
+          ast.parse(pathlib.Path('app/tests/killswitch-systemd-socket-activation-smoke.py').read_text())
+          ast.parse(pathlib.Path('app/backend/linux/killswitch_nft_executor.py').read_text())
+          ast.parse(pathlib.Path('app/tests/killswitch-nft-executor-smoke.py').read_text())
+          ast.parse(pathlib.Path('app/tests/hosted-linux-nft-executor-smoke.py').read_text())
+          ast.parse(pathlib.Path('app/tests/hosted-linux-root-boot-kernel-smoke.py').read_text())
+          ast.parse(pathlib.Path('app/tests/hosted-linux-systemd-dependency-loss.py').read_text())
+          ast.parse(pathlib.Path('app/tests/local-linux-nft-kernel-netns-smoke.py').read_text())
+          ast.parse(pathlib.Path('app/backend/linux/killswitch_bootstrap.py').read_text())
+          ast.parse(pathlib.Path('app/tests/killswitch-bootstrap-smoke.py').read_text())
+          print('DISPOSABLE_NATIVE_NM_IMPORT_AST_PASS')
+          PY
+          set +e
+          result="$(env -u GITHUB_ACTIONS -u RUNNER_ENVIRONMENT -u GITHUB_REPOSITORY bash app/tests/hosted-linux-native-nm.sh --run-hosted-container 2>&1)"
+          code=$?
+          set -e
+          test "$code" -ne 0
+          test "$result" = "REFUSED: owner host or non-disposable runner"
+          set +e
+          live_result="$(env -u GITHUB_ACTIONS -u RUNNER_ENVIRONMENT -u GITHUB_REPOSITORY \
+            python3 -B app/tests/hosted-linux-native-nm-live.py --native-scoped-live 2>&1)"
+          live_code=$?
+          set -e
+          test "$live_code" -ne 0
+          test "$live_result" = "REFUSED: owner host or non-disposable runner"
+          set +e
+          full_result="$(env -u GITHUB_ACTIONS -u RUNNER_ENVIRONMENT -u GITHUB_REPOSITORY             python3 -B app/tests/hosted-linux-native-nm-live.py --native-fullipv4 2>&1)"
+          full_code=$?
+          set -e
+          test "$full_code" -ne 0
+          test "$full_result" = "REFUSED: owner host or non-disposable runner"
+          set +e
+          crash_result="$(env -u GITHUB_ACTIONS -u RUNNER_ENVIRONMENT -u GITHUB_REPOSITORY             python3 -B app/tests/hosted-linux-nm-active-crash-rollback.py --supervise 2>&1)"
+          crash_code=$?
+          set -e
+          test "$crash_code" -ne 0
+          test "$crash_result" = "REFUSED: owner host or non-disposable runner"
+          set +e
+          timer_result="$(env -u GITHUB_ACTIONS -u RUNNER_ENVIRONMENT -u GITHUB_REPOSITORY python3 -B app/tests/hosted-linux-user-timer-bridge.py --client-run 2>&1)"
+          timer_code=$?
+          set -e
+          test "$timer_code" -ne 0
+          case "$timer_result" in *"REFUSED: owner host or non-disposable runner"*) ;; *) exit 81 ;; esac
+          set +e
+          nft_result="$(env -u GITHUB_ACTIONS -u RUNNER_ENVIRONMENT -u GITHUB_REPOSITORY python3 -B app/tests/hosted-linux-nft-killswitch-smoke.py --isolated-docker-only 2>&1)"
+          nft_code=$?
+          set -e
+          test "$nft_code" -ne 0
+          test "$nft_result" = 'REFUSED: owner host or non-disposable runner'
+          python3 -B app/tests/killswitch-lifecycle-contract-smoke.py
+          python3 -B app/tests/killswitch-broker-protocol-smoke.py
+          python3 -B app/tests/killswitch-root-observer-smoke.py
+          python3 -B app/tests/killswitch-broker-ipc-smoke.py
+          python3 -B app/tests/killswitch-broker-service-smoke.py
+          python3 -B app/tests/killswitch-systemd-socket-activation-smoke.py
+          python3 -B app/tests/killswitch-nft-executor-smoke.py
+          node --test app/tests/local-linux-nft-kernel-netns.test.js
+          python3 -B app/tests/killswitch-bootstrap-smoke.py
+          node --test app/tests/killswitch-bootstrap.test.js
+          set +e
+          executor_result="$(env -u GITHUB_ACTIONS -u RUNNER_ENVIRONMENT -u GITHUB_REPOSITORY python3 -B app/tests/hosted-linux-nft-executor-smoke.py --isolated-docker-only 2>&1)"
+          executor_code=$?
+          set -e
+          test "$executor_code" -ne 0
+          test "$executor_result" = 'REFUSED: owner host or non-disposable runner'
+          set +e
+          boot_kernel_result="$(env -u GITHUB_ACTIONS -u RUNNER_ENVIRONMENT -u GITHUB_REPOSITORY \
+            python3 -B app/tests/hosted-linux-root-boot-kernel-smoke.py --isolated-docker-only 2>&1)"
+          boot_kernel_code=$?
+          set -e
+          test "$boot_kernel_code" -ne 0
+          test "$boot_kernel_result" = 'REFUSED: owner host or non-disposable runner'
+          set +e
+          systemd_loss_result="$(env -u GITHUB_ACTIONS -u RUNNER_ENVIRONMENT -u GITHUB_REPOSITORY \
+            python3 -B app/tests/hosted-linux-systemd-dependency-loss.py --github-hosted-only 2>&1)"
+          systemd_loss_code=$?
+          set -e
+          test "$systemd_loss_code" -ne 0
+          test "$systemd_loss_result" = 'REFUSED: owner host or non-disposable runner'
+          echo 'OWNER_HOST_REFUSED=PASS'
+      - name: Real hosted user-systemd synthetic guard loss and dependency propagation
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -B app/tests/hosted-linux-systemd-dependency-loss.py --github-hosted-only
+          python3 -B - "$RUNNER_TEMP/oig-hosted-systemd-dependency-loss.json" <<'PYSYSTEMD'
+          import json,sys
+          r=json.load(open(sys.argv[1],encoding='utf8'))
+          assert r.get('schema') == 'oig-hosted-systemd-dependency-loss-v1'
+          assert r.get('pass') is True
+          for k in ('hostedUserSystemdVerified','onlySyntheticUnits',
+                    'previewBindsToAfterExact','syntheticDependenciesActive',
+                    'unexpectedGuardKillPropagatesStop',
+                    'skippedGuardBlocksDependent','ownUnitsRemoved'):
+              assert r.get(k) is True, k
+          for k in ('productionBootServiceInstalled',
+                    'productionKillSwitchVerified', 'ownerNetworkManagerTouched',
+                    'ownerNetworkChanged'):
+              assert r.get(k) is False, k
+          print('HOSTED_USER_SYSTEMD_REAL_LOSS_PROPAGATION_PASS_NO_OWNER_NET')
+          PYSYSTEMD
+      - name: Real OIG NetworkManager import plus scoped live OpenVPN TUN in isolated Docker netns
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -c /dev/net/tun
+          docker info --format '{{.ServerVersion}}' >/dev/null
+          bash app/tests/hosted-linux-native-nm.sh --run-hosted-container
+      - name: Upload bounded native NetworkManager receipt
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: linux-native-networkmanager-import-receipt
+          path: |
+            ${{ runner.temp }}/oig-hosted-nm/oig-hosted-native-nm.json
+            ${{ runner.temp }}/oig-hosted-nm/oig-hosted-native-nm-live.json
+            ${{ runner.temp }}/oig-hosted-nm/oig-hosted-native-nm-fullipv4.json
+            ${{ runner.temp }}/oig-hosted-nm/oig-hosted-active-crash-rollback.json
+            ${{ runner.temp }}/oig-hosted-nm/oig-hosted-active-timer-rollback.json
+            ${{ runner.temp }}/oig-hosted-nm/oig-hosted-nft-killswitch-smoke.json
+            ${{ runner.temp }}/oig-hosted-nm/oig-hosted-nft-executor.json
+            ${{ runner.temp }}/oig-hosted-nm/oig-hosted-root-boot-kernel.json
+            ${{ runner.temp }}/oig-hosted-systemd-dependency-loss.json
+          if-no-files-found: warn
+          retention-days: 7

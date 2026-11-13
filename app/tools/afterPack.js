@@ -38,4 +38,13 @@ module.exports = async function afterPack(context) {
   fs.chmodSync(mainExe, 0o755);
   if (fs.existsSync(crashpad)) fs.chmodSync(crashpad, 0o755);
   fs.chmodSync(sandbox, 0o4755);
+
+  // AppImage's generated AppRun otherwise adds --no-sandbox when user namespaces
+  // are disabled. Copy our fail-closed launcher into appOutDir; AppImageTarget
+  // copies appOutDir over its generated AppRun when assembling the SquashFS.
+  const customAppRun = path.join(__dirname, '..', 'build', 'linux', 'AppRun');
+  if (!fs.existsSync(customAppRun)) throw new Error('Custom Linux AppImage AppRun is missing');
+  const appRun = path.join(context.appOutDir, 'AppRun');
+  fs.copyFileSync(customAppRun, appRun);
+  fs.chmodSync(appRun, 0o755);
 };

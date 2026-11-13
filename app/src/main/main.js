@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, Menu, Tray, nativeImage, shell, nativeTheme } = require('electron');
+const { app, BrowserWindow, ipcMain, Menu, Tray, nativeImage, shell, nativeTheme, dialog } = require('electron');
 const { spawn } = require('child_process');
 const path = require('path');
 const fs = require('fs');
@@ -18,6 +18,23 @@ const quitRequestedAtLaunch = process.argv.includes('--quit');
 const launchIntent = quitRequestedAtLaunch ? 'quit' : 'show';
 const gotSingleInstanceLock = app.requestSingleInstanceLock({ intent: launchIntent });
 if (!gotSingleInstanceLock) app.quit();
+
+// Only enabled for explicit disposable GitHub-hosted window-lifecycle QA.
+// Never log personal state or network details in production.
+function traceQaWindow(event) {
+  if (process.env.OIG_QA_WINDOW_TRACE !== '1' ||
+      process.env.RUNNER_ENVIRONMENT !== 'github-hosted') return;
+  const state = {
+    pid: process.pid,
+    live: isLiveWindow(),
+    visible: isLiveWindow() ? mainWindow.isVisible() : null,
+    quitting: !!app.isQuitting,
+    quitInProgress,
+    allowQuit
+  };
+  console.info('OIG_QA_WINDOW_EVENT ' + event + ' ' + JSON.stringify(state));
+}
+traceQaWindow('first-lock-' + (gotSingleInstanceLock ? 'yes' : 'no'));
 
 function asset(name) {
   return path.join(__dirname, '..', '..', 'assets', name);
@@ -49,6 +66,7 @@ function createWindow({ showWhenReady = !startInBackground } = {}) {
   win.loadFile(path.join(__dirname, '..', 'renderer', 'index.html'));
   win.once('ready-to-show', () => {
     if (showWhenReady && !app.isQuitting && isLiveWindow(win)) win.show();
+    traceQaWindow('ready-to-show');
     if (process.env.OIG_CAPTURE_PATH && isLiveWindow(win)) {
       setTimeout(async () => {
         try {
@@ -57,8 +75,9 @@ function createWindow({ showWhenReady = !startInBackground } = {}) {
           fs.writeFileSync(process.env.OIG_CAPTURE_PATH, image.toPNG());
         } finally {
           if (process.env.OIG_CAPTURE_ONLY === '1') {
-            // Capture-only has no managed tunnel, and must exit without
-            // triggering quit hooks or keeping hidden windows alive.
+            // This process has no managed VPN session: after saving the QA
+            // frame, exit unconditionally instead of relying on quit hooks
+            // that may keep hidden Chromium windows/processes alive.
             app.isQuitting = true;
             app.exit(0);
           }
@@ -67,9 +86,11 @@ function createWindow({ showWhenReady = !startInBackground } = {}) {
     }
   });
   win.on('close', event => {
+    traceQaWindow('close-before');
     if (app.isQuitting) return;
     event.preventDefault();
     if (isLiveWindow(win)) win.hide();
+    traceQaWindow('close-after-hide');
   });
   win.on('closed', () => {
     if (mainWindow === win) mainWindow = null;
@@ -78,7 +99,11 @@ function createWindow({ showWhenReady = !startInBackground } = {}) {
 }
 
 function showDashboard() {
-  if (quitInProgress || allowQuit || app.isQuitting) return false;
+  traceQaWindow('show-requested');
+  if (quitInProgress || allowQuit || app.isQuitting) {
+    traceQaWindow('show-suppressed');
+    return false;
+  }
   if (!isLiveWindow(mainWindow)) {
     createWindow({ showWhenReady: true });
     return true;
@@ -86,6 +111,7 @@ function showDashboard() {
   if (mainWindow.isMinimized()) mainWindow.restore();
   mainWindow.show();
   mainWindow.focus();
+  traceQaWindow('show-after');
   return true;
 }
 
@@ -136,28 +162,91 @@ function registerIpc() {
   ipcMain.handle('gateway:diagnostics', () => backend.diagnostics());
   ipcMain.handle('gateway:activity', () => backend.activity());
   ipcMain.handle('gateway:platform', () => backend.platformInfo());
+  ipcMain.handle('gateway:inspectWindowsPinnedAutologin', async (_event, input = {}) => {
+    if (process.platform !== 'win32') throw new Error('Windows offline AUTLOGIN inspection is Windows-only.');
+    const ca = String(input?.caSha256 || '').replace(/:/g, '').toLowerCase();
+    const cn = String(input?.peerCN || '');
+    const host = String(input?.host || '');
+    const port = Number(input?.port);
+    const protocol = String(input?.protocol || '');
+    // Validate untrusted renderer data BEFORE showing a native chooser.
+    if (!/^[a-f0-9]{64}$/.test(ca) || !/^[A-Za-z0-9._-]{1,128}$/.test(cn) ||
+        !/^[A-Za-z0-9][A-Za-z0-9.-]{0,252}$/.test(host) ||
+        !Number.isSafeInteger(port) || port < 1 || port > 65535 ||
+        !['udp', 'tcp'].includes(protocol)) {
+      throw new Error('A trusted CA pin, exact peer CN, endpoint and protocol are required.');
+    }
+    const selected = await dialog.showOpenDialog(mainWindow, {
+      title: 'Inspect an independently pinned Windows OpenVPN AUTLOGIN profile (offline only)',
+      properties: ['openFile'],
+      filters: [{ name: 'OpenVPN configuration', extensions: ['ovpn'] }]
+    });
+    if (selected.canceled || selected.filePaths?.length !== 1) return { canceled: true };
+    return backend.inspectWindowsPinnedAutologinProfile(selected.filePaths[0],
+      { caSha256: ca, peerCN: cn, host, port, protocol });
+  });
+  ipcMain.handle('gateway:operatorProfileStatus', () => backend.operatorProfileStatus());
+  ipcMain.handle('gateway:operatorNativeCheck', () => backend.checkOperatorNativeCompatibility());
+  ipcMain.handle('gateway:operatorFullDevicePreflight', () => backend.checkOperatorFullDevicePreflight());
+  ipcMain.handle('gateway:freeVpnBookCredentials', () => {
+    if (process.platform !== 'linux') throw new Error('Free VPNBook login is Linux QA-only.');
+    return backend.freeVpnBookCredentials();
+  });
+  ipcMain.handle('gateway:operatorTrial', (_event, input = {}) => {
+    if (process.platform !== 'linux') throw new Error('Operator VPN trial is Linux-only.');
+    return backend.operatorConnectionTrial(input.username, input.password);
+  });
+  ipcMain.handle('gateway:stageOperatorProfile', async (_e, input = {}) => {
+    if (process.platform !== 'linux') throw new Error('Operator profile import is Linux-only.');
+    const caSha256 = String(input?.caSha256 || '');
+    const peerCN = String(input?.peerCN || '');
+    // Validate before opening the native file chooser, and never accept a
+    // filesystem path supplied by the renderer. The chooser remains cancelable.
+    if (!/^(?:[a-fA-F0-9]{2}:?){32}$/.test(caSha256) ||
+        !/^[A-Za-z0-9._-]{1,128}$/.test(peerCN)) {
+      throw new Error('Enter an independently verified CA SHA-256 and expected server certificate CN.');
+    }
+    const chosen = await dialog.showOpenDialog(mainWindow, {
+      title: 'Choose VPNBook OpenVPN configuration (offline staging only)',
+      properties: ['openFile'],
+      filters: [{ name: 'OpenVPN configuration', extensions: ['ovpn'] }]
+    });
+    if (chosen.canceled || chosen.filePaths?.length !== 1) return { canceled: true };
+    return backend.stageOperatorProfile(chosen.filePaths[0], caSha256, peerCN);
+  });
   ipcMain.handle('gateway:openLogs', async () => shell.openPath(await backend.logsPath()));
   ipcMain.handle('gateway:updateInfo', (_e, force) => backend.updateInfo(!!force));
   ipcMain.handle('gateway:installUpdate', async () => {
-    const result = await backend.downloadUpdate();
-    if (result.alreadyCurrent || !result.path) return { ...result, applying: false };
-    const launched = await backend.launchDownloadedUpdate(result, {
-      appPid: process.pid,
-      currentExecutable: process.execPath
-    });
-    if (launched?.applying) {
-      if (process.platform === 'linux' && backend?.backendRoot) {
-        // Disarm the old parent-exit watchdog. The new app writes its own lease
-        // after restart; a failed updater helper relaunches the previous app.
-        try {
-          const lease = path.join(backend.backendRoot, 'state', 'app-process.lease');
-          fs.mkdirSync(path.dirname(lease), { recursive: true });
-          fs.writeFileSync(lease, 'update ' + process.pid + ' ' + Date.now() + '\n');
-        } catch {}
+    if (backend.operatorTrialBusy) throw new Error('Wait for isolated VPN trial cleanup before updating.');
+    if (backend.operatorProfileTaskBusy) throw new Error('Wait for operator-profile import/check to complete before updating.');
+    if (backend.operatorUpdateBusy) throw new Error('An update is already in progress.');
+    backend.operatorUpdateBusy = true;
+    let handedOff = false;
+    try {
+      const result = await backend.downloadUpdate();
+      if (result.alreadyCurrent || !result.path) return { ...result, applying: false };
+      const launched = await backend.launchDownloadedUpdate(result, {
+        appPid: process.pid,
+        currentExecutable: process.execPath
+      });
+      if (launched?.applying) {
+        if (process.platform === 'linux' && backend?.backendRoot) {
+          // Disarm the old parent-exit watchdog. The new app writes its own lease
+          // after restart; a failed updater helper relaunches the previous app.
+          try {
+            const lease = path.join(backend.backendRoot, 'state', 'app-process.lease');
+            fs.mkdirSync(path.dirname(lease), { recursive: true });
+            fs.writeFileSync(lease, 'update ' + process.pid + ' ' + Date.now() + '\n');
+          } catch {}
+        }
+        handedOff = true;
+        setTimeout(requestProcessExitPreservingTunnel, 500);
       }
-      setTimeout(requestProcessExitPreservingTunnel, 500);
+      return { ...result, ...launched };
+    } finally {
+      // If update handoff started, block new trials until process exit.
+      if (!handedOff) backend.operatorUpdateBusy = false;
     }
-    return { ...result, ...launched };
   });
   ipcMain.handle('gateway:openRelease', async () => {
     let url = 'https://github.com/GOD13emad/OpenInternetGateway/releases/latest';
@@ -210,6 +299,11 @@ async function disconnectBeforeQuit() {
 
 async function requestQuit() {
   if (quitInProgress || allowQuit) return;
+  if (backend?.operatorTrialBusy || backend?.operatorProfileTaskBusy) {
+    console.warn('OpenInternetGateway: a provider trial is active; Quit waits for cleanup.');
+    showDashboard();
+    return;
+  }
   quitInProgress = true;
   app.isQuitting = true;
   if (trayPoll) clearInterval(trayPoll);
@@ -227,6 +321,10 @@ async function requestQuit() {
 
 function requestProcessExitPreservingTunnel() {
   if (allowQuit) return;
+  if (backend?.operatorTrialBusy || backend?.operatorProfileTaskBusy) {
+    console.warn('OpenInternetGateway: cannot exit during provider trial cleanup.');
+    return;
+  }
   // Installer/update lifecycle exits are not the user's explicit Quit command.
   // Keep desired-state and the independent tunnel intact while the dashboard
   // is replaced and restarted.
@@ -239,6 +337,7 @@ function requestProcessExitPreservingTunnel() {
 if (gotSingleInstanceLock) {
 app.on('second-instance', (_event, argv, _workingDirectory, additionalData) => {
     const intent = additionalData?.intent || (argv.includes('--quit') ? 'quit' : 'show');
+    traceQaWindow('second-instance-' + intent);
     if (intent === 'quit') { requestQuit(); return; }
     showDashboard();
   });
@@ -257,26 +356,23 @@ app.on('second-instance', (_event, argv, _workingDirectory, additionalData) => {
       }
     });
     const initialized = await backend.initialize();
-    if (process.platform === 'linux'
-        && process.env.OIG_CAPTURE_ONLY !== '1'
-        && initialized?.sandboxHardening?.restartRequired) {
-      const appRun = path.join(initialized.sandboxHardening.runtimeRoot || '', 'AppRun');
-      if (fs.existsSync(appRun)) {
-        const relaunchArgs = process.argv.slice(1).filter(arg => arg !== '--no-sandbox');
-        try {
-          const child = spawn(appRun, relaunchArgs, {
-            detached: true,
-            stdio: 'ignore',
-            env: { ...process.env, OIG_SANDBOX_RESTARTED: '1' }
-          });
-          child.unref();
-          allowQuit = true;
-          app.isQuitting = true;
-          app.quit();
-          return;
-        } catch (error) {
-          console.error('OpenInternetGateway sandbox hardening restart failed:', error);
-        }
+    if (process.platform === 'linux' && app.isPackaged
+        && process.env.OIG_CAPTURE_ONLY !== '1') {
+      const sandbox = initialized?.sandboxHardening;
+      const sandboxReady = !!sandbox?.supported
+        && !!sandbox?.hardened
+        && sandbox?.processArgvVerified === true
+        && sandbox?.currentProcessNoSandbox === false;
+      if (!sandboxReady) {
+        const reason = String(sandbox?.reason || 'The Chromium sandbox state could not be verified.');
+        dialog.showErrorBox(
+          'Secure startup blocked',
+          'Open Internet Gateway refused to start because Chromium sandbox protection could not be verified. The application will not run with --no-sandbox.\n\n'
+            + reason
+            + '\n\nUse the official Linux package with its root-owned sandbox helper, or enable unprivileged user namespaces.'
+        );
+        app.exit(78);
+        return;
       }
     }
     startLinuxExitWatchdog();
@@ -286,8 +382,33 @@ app.on('second-instance', (_event, argv, _workingDirectory, additionalData) => {
     }
     registerIpc();
     createWindow();
-    // Passive installed-GUI captures must not create a tray icon.
+    // A passive Windows QA capture must not register a host notification icon.
     if (process.platform !== 'win32' || process.env.OIG_CAPTURE_ONLY !== '1') createTray();
+
+    // The NSIS per-user installer launches the app after installation.
+    // On that INTERACTIVE first run, prepare only missing Windows VPN
+    // prerequisites. Hosted capture/tray CI and login autostart never request
+    // UAC, and no VPN is connected, stopped or enabled by this setup.
+    if (process.platform === 'win32' && app.isPackaged &&
+        process.env.OIG_CAPTURE_ONLY !== '1' &&
+        process.env.RUNNER_ENVIRONMENT !== 'github-hosted' &&
+        !startInBackground &&
+        !backend._windowsPrerequisiteStatus()?.openVpnConnect?.ready) {
+      setTimeout(() => {
+        if (app.isQuitting) return;
+        backend.prepareWindowsInstallerPrerequisites().catch(error => {
+          if (app.isQuitting || !isLiveWindow()) return;
+          dialog.showMessageBox(mainWindow, {
+            type: 'warning',
+            title: 'Open Internet Gateway setup',
+            message: 'OpenVPN Connect prerequisite setup was not completed.',
+            detail: String(error?.message || error) +
+              '\n\nThe dashboard remains available. Retry by selecting Connect when ready.',
+            buttons: ['OK']
+          }).catch(() => {});
+        });
+      }, 850);
+    }
   });
   
   app.on('activate', () => {

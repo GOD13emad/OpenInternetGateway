@@ -27,7 +27,7 @@ test('Windows connection and recovery cannot credit two arbitrary routes as OIG 
   assert.match(health, /\$managedActive=\(\$managedService -and \$managedService\.Status -eq 'Running'\)/);
   assert.match(health, /Healthy=\(\$routePairValid -and \$ipv6Safe -and \$managedActive/);
   assert.match(health, /FullRoutes=\$\(if\(\$routePairValid\)\{2\}else\{0\}\)/);
-  assert.match(connect, /if\(\$routePairValid -and \$ipv6Safe -and \$loc/);
-  assert.match(connect, /-or -not \$routePairValid -or -not \$ipv6Safe\)\{/);
+  assert.match(connect, /if\(\$routes\.Count -ge 2 -and \$routePairValid -and \$ipv6Safe -and \$loc/);
+  assert.match(connect, /-or -not \$routePairValid -or -not \$ipv6Safe -or -not \$profileOk\)\{/);
   assert.doesNotMatch(connect, /if\(\$routes\.Count -ge 2 -and \$loc/);
 });

@@ -36,7 +36,7 @@ if($Action -eq 'Enable'){
  if($routes.Count -lt 2){throw 'Validated OpenVPN full-route is not active; refusing console sharing.'}
  $cf=@(curl.exe -4 --max-time 5 -s https://www.cloudflare.com/cdn-cgi/trace)
  $loc=[string](($cf|Where-Object{$_ -like 'loc=*'}|Select-Object -First 1)-replace '^loc=','');$loc=$loc.Trim()
- $dns=@(Resolve-DnsName dns.google -Type A -DnsOnly -ErrorAction SilentlyContinue|Where-Object IPAddress|Select-Object -ExpandProperty IPAddress)
+ $dns=@(Resolve-DnsName dns.google -Type A -DnsOnly -ErrorAction SilentlyContinue|Where-Object {$_.IPAddress -and $_.Section -eq 'Answer'}|Select-Object -ExpandProperty IPAddress)
  if($loc -eq 'IR' -or $dns -contains '10.10.34.35'){throw 'Tunnel validation failed; refusing console sharing.'}
  $ics=Get-IcsRows
  $existing=@($ics.Rows|Where-Object SharingEnabled)

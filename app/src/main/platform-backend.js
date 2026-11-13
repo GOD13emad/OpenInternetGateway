@@ -4,6 +4,7 @@ const path = require('path');
 const os = require('os');
 const https = require('https');
 const crypto = require('crypto');
+const net = require('net');
 
 const WINDOWS_OPENVPN_CONNECT = Object.freeze({
   version: '3.9.0.5008',
@@ -25,6 +26,12 @@ function run(file, args, options = {}) {
       stdio: options.closeStdin ? ['ignore','pipe','pipe'] : ['pipe','pipe','pipe'],
       env: { ...process.env, ...(options.env || {}) }
     });
+    if (options.input !== undefined && !options.closeStdin) {
+      // Suppress EPIPE when a rejected child exits before consuming stdin.
+      // The secret never enters the process argv/environment/logging path.
+      child.stdin?.on('error', () => {});
+      child.stdin?.end(options.input);
+    }
     let stdout = '';
     let stderr = '';
     child.stdout?.on('data', d => stdout += d.toString());
@@ -63,6 +70,11 @@ class Backend {
     this.platform = process.platform;
     this.backendRoot = null;
     this.sandboxHardening = null;
+    this.operatorTrialBusy = false;
+    this.operatorProfileTaskBusy = false;
+    this.operatorUpdateBusy = false;
+    this.gatewayActionCount = 0;
+    this.windowsPrerequisiteTask = null;
   }
 
   async _hardenLinuxChromiumSandbox() {
@@ -70,35 +82,40 @@ class Backend {
       supported: false,
       hardened: false,
       changed: false,
-      restartRequired: false,
       currentProcessNoSandbox: false,
+      processArgvVerified: false,
       runtimeRoot: '',
       helper: '',
+      method: '',
       reason: 'Native packaged Linux runtime is unavailable.'
     };
-    if (process.platform !== 'linux' || !this.backendRoot) return base;
+    let currentProcessNoSandbox = false;
+    let processArgvVerified = false;
+    try {
+      const argv = fs.readFileSync('/proc/' + String(process.pid) + '/cmdline', 'utf8').split('\0').filter(Boolean);
+      currentProcessNoSandbox = argv.includes('--no-sandbox');
+      processArgvVerified = true;
+    } catch {}
+    if (process.platform !== 'linux' || !this.backendRoot) {
+      return { ...base, currentProcessNoSandbox, processArgvVerified };
+    }
     const runtimeRoot = path.dirname(process.execPath || '');
     const appRun = path.join(runtimeRoot, 'AppRun');
+    const localSandbox = path.join(runtimeRoot, 'chrome-sandbox');
     const helperScript = path.join(this.backendRoot, 'linux', 'harden_sandbox.py');
-    if (!runtimeRoot || !fs.existsSync(appRun) || !fs.existsSync(helperScript)) {
-      return { ...base, runtimeRoot };
+    if (!runtimeRoot || !fs.existsSync(helperScript) ||
+        (!fs.existsSync(appRun) && !fs.existsSync(localSandbox))) {
+      return { ...base, runtimeRoot, currentProcessNoSandbox, processArgvVerified };
     }
     try {
       const r = await run('python3', [helperScript, runtimeRoot], { timeout: 10000 });
       const parsed = JSON.parse(String(r.stdout || '{}').trim() || '{}');
-      let currentProcessNoSandbox = false;
-      try {
-        const argv = fs.readFileSync('/proc/' + String(process.pid) + '/cmdline', 'utf8').split('\0').filter(Boolean);
-        currentProcessNoSandbox = argv.includes('--no-sandbox');
-      } catch {}
       const result = {
         ...base,
         ...parsed,
-        runtimeRoot,
+        runtimeRoot: parsed.runtimeRoot || runtimeRoot,
         currentProcessNoSandbox,
-        restartRequired: !!parsed.hardened
-          && currentProcessNoSandbox
-          && process.env.OIG_SANDBOX_RESTARTED !== '1',
+        processArgvVerified,
         version: this.version,
         at: new Date().toISOString()
       };
@@ -108,7 +125,9 @@ class Backend {
       const result = {
         ...base,
         runtimeRoot,
-        reason: 'Sandbox hardening helper failed safely: ' + String(error?.message || error),
+        currentProcessNoSandbox,
+        processArgvVerified,
+        reason: 'Sandbox verification failed safely: ' + String(error?.message || error),
         version: this.version,
         at: new Date().toISOString()
       };
@@ -119,7 +138,17 @@ class Backend {
 
   async initialize() {
     if (this.platform === 'win32') {
-      const installed = path.join(process.env.LOCALAPPDATA || os.homedir(), 'OpenInternetGateway');
+      // Passive packaged-app QA must never replace the real user's backend.
+      // Require an explicit absolute scratch root and fail closed otherwise.
+      const captureOnly = process.env.OIG_CAPTURE_ONLY === '1';
+      const captureRoot = String(process.env.OIG_CAPTURE_ROOT || '');
+      if (captureOnly && (!path.isAbsolute(captureRoot) ||
+          path.parse(captureRoot).root === path.resolve(captureRoot))) {
+        throw new Error('Windows capture-only QA requires an isolated absolute OIG_CAPTURE_ROOT.');
+      }
+      const installed = captureOnly
+        ? path.join(captureRoot, 'backend-windows')
+        : path.join(process.env.LOCALAPPDATA || os.homedir(), 'OpenInternetGateway');
       const packaged = path.join(this.resourcesPath, 'backend', 'windows');
       const development = path.join(this.appPath, 'backend', 'windows');
       const resource = fs.existsSync(packaged) ? packaged : development;
@@ -192,6 +221,376 @@ class Backend {
       this.sandboxHardening = await this._hardenLinuxChromiumSandbox();
     }
     return { sandboxHardening: this.sandboxHardening };
+  }
+
+  // An offline user-selected import. Never register with the live relay pool,
+  // activate NetworkManager, or mark an untested connection as protected.
+  operatorProfileStatus() {
+    if (this.platform !== 'linux' || !this.backendRoot) {
+      return { supported: false, staged: false, readyForAutomaticConnection: false };
+    }
+    const file = path.join(this.backendRoot, 'common', 'operator-profiles', 'current.json');
+    try {
+      const meta = this._readJson(file, {}) || {};
+      if (meta.provider !== 'VPNBook' || meta.profilePolicyValidated !== true ||
+          !/^[a-f0-9]{64}$/.test(String(meta.profileSha256 || '')) ||
+          !/^[a-f0-9]{64}$/.test(String(meta.caDerSha256 || ''))) {
+        return { supported: true, staged: false, readyForAutomaticConnection: false };
+      }
+      const dir = path.dirname(file);
+      const name = String(meta.profile || '');
+      if (name !== meta.profileSha256 + '.ovpn') {
+        return { supported: true, staged: false, readyForAutomaticConnection: false };
+      }
+      const input = path.join(dir, name);
+      const indexStat = fs.lstatSync(file);
+      const directoryStat = fs.lstatSync(dir);
+      const profileStat = fs.lstatSync(input);
+      if (!indexStat.isFile() || indexStat.isSymbolicLink() || indexStat.nlink !== 1 ||
+          !directoryStat.isDirectory() || directoryStat.isSymbolicLink() ||
+          !profileStat.isFile() || profileStat.isSymbolicLink() || profileStat.nlink !== 1 ||
+          (indexStat.mode & 0o077) !== 0 || (profileStat.mode & 0o077) !== 0 ||
+          (directoryStat.mode & 0o077) !== 0 || profileStat.size > 256 * 1024) {
+        return { supported: true, staged: false, readyForAutomaticConnection: false };
+      }
+      const actual = crypto.createHash('sha256').update(fs.readFileSync(input)).digest('hex');
+      if (actual !== meta.profileSha256) {
+        return { supported: true, staged: false, readyForAutomaticConnection: false };
+      }
+      // Status reports structural staging only; it does not transfer trust to
+      // an active tunnel (the current VPNGate backend remains independent).
+      return {
+        supported: true, staged: true, provider: 'VPNBook',
+        remoteHost: String(meta.remoteHost || ''), remotePort: Number(meta.remotePort || 0),
+        profileSha256: meta.profileSha256,
+        profilePolicyValidated: true,
+        liveTlsVerified: false, connected: false, readyForAutomaticConnection: false
+      };
+    } catch {
+      return { supported: true, staged: false, readyForAutomaticConnection: false };
+    }
+  }
+
+  // Windows offline-only: inspect an operator-selected certificate AUTLOGIN
+  // file against independent pins. Never import, connect, persist a private
+  // key or promote a real TLS server-identity claim.
+  async inspectWindowsPinnedAutologinProfile(profilePath, options = {}) {
+    if (this.platform !== 'win32' || !this.backendRoot) {
+      throw new Error('Offline pinned AUTLOGIN inspection is Windows-only.');
+    }
+    if (this.operatorTrialBusy || this.operatorProfileTaskBusy ||
+        this.operatorUpdateBusy || this.gatewayActionCount > 0) {
+      throw new Error('Another gateway or profile task is active.');
+    }
+    const ca = String(options.caSha256 || '').replace(/:/g, '').toLowerCase();
+    const cn = String(options.peerCN || '');
+    const host = String(options.host || '');
+    const port = Number(options.port);
+    const protocol = String(options.protocol || '');
+    if (!/^[0-9a-f]{64}$/.test(ca) || !/^[A-Za-z0-9._-]{1,128}$/.test(cn) ||
+        !/^[A-Za-z0-9][A-Za-z0-9.-]{0,252}$/.test(host) ||
+        !Number.isSafeInteger(port) || port < 1 || port > 65535 ||
+        !['udp', 'tcp'].includes(protocol)) {
+      throw new Error('Independently authenticated CA, CN, endpoint and protocol are required.');
+    }
+    // Windows UNC/device paths can trigger network or device access even in
+    // an "offline" inspection. Accept only conventional local drive paths.
+    if (typeof profilePath !== 'string' || !/^[A-Za-z]:\\/.test(profilePath) ||
+        !path.win32.isAbsolute(profilePath) ||
+        !/\.ovpn$/i.test(profilePath) || profilePath.includes('\0')) {
+      throw new Error('Select a local .ovpn through the native chooser.');
+    }
+    const source = path.join(this.backendRoot, 'scripts', 'Operator-PinnedProfile.ps1');
+    if (!fs.existsSync(source)) throw new Error('Offline Windows policy helper is missing.');
+    const inspected = fs.lstatSync(profilePath);
+    if (!inspected.isFile() || inspected.isSymbolicLink() ||
+        inspected.size < 1 || inspected.size > 131072) {
+      throw new Error('The selected profile is not a bounded regular file.');
+    }
+    this.operatorProfileTaskBusy = true;
+    try {
+      // Hold the descriptor and read at most 128KiB. Windows lacks Node's
+      // O_NOFOLLOW flag: verify same on-disk object as the earlier lstat.
+      const sameFile = (a, b) => a.isFile() && b.isFile() &&
+        a.dev === b.dev && a.ino === b.ino &&
+        a.size === b.size && a.mtimeMs === b.mtimeMs;
+      const fd = fs.openSync(profilePath, 'r');
+      let bytes;
+      try {
+        const stat = fs.fstatSync(fd);
+        if (!sameFile(inspected, stat) ||
+            stat.size < 1 || stat.size > 131072) {
+          throw new Error('Profile file identity or size changed before inspection.');
+        }
+        const chunk = Buffer.alloc(stat.size);
+        let n = 0;
+        while (n < chunk.length) {
+          const got = fs.readSync(fd, chunk, n, chunk.length - n, null);
+          if (!got) break;
+          n += got;
+        }
+        const trailing = Buffer.alloc(1);
+        if (n !== chunk.length || fs.readSync(fd, trailing, 0, 1, null) !== 0 ||
+            !sameFile(stat, fs.fstatSync(fd)) ||
+            !sameFile(stat, fs.lstatSync(profilePath))) {
+          throw new Error('The selected profile changed during inspection.');
+        }
+        bytes = chunk;
+      } finally { fs.closeSync(fd); }
+      // Never normalize malformed UTF-8 to replacement characters before
+      // validating the pinned certificate and key.
+      const profileText = bytes.toString('utf8');
+      if (!Buffer.from(profileText, 'utf8').equals(bytes)) {
+        throw new Error('Profile is not valid UTF-8.');
+      }
+      const profileSha256 = crypto.createHash('sha256').update(bytes).digest('hex');
+      const payload = JSON.stringify({
+        text: profileText, caSha256: ca, peerCN: cn, host, port, protocol
+      });
+      // Only this constant script enters PowerShell argv. The profile (with
+      // private key) passes on stdin, never argv, environment or diagnostic log.
+      const script = [
+        "$ErrorActionPreference='Stop'",
+        ". $env:OIG_PINNED_POLICY_PATH",
+        "try {",
+        " $i=([Console]::In.ReadToEnd() | ConvertFrom-Json -ErrorAction Stop)",
+        " $v=Test-OigPinnedAutologinProfile -Text ([string]$i.text) -ExpectedHost ([string]$i.host) -ExpectedPort ([int]$i.port) -ExpectedProtocol ([string]$i.protocol) -PinnedCaSha256 ([string]$i.caSha256) -ExpectedPeerCN ([string]$i.peerCN)",
+        " $v | ConvertTo-Json -Compress -Depth 3",
+        "} catch {",
+        " '{\"valid\":false,\"pinnedConstraintsMatch\":false,\"transportAttempted\":false,\"serverIdentityVerified\":false,\"readyForAutomaticConnection\":false}'",
+        "}"
+      ].join('\n');
+      let result;
+      try {
+        result = await run(this._requireWindowsPwsh(),
+          ['-NoProfile', '-NonInteractive', '-Command', script], {
+            timeout: 12000, input: payload, env: { OIG_PINNED_POLICY_PATH: source }
+          });
+      } catch {
+        throw new Error('Offline Windows profile inspection did not complete.');
+      }
+      let parsed;
+      try { parsed = JSON.parse(String(result.stdout || '')); } catch {
+        throw new Error('Offline Windows profile inspection returned no valid result.');
+      }
+      if (parsed?.valid !== true || parsed?.pinnedConstraintsMatch !== true ||
+          parsed?.transportAttempted !== false || parsed?.serverIdentityVerified !== false ||
+          parsed?.readyForAutomaticConnection !== false ||
+          parsed?.caDerSha256 !== ca || parsed?.expectedPeerCN !== cn ||
+          parsed?.host !== host || parsed?.port !== port || parsed?.protocol !== protocol) {
+        throw new Error('Profile rejected: independent pin or AUTLOGIN policy did not match.');
+      }
+      return {
+        inspectedOffline: true, valid: true, pinnedConstraintsMatch: true,
+        host, port, protocol, caDerSha256: ca, expectedPeerCN: cn, profileSha256,
+        transportAttempted: false, serverIdentityVerified: false,
+        readyForAutomaticConnection: false, profilePersisted: false
+      };
+    } finally { this.operatorProfileTaskBusy = false; }
+  }
+
+  async stageOperatorProfile(profilePath, caSha256, peerCN) {
+    if (this.operatorTrialBusy) throw new Error('Cannot replace the operator profile while its trial is active.');
+    if (this.operatorProfileTaskBusy) throw new Error('Another operator-profile task is still running.');
+    if (this.operatorUpdateBusy) throw new Error('Cannot operate on profiles while an update is pending.');
+    if (this.platform !== 'linux' || !this.backendRoot) {
+      throw new Error('Operator profile import is available only on Linux.');
+    }
+    const sha = String(caSha256 || '').trim().replace(/:/g, '').toLowerCase();
+    const cn = String(peerCN || '').trim();
+    if (!/^[a-f0-9]{64}$/.test(sha) || !/^[A-Za-z0-9._-]{1,128}$/.test(cn)) {
+      throw new Error('An independently authenticated CA SHA-256 and exact server CN are required.');
+    }
+    if (typeof profilePath !== 'string' || !path.isAbsolute(profilePath) ||
+        !/\.ovpn$/i.test(profilePath) || profilePath.includes('\0')) {
+      throw new Error('Select a local .ovpn file through the native file chooser.');
+    }
+    const helper = path.join(this.backendRoot, 'linux', 'operator_profile.py');
+    if (!fs.existsSync(helper)) throw new Error('Linux operator-profile policy helper is not installed.');
+    this.operatorProfileTaskBusy = true;
+    try {
+      const result = await run('python3', [
+        '-B', helper, 'stage', '--profile', profilePath, '--ca-sha256', sha,
+        '--peer-cn', cn, '--common', path.join(this.backendRoot, 'common')
+      ], { cwd: this.backendRoot, timeout: 12000 });
+      const response = JSON.parse(result.stdout || '{}');
+      if (response.ok !== true || response.readyForAutomaticConnection !== false) {
+        throw new Error('Offline operator-profile validation did not complete safely.');
+      }
+      return { ...this.operatorProfileStatus(), imported: true };
+    } finally {
+      this.operatorProfileTaskBusy = false;
+    }
+  }
+
+  async checkOperatorNativeCompatibility() {
+    if (this.operatorTrialBusy) throw new Error('Cannot import the operator profile while its trial is active.');
+    if (this.operatorProfileTaskBusy) throw new Error('Another operator-profile task is still running.');
+    if (this.operatorUpdateBusy) throw new Error('Cannot operate on profiles while an update is pending.');
+    if (this.platform !== 'linux' || !this.backendRoot) {
+      throw new Error('Native operator-profile compatibility check is Linux-only.');
+    }
+    if (this.operatorProfileStatus().staged !== true) {
+      throw new Error('No verified, unchanged private operator profile is staged.');
+    }
+    const dir = path.join(this.backendRoot, 'common', 'operator-profiles');
+    const meta = this._readJson(path.join(dir, 'current.json'), {}) || {};
+    if (!/^[0-9a-f]{64}$/.test(String(meta.caDerSha256 || '')) ||
+        !/^[A-Za-z0-9._-]{1,128}$/.test(String(meta.expectedPeerCN || ''))) {
+      throw new Error('Stored operator identity constraint is invalid.');
+    }
+    const helper = path.join(this.backendRoot, 'linux', 'operator_profile.py');
+    if (!fs.existsSync(helper)) throw new Error('Operator-profile checker is missing.');
+    this.operatorProfileTaskBusy = true;
+    try {
+      const result = await run('python3', [
+        '-B', helper, 'native-check',
+        '--profile', path.join(dir, meta.profile),
+        '--ca-sha256', meta.caDerSha256,
+        '--peer-cn', meta.expectedPeerCN
+      ], { cwd: this.backendRoot, timeout: 20000 });
+      const response = JSON.parse(result.stdout || '{}');
+      if (response.ok !== true || response.nativeImportCompatible !== true ||
+          response.trustConstraintsPreserved !== true ||
+          response.temporaryProfileRemoved !== true ||
+          response.certificateArtifactsRemoved !== true ||
+          response.connectionActivated !== false ||
+          response.readyForAutomaticConnection !== false) {
+        throw new Error('Temporary NetworkManager import did not preserve peer trust or finish cleanup.');
+      }
+      return {
+        nativeImportCompatible: true, trustConstraintsPreserved: true,
+        temporaryProfileRemoved: true, certificateArtifactsRemoved: true,
+        connectionActivated: false, readyForAutomaticConnection: false,
+        liveTlsVerified: false
+      };
+    } finally {
+      this.operatorProfileTaskBusy = false;
+    }
+  }
+
+  // Read-only HTTPS lookup of publicly posted shared VPNBook credentials.
+  // Does not connect to a VPN or store the password.
+  async freeVpnBookCredentials() {
+    if (this.platform !== 'linux') throw new Error('Free operator credentials are Linux QA-only.');
+    if (this.operatorTrialBusy || this.operatorProfileTaskBusy ||
+        this.operatorUpdateBusy || this.gatewayActionCount > 0) {
+      throw new Error('Wait for the active gateway task before fetching credentials.');
+    }
+    const { fetchPublicLogin } = require('./vpnbook-public-credentials');
+    return fetchPublicLogin();
+  }
+
+  // Pure, read-only feasibility observation. This is NOT a full-device
+  // trial action; the separate live-route and rollback gate is not enabled.
+  async checkOperatorFullDevicePreflight() {
+    if (this.platform !== 'linux' || !this.backendRoot) {
+      throw new Error('Full-device preflight is Linux-only.');
+    }
+    if (this.operatorTrialBusy || this.operatorProfileTaskBusy ||
+        this.operatorUpdateBusy || this.gatewayActionCount > 0) {
+      throw new Error('Wait for current gateway tasks before a read-only preflight.');
+    }
+    if (this.operatorProfileStatus().staged !== true) {
+      throw new Error('A pinned offline provider profile must be staged first.');
+    }
+    const dir = path.join(this.backendRoot, 'common', 'operator-profiles');
+    const meta = this._readJson(path.join(dir, 'current.json'), {}) || {};
+    const helper = path.join(this.backendRoot, 'linux', 'operator_full_device.py');
+    if (!fs.existsSync(helper)) {
+      throw new Error('Read-only full-device preflight helper is unavailable.');
+    }
+    this.operatorProfileTaskBusy = true;
+    try {
+      const result = await run('python3', [
+        '-B', helper, 'preflight', '--profile', path.join(dir, meta.profile),
+        '--ca-sha256', meta.caDerSha256, '--peer-cn', meta.expectedPeerCN,
+        '--desired-state', path.join(this.backendRoot, 'state', 'desired-state')
+      ], { cwd: this.backendRoot, timeout: 26000 });
+      const data = JSON.parse(result.stdout || '{}');
+      if (data.ok !== true || !Array.isArray(data.blockers) ||
+          data.mode !== 'read-only-full-device-preflight' ||
+          data.pinnedProviderProfileChecked !== true ||
+          data.activationRequested !== false ||
+          data.independentRollbackArmed !== false ||
+          data.fullDevicePathEnabled !== false ||
+          data.fullDeviceTunnelVerified !== false ||
+          data.readyForAutomaticConnection !== false) {
+        throw new Error('Full-device feasibility observation was not fail-closed.');
+      }
+      return data;
+    } finally {
+      this.operatorProfileTaskBusy = false;
+    }
+  }
+
+  async operatorConnectionTrial(username, password) {
+    if (this.platform !== 'linux' || !this.backendRoot) {
+      throw new Error('Isolated provider trial is available only on Linux.');
+    }
+    if (this.operatorTrialBusy) throw new Error('A provider trial is already active.');
+    if (this.operatorUpdateBusy) throw new Error('Wait for the pending update to complete before an isolated provider trial.');
+    if (this.operatorProfileTaskBusy) throw new Error('Wait for operator-profile import/check to complete before its trial.');
+    if (this.gatewayActionCount > 0) throw new Error('Wait for the regular gateway operation to finish before an isolated provider trial.');
+    if (this.operatorProfileStatus().staged !== true) {
+      throw new Error('No privately staged and unchanged operator profile exists.');
+    }
+    if (!/^[A-Za-z0-9._@+-]{1,96}$/.test(username) ||
+        typeof password !== 'string' || password.length < 1 ||
+        password.length > 256 || /[^\x20-\x7e]/.test(password)) {
+      throw new Error('Invalid transient provider credentials.');
+    }
+    const intent = path.join(this.backendRoot, 'state', 'desired-state');
+    try {
+      if (fs.readFileSync(intent, 'utf8').trim() !== 'off') {
+        throw new Error('Disconnect the regular OIG gateway before starting an isolated trial.');
+      }
+    } catch (error) {
+      if (error.code === 'ENOENT') {
+        throw new Error('Cannot verify gateway disconnect intent; trial refused.');
+      }
+      throw error;
+    }
+    const dir = path.join(this.backendRoot, 'common', 'operator-profiles');
+    const meta = this._readJson(path.join(dir, 'current.json'), {}) || {};
+    const script = path.join(this.backendRoot, 'linux', 'operator_trial.py');
+    if (!fs.existsSync(script)) throw new Error('Linux trial helper is not installed.');
+    this.operatorTrialBusy = true;
+    try {
+      // Credential JSON exists only in JS memory and the Python stdin pipe;
+      // never pass the password by command argument, environment or file.
+      const result = await run('python3', [
+        '-B', script, 'trial', '--profile', path.join(dir, meta.profile),
+        '--ca-sha256', meta.caDerSha256, '--peer-cn', meta.expectedPeerCN,
+        '--timer-seconds', '90', '--hold-seconds', '3'
+      ], {
+        cwd: this.backendRoot, timeout: 90000,
+        input: JSON.stringify({ username, password })
+      });
+      const data = JSON.parse(result.stdout || '{}');
+      if (data.ok !== true || data.tempProfileRemoved !== true ||
+          data.certificateArtifactsRemoved !== true ||
+          data.independentTimerArmedBeforeActivation !== true ||
+          data.trustConstraintsPreserved !== true ||
+          data.identityVerifiedByApp !== true || data.liveTlsVerified !== true ||
+          data.peerCN !== meta.expectedPeerCN ||
+          data.caDerSha256 !== meta.caDerSha256 ||
+          data.trialTransport !== 'tls-authenticated-transport-active' ||
+          data.fullDeviceTunnelVerified !== false ||
+          data.readyForAutomaticConnection !== false) {
+        throw new Error('Trial TLS identity, scoped transport or complete cleanup was not confirmed.');
+      }
+      return {
+        ok: true, provider: 'VPNBook', transportAttempted: true,
+        trialTransport: data.trialTransport, tempProfileRemoved: true,
+        certificateArtifactsRemoved: true, trustConstraintsPreserved: true,
+        peerCN: data.peerCN, caDerSha256: data.caDerSha256,
+        identityVerifiedByApp: true, liveTlsVerified: true,
+        fullDeviceTunnelVerified: false, readyForAutomaticConnection: false
+      };
+    } finally {
+      this.operatorTrialBusy = false;
+    }
   }
 
   platformInfo() {
@@ -304,9 +703,36 @@ class Backend {
     });
   }
 
+  // The vendor MSI can install services/drivers. Never initiate that native
+  // system change while Windows reports any other VPN connection or tunnel.
+  // This is an observation only: exit 17=occupied, 18=unable to verify.
+  async _assertWindowsIndependentVpnInactive(ownedInterfaceIndex = 0) {
+    const script = path.join(this.backendRoot, 'scripts', 'Guard-IndependentVpn.ps1');
+    if (!fs.existsSync(script)) {
+      throw new Error('Cannot verify independent Windows VPN safety: packaged guard is missing.');
+    }
+    if (!Number.isSafeInteger(ownedInterfaceIndex) || ownedInterfaceIndex < 0 ||
+        ownedInterfaceIndex > 2147483647) {
+      throw new Error('Invalid OIG owned interface identity.');
+    }
+    const result = await run(this._requireWindowsPwsh(), [
+      '-NoProfile', '-NonInteractive', '-File', script,
+      '-OwnedInterfaceIndex', String(ownedInterfaceIndex)
+    ], { timeout: 15000, allowFailure: true });
+    if (result.code === 17) {
+      throw new Error('Another Windows VPN or tunnel is active. Prerequisite installation was refused to protect that connection. End the independent session yourself before first-time setup.');
+    }
+    if (result.code !== 0) {
+      throw new Error('Cannot verify independent Windows VPN state; refusing prerequisite system installation.');
+    }
+  }
+
   async _ensureWindowsConnector() {
     const connector = this._windowsConnectorPath();
     if (fs.existsSync(connector)) return { ready: true, installed: false, path: connector };
+    // Check before downloading and again immediately before UAC/MSI because
+    // a competing VPN may start while the verified installer is downloaded.
+    await this._assertWindowsIndependentVpnInactive();
     const dir = path.join(this.backendRoot, 'updates', 'prerequisites');
     const msi = path.join(dir, WINDOWS_OPENVPN_CONNECT.fileName);
     let sha256 = '';
@@ -332,12 +758,14 @@ class Backend {
     const elevate = [
       "$ErrorActionPreference='Stop'",
       "$msi='" + escapedMsi + "'",
-      "$msiArgs='/i \"' + $msi + '\" /passive /norestart'",
+      // The pinned MSI defaults AUTOSTART=yes and runs StartApp_CA after installation; keep the vendor GUI out of OIG's headless flow.
+      "$msiArgs='/i \"' + $msi + '\" /quiet /norestart AUTOSTART=no'",
       "try {",
       "  $p=Start-Process -FilePath 'msiexec.exe' -Verb RunAs -Wait -PassThru -ArgumentList $msiArgs",
       "  exit $p.ExitCode",
       "} catch { Write-Error $_.Exception.Message; exit 1223 }"
     ].join(';');
+    await this._assertWindowsIndependentVpnInactive();
     const install = await run(pwsh, ['-NoProfile','-Command',elevate], { timeout: 300000, allowFailure: true });
     if (![0, 3010, 1641].includes(Number(install.code))) {
       throw new Error('OpenVPN Connect prerequisite installation failed or administrator approval was cancelled (Windows Installer exit ' + install.code + '). Administrator approval is required once.');
@@ -350,8 +778,41 @@ class Backend {
 
   async _ensureWindowsRuntimePrerequisites() {
     const pwsh = this._requireWindowsPwsh();
+    const assertGuiClosed = async () => {
+      const interactive = await run(pwsh, [
+        '-NoProfile', '-NonInteractive', '-Command',
+        "$ErrorActionPreference='Stop';try{$p=Get-Process -Name 'OpenVPNConnect' -ErrorAction Stop;if($p){exit 17};exit 0}catch{if($_.FullyQualifiedErrorId -like 'NoProcessFoundForGivenName*'){exit 0};exit 18}"
+      ], { timeout: 10000, allowFailure: true });
+      if (interactive.code === 17) {
+        throw new Error('OpenVPN Connect is already running. Close the independent GUI before connecting through Open Internet Gateway. No OpenVPN process was closed.');
+      }
+      if (interactive.code !== 0) {
+        throw new Error('Cannot confirm OpenVPN Connect is closed; refusing a competing VPN operation.');
+      }
+    };
+    await assertGuiClosed();
     const openVpn = await this._ensureWindowsConnector();
+    // Recheck in case the vendor installer or another application opened the GUI.
+    await assertGuiClosed();
     return { powerShell7: { ready: true, path: pwsh }, openVpnConnect: openVpn };
+  }
+
+  // One shared first-run/Connect prerequisite operation: duplicate installer
+  // downloads and competing MSI executions must never race. This never
+  // activates a VPN; Windows controls one-time elevation through native UAC.
+  async prepareWindowsInstallerPrerequisites() {
+    if (this.platform !== 'win32') return { supported: false };
+    if (!this.backendRoot) throw new Error('Windows backend is not initialized.');
+    if (process.env.OIG_CAPTURE_ONLY === '1') {
+      return { supported: true, ready: false, skipped: 'disposable-qa-capture' };
+    }
+    if (this.windowsPrerequisiteTask) return this.windowsPrerequisiteTask;
+    const task = this._ensureWindowsRuntimePrerequisites();
+    this.windowsPrerequisiteTask = task;
+    try { return await task; }
+    finally {
+      if (this.windowsPrerequisiteTask === task) this.windowsPrerequisiteTask = null;
+    }
   }
 
   async _windows(action, extraArgs = []) {
@@ -382,7 +843,7 @@ class Backend {
         "$cf=@(curl.exe -4 --max-time 4 -s https://www.cloudflare.com/cdn-cgi/trace)",
         "$ip=[string]((($cf|Where-Object{$_ -like 'ip=*'}|Select-Object -First 1)-replace '^ip=',''));$ip=$ip.Trim()",
         "$loc=[string]((($cf|Where-Object{$_ -like 'loc=*'}|Select-Object -First 1)-replace '^loc=',''));$loc=$loc.Trim()",
-        "$dns=@(Resolve-DnsName dns.google -Type A -DnsOnly -ErrorAction SilentlyContinue|Where-Object IPAddress|Select-Object -ExpandProperty IPAddress)",
+        "$dns=@(Resolve-DnsName dns.google -Type A -DnsOnly -ErrorAction SilentlyContinue|Where-Object {$_.IPAddress -and $_.Section -eq 'Answer'}|Select-Object -ExpandProperty IPAddress)",
         "$poison=if($dns.Count -eq 0){$null}else{@($dns|Where-Object{$_ -notin @('8.8.8.8','8.8.4.4')}).Count -gt 0}",
         "$task=Get-ScheduledTask -TaskName 'OpenInternetGateway-AutoRecovery' -ErrorAction SilentlyContinue",
         "$svc=Get-Service OVPNConnectorService -ErrorAction SilentlyContinue",
@@ -391,10 +852,10 @@ class Backend {
         "$desiredPath='" + path.join(this.backendRoot, 'state', 'desired-state.json').replace(/'/g,"''") + "'",
         "$desired='off';if(Test-Path $desiredPath){try{$desired=[string](Get-Content -Raw $desiredPath|ConvertFrom-Json).desired}catch{}}",
         "$state='" + statePath + "'",
-        "$relay='';$profileIP='';$profileCountry='';if(Test-Path $state){try{$s=Get-Content -Raw $state|ConvertFrom-Json;$relay=([string]$s.serverIP)+':'+([string]$s.port);$profileIP=[string]$s.observedIP;if(-not $profileIP){$profileIP=[string]$s.serverIP};$profileCountry=[string]$s.country;if(-not $profileCountry){$profileCountry=[string]$s.configuredCountry}}catch{}}",
+        "$relay='';$profileIP='';$profileCountry='';$profileSha='';if(Test-Path $state){try{$s=Get-Content -Raw $state|ConvertFrom-Json;$relay=([string]$s.serverIP)+':'+([string]$s.port);$profileIP=[string]$s.observedIP;if(-not $profileIP){$profileIP=[string]$s.serverIP};$profileSha=[string]$s.sha256;$profileCountry=[string]$s.country;if(-not $profileCountry){$profileCountry=[string]$s.configuredCountry}}catch{}}",
         "$managedActive=($svc -and $svc.Status -eq 'Running')",
-        "$probeDegraded=$false;if(-not $loc -and $managedActive -and $routes.Count -ge 2 -and $routePairValid -and $ipv6Safe -and $poison -eq $false -and $profileCountry){$loc=$profileCountry;if(-not $ip){$ip=$profileIP};$probeDegraded=$true}",
-        "[ordered]@{connected=($routes.Count -ge 2 -and $routePairValid -and $ipv6Safe -and $managedActive -and $loc -and $loc -ne 'IR' -and $poison -eq $false);ip=$ip.Trim();country=$loc.Trim();dns=$dns;poison=$poison;fullRoutes=$(if($routePairValid){2}else{0});ipv6LeakRisk=[bool]($routePairValid -and -not $ipv6Safe);relay=$relay;autoRecovery=[bool]$task;autoRecoveryState=$(if(-not $task){'Missing'}elseif(-not [bool]$task.Settings.Enabled){'Disabled'}else{[string]$task.State});interface=$(if($routePairValid){[string]($routes|Select-Object -First 1 -ExpandProperty InterfaceAlias -ErrorAction SilentlyContinue)}else{''});engine=$(if($svc){'HeadlessConnector'}else{'Missing'});connectorService=$(if($svc){[string]$svc.Status}else{'Missing'});managedTunnelActive=[bool]$managedActive;healthProbeDegraded=[bool]$probeDegraded;desiredState=$desired;failureStreak=$(if($guard){[int]$guard.failureStreak}else{0});rotations24h=$(if($guard){@($guard.rotations).Count}else{0})}|ConvertTo-Json -Compress"
+        "$probeDegraded=$false;if(-not $loc -and $managedActive -and $routePairValid -and $ipv6Safe -and $poison -eq $false -and $profileSha -match '^[a-fA-F0-9]{64}$' -and $relay -and $relay -ne ':' -and $profileCountry){$loc=$profileCountry;if(-not $ip){$ip=$profileIP};$probeDegraded=$true}",
+        "[ordered]@{connected=($desired -eq 'on' -and $routes.Count -ge 2 -and $routePairValid -and $ipv6Safe -and $managedActive -and $profileSha -match '^[a-fA-F0-9]{64}$' -and $relay -and $relay -ne ':' -and $profileCountry -and $loc -eq $profileCountry -and $loc -ne 'IR' -and $poison -eq $false);ip=$ip.Trim();country=$loc.Trim();dns=$dns;poison=$poison;fullRoutes=$(if($routePairValid){2}else{0});ipv6LeakRisk=[bool]($routePairValid -and -not $ipv6Safe);relay=$relay;autoRecovery=[bool]$task;autoRecoveryState=$(if(-not $task){'Missing'}elseif(-not [bool]$task.Settings.Enabled){'Disabled'}else{[string]$task.State});interface=$(if($routePairValid){[string]($routes|Select-Object -First 1 -ExpandProperty InterfaceAlias -ErrorAction SilentlyContinue)}else{''});managedInterfaceIndex=$(if($routePairValid){[int]$routes[0].InterfaceIndex}else{0});engine=$(if($svc){'HeadlessConnector'}else{'Missing'});connectorService=$(if($svc){[string]$svc.Status}else{'Missing'});managedTunnelActive=[bool]$managedActive;healthProbeDegraded=[bool]$probeDegraded;desiredState=$desired;failureStreak=$(if($guard){[int]$guard.failureStreak}else{0});rotations24h=$(if($guard){@($guard.rotations).Count}else{0})}|ConvertTo-Json -Compress"
       ].join(';');
       const r = await run(pwsh, ['-NoProfile','-Command',script], { timeout: 12000 });
       return JSON.parse(r.stdout || '{}');
@@ -419,12 +880,22 @@ class Backend {
     return { ok: true, output: r.stdout || r.stderr };
   }
 
-  async _linux(action, extraArgs = []) {
+  async _linux(action, extraArgs = [], { expectedCancelEpoch } = {}) {
     const script = path.join(this.backendRoot, 'linux', 'oig-linux.sh');
     const env = {
       OIG_HOME: this.backendRoot,
       OIG_COMMON: path.join(this.backendRoot, 'common')
     };
+    // Intended only as a stale-request fence, not a privilege/identity
+    // attestation. An older exact-profile recovery must not reconnect after
+    // a newer Disconnect, even if its child launches after that Disconnect.
+    if (expectedCancelEpoch !== undefined) {
+      if (typeof expectedCancelEpoch !== 'string' ||
+          !/^(?:initial|[0-9]+\.[0-9]+\.[0-9]+)$/.test(expectedCancelEpoch)) {
+        throw new Error('Invalid Linux gateway cancellation epoch.');
+      }
+      env.OIG_EXPECT_DISCONNECT_GENERATION = expectedCancelEpoch;
+    }
     const r = await run('/bin/bash', [script, action, ...extraArgs], {
       cwd: this.backendRoot,
       env,
@@ -529,6 +1000,29 @@ class Backend {
   }
 
   async connectProfile(sha256) {
+    const readLinuxCancelEpoch = () => {
+      if (this.platform !== 'linux') return null;
+      try {
+        return fs.readFileSync(path.join(this.backendRoot, 'state',
+          'disconnect-generation'), 'utf8').trim();
+      } catch (error) {
+        return error?.code === 'ENOENT' ? 'initial' : null;
+      }
+    };
+    const initialCancelEpoch = readLinuxCancelEpoch();
+    const supersededByLinuxDisconnect = () => (
+      this.platform === 'linux' &&
+      (initialCancelEpoch === null ||
+       readLinuxCancelEpoch() !== initialCancelEpoch)
+    );
+    const linuxRecoveryForbidden = () => {
+      if (this.platform !== 'linux') return false;
+      if (supersededByLinuxDisconnect()) return true;
+      try {
+        return fs.readFileSync(path.join(this.backendRoot, 'state',
+          'desired-state'), 'utf8').trim() !== 'on';
+      } catch { return true; }
+    };
     const wanted = String(sha256 || '').toLowerCase();
     if (!wanted) throw new Error('Profile SHA-256 is required.');
     const list = await this.profiles();
@@ -549,6 +1043,9 @@ class Backend {
 
     const request = path.join(this.backendRoot, 'state', 'exact-profile.request');
     const requestExact = async (sha, country, host) => {
+      if (supersededByLinuxDisconnect()) {
+        throw new Error('Relay switch canceled by a newer Disconnect.');
+      }
       // Both Windows and Linux receive the selected SHA explicitly. Legacy
       // request files are removed so an old/stale exact request can never
       // affect a later app session.
@@ -560,9 +1057,12 @@ class Backend {
         message: 'Switching to ' + (country || 'selected') + ' relay ' + (host || '') + '…'
       });
       if (this.platform === 'win32') await this._windows('connect', ['-ProfileSha', sha]);
-      else await this._linux('connect-profile', [sha]);
+      else await this._linux('connect-profile', [sha], {
+        expectedCancelEpoch: initialCancelEpoch
+      });
     };
     const restorePrevious = async () => {
+      if (linuxRecoveryForbidden()) return false;
       if (!previousSha || previousSha === wanted) return false;
       this.emit({
         type: 'progress',
@@ -589,7 +1089,7 @@ class Backend {
       status: await this.status()
     });
     const recoverAnyLinux = async () => {
-      if (this.platform !== 'linux') return false;
+      if (this.platform !== 'linux' || linuxRecoveryForbidden()) return false;
       this.emit({
         type: 'progress',
         action: 'connect-profile',
@@ -597,7 +1097,10 @@ class Backend {
         message: 'Exact rollback is unavailable. Recovering with another validated relay…'
       });
       try {
-        await this._linux('connect');
+        await this._linux('connect', [], {
+          expectedCancelEpoch: initialCancelEpoch
+        });
+        if (linuxRecoveryForbidden()) return false;
         const recoveredStatus = await this.status();
         const recovered = this._readJson(this._profileStatePath(), {}) || {};
         const recoveredSha = String(recovered.sha256 || '').toLowerCase();
@@ -618,6 +1121,9 @@ class Backend {
       await requestExact(wanted, profile.country, profile.host || profile.ip);
     } catch {
       try { fs.unlinkSync(request); } catch {}
+      if (linuxRecoveryForbidden()) {
+        throw new Error('Relay switch canceled by Disconnect; automatic recovery was suppressed.');
+      }
       const restored = await restorePrevious();
       if (restored) return recoveredResult(
         'SELECTED_RELAY_FAILED_RESTORED',
@@ -630,6 +1136,9 @@ class Backend {
       throw new Error('Selected relay failed validation, and neither exact rollback nor general recovery could restore protection. Run Repair now.');
     }
 
+    if (linuxRecoveryForbidden()) {
+      throw new Error('Relay switch canceled by Disconnect; automatic recovery was suppressed.');
+    }
     this.emit({
       type: 'progress',
       action: 'connect-profile',
@@ -670,18 +1179,24 @@ class Backend {
   async _directInternetPath() {
     if (this.platform === 'win32') {
       const script = [
-        "$routes=@(Get-NetRoute -AddressFamily IPv4 -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue|Where-Object{$_.InterfaceAlias -notmatch 'OpenVPN|TAP|Wintun|OIG|WireGuard|Cloudflare|vEthernet|Loopback'}|Sort-Object RouteMetric,InterfaceMetric)",
-        "$r=$routes|Where-Object{(Get-NetAdapter -InterfaceIndex $_.InterfaceIndex -ErrorAction SilentlyContinue).HardwareInterface}|Select-Object -First 1",
-        "if(-not $r){$r=$routes|Select-Object -First 1}",
-        "if(-not $r){throw 'No physical IPv4 Internet route was found.'}",
-        "$a=Get-NetAdapter -InterfaceIndex $r.InterfaceIndex -ErrorAction SilentlyContinue",
-        "$ip=Get-NetIPAddress -AddressFamily IPv4 -InterfaceIndex $r.InterfaceIndex -ErrorAction SilentlyContinue|Where-Object{$_.IPAddress -notlike '169.254*'}|Select-Object -First 1",
-        "if(-not $ip){throw 'Physical Internet adapter has no IPv4 address.'}",
+        "$ErrorActionPreference='Stop'",
+        // Several physical adapters can each retain a 0/0 route. Select the
+        // Windows *effective* source and route, not the first physical 0/0.
+        "$chosen=@(Find-NetRoute -RemoteIPAddress '1.1.1.1' -ErrorAction Stop)",
+        "$sources=@($chosen|Where-Object{$_.IPAddress -and -not $_.DestinationPrefix})",
+        "$routes=@($chosen|Where-Object{$_.DestinationPrefix})",
+        "if($sources.Count -ne 1 -or $routes.Count -ne 1){throw 'Effective ISP route is missing or ambiguous'}",
+        "$r=$routes[0]",
+        "$a=Get-NetAdapter -InterfaceIndex $r.InterfaceIndex -ErrorAction Stop",
+        "if(-not $a.HardwareInterface -or $a.Name -match 'OpenVPN|TAP|Wintun|OIG|WireGuard|Cloudflare|vEthernet|Loopback'){throw 'Winning route is not a physical ISP adapter'}",
+        "if([int]$sources[0].InterfaceIndex -ne [int]$r.InterfaceIndex){throw 'Winning route and source adapter mismatch'}",
+        "$ip=Get-NetIPAddress -AddressFamily IPv4 -InterfaceIndex $r.InterfaceIndex -ErrorAction Stop|Where-Object{$_.IPAddress -eq [string]$sources[0].IPAddress -and $_.AddressState -eq 'Preferred'}|Select-Object -First 1",
+        "if(-not $ip){throw 'Winning physical adapter source IPv4 is missing or not preferred'}",
         "[ordered]@{interface=[string]$a.Name;index=[int]$r.InterfaceIndex;ip=[string]$ip.IPAddress;gateway=[string]$r.NextHop}|ConvertTo-Json -Compress"
       ].join(';');
       const r = await run(this._requireWindowsPwsh(), ['-NoProfile','-Command',script], { timeout: 5000 });
       const info = JSON.parse(r.stdout || '{}');
-      return {
+      const physical = {
         interface: String(info.interface || ''),
         index: Number(info.index || 0),
         localIP: String(info.ip || ''),
@@ -689,6 +1204,10 @@ class Backend {
         curlInterface: 'host!' + String(info.ip || ''),
         bindMode: 'physical-ip'
       };
+      // Windows curl host!IP binds the source, not the winning route.
+      // Validate the physical egress route without modifying the OS.
+      await this._assertWindowsDirectEgress(physical, '1.1.1.1');
+      return physical;
     }
 
     if (this.platform === 'linux') {
@@ -726,6 +1245,44 @@ class Backend {
     throw new Error('Direct Internet test is supported only on Windows and Linux.');
   }
 
+  async _assertWindowsDirectEgress(pathInfo, remoteIPv4) {
+    if (this.platform !== 'win32') return;
+    const destination = String(remoteIPv4 || '').trim();
+    const local = String(pathInfo?.localIP || '').trim();
+    const index = Number(pathInfo?.index);
+    if (net.isIP(destination) !== 4 || net.isIP(local) !== 4 ||
+        !Number.isSafeInteger(index) || index < 1) {
+      throw new Error('Cannot validate direct ISP route: invalid remote/source address or physical adapter.');
+    }
+    const script = [
+      "$ErrorActionPreference='Stop'",
+      "$chosen=@(Find-NetRoute -RemoteIPAddress $env:OIG_DIRECT_REMOTE_IPV4 -ErrorAction Stop)",
+      "$sources=@($chosen|Where-Object{$_.IPAddress -and -not $_.DestinationPrefix})",
+      "$routes=@($chosen|Where-Object{$_.DestinationPrefix})",
+      "if($sources.Count -ne 1 -or $routes.Count -ne 1){throw 'Effective IPv4 route is absent or ambiguous'}",
+      "if([int]$sources[0].InterfaceIndex -ne [int]$env:OIG_DIRECT_IFINDEX -or [int]$routes[0].InterfaceIndex -ne [int]$env:OIG_DIRECT_IFINDEX){throw 'VPN or another route overrides the physical ISP interface'}",
+      "if([string]$sources[0].IPAddress -ne [string]$env:OIG_DIRECT_LOCAL_IPV4){throw 'Effective egress source differs from physical ISP address'}",
+      "'VERIFIED_DIRECT_ROUTE'"
+    ].join(';');
+    let result;
+    try {
+      result = await run(this._requireWindowsPwsh(),
+        ['-NoProfile','-NonInteractive','-Command',script], {
+          timeout: 7500,
+          env: {
+            OIG_DIRECT_REMOTE_IPV4: destination,
+            OIG_DIRECT_LOCAL_IPV4: local,
+            OIG_DIRECT_IFINDEX: String(index)
+          }
+        });
+    } catch {
+      throw new Error('Direct ISP route cannot be verified on Windows (VPN/split routing may be active); test refused without changing network settings.');
+    }
+    if (String(result.stdout || '').trim() !== 'VERIFIED_DIRECT_ROUTE') {
+      throw new Error('Direct ISP route could not be verified; test refused rather than attributing VPN traffic to the ISP.');
+    }
+  }
+
   _directCurlArgs(pathInfo) {
     return ['-4','--noproxy','*','--interface',pathInfo.curlInterface];
   }
@@ -734,7 +1291,7 @@ class Backend {
     const marker = '__OIG_DIRECT_META__';
     const r = await run('curl', [
       ...this._directCurlArgs(pathInfo),'-L','--fail','--connect-timeout','5','--max-time','8',
-      '-sS','-w','\\n' + marker + '%{http_code}|%{time_starttransfer}',
+      '-sS','-w','\\n' + marker + '%{http_code}|%{time_starttransfer}|%{remote_ip}',
       'https://www.cloudflare.com/cdn-cgi/trace'
     ], { timeout: 11000, allowFailure: true });
     const raw = String(r.stdout || '');
@@ -751,7 +1308,8 @@ class Backend {
       publicIP: ip,
       country,
       colo,
-      httpsLatencyMs: Number.isFinite(seconds) ? Math.round(seconds * 1000 * 10) / 10 : null
+      httpsLatencyMs: Number.isFinite(seconds) ? Math.round(seconds * 1000 * 10) / 10 : null,
+      remoteIP: String(meta[2] || '').trim()
     };
   }
 
@@ -833,11 +1391,12 @@ class Backend {
     const downBytes = 5_000_000;
     const down = await run('curl', [
       ...this._directCurlArgs(pathInfo),'-L','--fail','--connect-timeout','6','--max-time','20',
-      '-sS','-o',sink,'-w','%{http_code}|%{time_total}|%{speed_download}',
+      '-sS','-o',sink,'-w','%{http_code}|%{time_total}|%{speed_download}|%{remote_ip}|%{size_download}',
       'https://speed.cloudflare.com/__down?bytes=' + String(downBytes)
     ], { timeout: 24000, allowFailure: true });
-    const [downCode, downTime, downSpeed] = String(down.stdout || '').trim().split('|');
-    if (downCode !== '200' || !(Number(downSpeed) > 0)) throw new Error('Direct ISP download test did not complete successfully.');
+    const [downCode, downTime, downSpeed, downloadRemoteIP, actualDownBytes] = String(down.stdout || '').trim().split('|');
+    if (down.code !== 0 || downCode !== '200' || !(Number(downSpeed) > 0) ||
+        Number(actualDownBytes) !== downBytes) throw new Error('Direct ISP download test did not complete successfully.');
 
     const upBytes = 1_000_000;
     const tempUpload = path.join(this.backendRoot, 'state', 'direct-benchmark-upload.bin');
@@ -847,14 +1406,15 @@ class Backend {
     try {
       up = await run('curl', [
         ...this._directCurlArgs(pathInfo),'-L','--fail','--connect-timeout','6','--max-time','20',
-        '-sS','-o',sink,'-w','%{http_code}|%{time_total}|%{speed_upload}',
+        '-sS','-o',sink,'-w','%{http_code}|%{time_total}|%{speed_upload}|%{remote_ip}|%{size_upload}',
         '-X','POST','--data-binary','@' + tempUpload,'https://speed.cloudflare.com/__up'
       ], { timeout: 24000, allowFailure: true });
     } finally {
       try { fs.unlinkSync(tempUpload); } catch {}
     }
-    const [upCode, upTime, upSpeed] = String(up.stdout || '').trim().split('|');
-    if (upCode !== '200' || !(Number(upSpeed) > 0)) throw new Error('Direct ISP upload test did not complete successfully.');
+    const [upCode, upTime, upSpeed, uploadRemoteIP, actualUpBytes] = String(up.stdout || '').trim().split('|');
+    if (up.code !== 0 || upCode !== '200' || !(Number(upSpeed) > 0) ||
+        Number(actualUpBytes) !== upBytes) throw new Error('Direct ISP upload test did not complete successfully.');
 
     let normalEgress = { ip: '', country: '' };
     try {
@@ -866,6 +1426,14 @@ class Backend {
       };
     } catch {}
 
+    // Validate the actual Cloudflare remote IPv4 addresses after transfer,
+    // not only the 1.1.1.1 preflight; no routing or DNS changes are made.
+    if (this.platform === 'win32') {
+      for (const remoteIP of new Set([trace.remoteIP, downloadRemoteIP, uploadRemoteIP])) {
+        await this._assertWindowsDirectEgress(pathInfo, remoteIP);
+      }
+    }
+
     const result = {
       at: new Date().toISOString(),
       mode: 'direct-physical-internet',
@@ -874,6 +1442,7 @@ class Backend {
       gateway: pathInfo.gateway,
       bindMode: pathInfo.bindMode,
       proxyBypassed: true,
+      effectiveRouteVerified: this.platform === 'win32' ? true : null,
       publicIP: trace.publicIP,
       country: trace.country,
       colo: trace.colo,
@@ -881,8 +1450,8 @@ class Backend {
       httpsLatencyMs: trace.httpsLatencyMs,
       downloadMbps: Math.round(Number(downSpeed) * 8 / 1_000_000 * 100) / 100,
       uploadMbps: Math.round(Number(upSpeed) * 8 / 1_000_000 * 100) / 100,
-      downloadBytes: downBytes,
-      uploadBytes: upBytes,
+      downloadBytes: Number(actualDownBytes),
+      uploadBytes: Number(actualUpBytes),
       downloadSeconds: Number(downTime) || null,
       uploadSeconds: Number(upTime) || null,
       endpoint: 'speed.cloudflare.com',
@@ -935,11 +1504,62 @@ class Backend {
     };
   }
 
-  async _httpsLatencyMs(sink) {
+  async _activeTunnelCurlArgs(status) {
+    // Connected by itself is not proof that a speed transfer uses the VPN.
+    // Refuse to label physical-ISP traffic as tunnel throughput when the
+    // actual effective routes have not been verified.
+    if (!status?.connected || Number(status.fullRoutes || 0) < 2) {
+      throw new Error('An active full-route VPN is required for tunnel speed measurement.');
+    }
+    if (this.platform === 'linux') {
+      const vpnInterface = String(status.interface || '');
+      if (!/^(?:tun|tap)[A-Za-z0-9_.:-]{0,12}$/.test(vpnInterface)) {
+        throw new Error('VPN tunnel interface cannot be verified; speed test refused to use the physical ISP.');
+      }
+      // A bound transfer cannot silently fall back to the physical interface
+      // when NetworkManager disconnects during a speed test.
+      return ['-4', '--noproxy', '*', '--interface', 'if!' + vpnInterface];
+    }
+    if (this.platform === 'win32') {
+      const vpnAlias = String(status.interface || '').trim();
+      if (!vpnAlias || vpnAlias.length > 160 || /[\x00-\x1f\x7f]/.test(vpnAlias)) {
+        throw new Error('Windows managed VPN interface is missing or invalid; tunnel speed test refused.');
+      }
+      // Both active /1 routes must belong to the SAME reported VPN interface.
+      // Resolve only its assigned IPv4, not a physical network address.
+      // A child-only environment variable prevents PowerShell string injection.
+      const script = [
+        "$ErrorActionPreference='Stop'",
+        "$name=$env:OIG_SPEED_TUNNEL_IFACE",
+        "$routes=@(Get-NetRoute -AddressFamily IPv4 -ErrorAction Stop|Where-Object{$_.DestinationPrefix -in @('0.0.0.0/1','128.0.0.0/1')})",
+        "if($routes.Count -ne 2){throw 'The managed VPN full-route pair is missing or ambiguous'}",
+        "$matched=@($routes|Where-Object{$_.InterfaceAlias -eq $name})",
+        "$indexes=@($matched|Select-Object -ExpandProperty InterfaceIndex -Unique)",
+        "$prefixes=@($matched|Select-Object -ExpandProperty DestinationPrefix -Unique)",
+        "if($matched.Count -ne 2 -or $indexes.Count -ne 1 -or $prefixes.Count -ne 2){throw 'Full VPN routes do not share one verified adapter'}",
+        "$addresses=@(Get-NetIPAddress -AddressFamily IPv4 -InterfaceIndex $indexes[0] -ErrorAction Stop|Where-Object{$_.AddressState -eq 'Preferred' -and $_.IPAddress -notlike '169.254.*' -and $_.IPAddress -notlike '127.*' -and $_.IPAddress -notlike '0.*'})",
+        "if($addresses.Count -ne 1){throw 'VPN adapter IPv4 source is missing or ambiguous'}",
+        "[string]$addresses[0].IPAddress"
+      ].join(';');
+      const found = await run(this._requireWindowsPwsh(), ['-NoProfile','-NonInteractive','-Command',script], {
+        timeout: 8000, env: { OIG_SPEED_TUNNEL_IFACE: vpnAlias }
+      });
+      const sourceIP = String(found.stdout || '').trim();
+      if (net.isIP(sourceIP) !== 4 || /^(?:0|127|169\.254|22[4-9]|23\d)\./.test(sourceIP)) {
+        throw new Error('Windows VPN adapter has no trustworthy IPv4 source for tunnel speed.');
+      }
+      // Curl's host! prefix binds every HTTPS/GET/POST socket to the
+      // VPN-assigned source address instead of the ordinary physical ISP.
+      return ['-4', '--noproxy', '*', '--interface', 'host!' + sourceIP];
+    }
+    throw new Error('Tunnel speed measurement is unsupported on this platform.');
+  }
+
+  async _httpsLatencyMs(sink, curlPathArgs = ['-4', '--noproxy', '*']) {
     const samples = [];
     for (let i = 0; i < 2; i++) {
       const r = await run('curl', [
-        '-4','--noproxy','*','-L','--max-time','5','-sS','-o',sink,'-w','%{http_code}|%{time_starttransfer}',
+        ...curlPathArgs,'-L','--max-time','5','-sS','-o',sink,'-w','%{http_code}|%{time_starttransfer}',
         'https://www.cloudflare.com/cdn-cgi/trace'
       ], { timeout: 7000, allowFailure: true });
       const [code, seconds] = String(r.stdout || '').trim().split('|');
@@ -954,23 +1574,40 @@ class Backend {
   async benchmarkActive() {
     const status = await this.status();
     if (!status.connected) throw new Error('Connect a relay before running a real throughput test.');
+    const tunnelCurlArgs = await this._activeTunnelCurlArgs(status);
     const inventory = await this.profiles(status);
     const active = inventory.profiles.find(p => p.active);
     if (!active) throw new Error('The active relay could not be mapped to the config inventory.');
 
     const sink = this.platform === 'win32' ? 'NUL' : '/dev/null';
     const [latencyMs, icmpPingMs] = await Promise.all([
-      this._httpsLatencyMs(sink),
+      this._httpsLatencyMs(sink, tunnelCurlArgs),
       this._icmpPing(active.ip)
     ]);
 
     const downBytes = 2_000_000;
-    const down = await run('curl', [
-      '-4','--noproxy','*','-L','--max-time','12','-sS','-o',sink,'-w','%{http_code}|%{time_total}|%{speed_download}',
+    const downloadArgs = [
+      ...tunnelCurlArgs,'-L','--connect-timeout','8','--max-time','20','-sS','-o',sink,
+      '-w','%{http_code}|%{time_total}|%{speed_download}|%{size_download}',
       'https://speed.cloudflare.com/__down?bytes=' + String(downBytes)
-    ], { timeout: 15000, allowFailure: true });
-    const [downCode, downTime, downSpeed] = String(down.stdout || '').trim().split('|');
-    if (downCode !== '200' || !(Number(downSpeed) > 0)) throw new Error('Real download test did not complete successfully.');
+    ];
+    let down;
+    let downloadAttempts = 0;
+    // A public exit relay or Cloudflare may briefly refuse a single HTTPS
+    // transfer. Retry only on the SAME verified VPN-bound source; final
+    // tunnel/interface/relay verification below remains mandatory.
+    for (let attempt = 0; attempt < 2; attempt++) {
+      downloadAttempts++;
+      down = await run('curl', downloadArgs, { timeout: 24000, allowFailure: true });
+      const [code,,speed,actualBytes] = String(down.stdout || '').trim().split('|');
+      if (down.code === 0 && code === '200' && Number(speed) > 0 &&
+          Number(actualBytes) === downBytes) break;
+    }
+    const [downCode, downTime, downSpeed, downloadedBytes] = String(down?.stdout || '').trim().split('|');
+    if (down?.code !== 0 || downCode !== '200' || !(Number(downSpeed) > 0) ||
+        Number(downloadedBytes) !== downBytes) {
+      throw new Error('Real download test did not complete successfully after a bounded retry.');
+    }
 
     const upBytes = 512_000;
     const tempUpload = path.join(this.backendRoot, 'state', 'benchmark-upload.bin');
@@ -980,20 +1617,42 @@ class Backend {
     let uploadAttempts = 0;
     try {
       const uploadArgs = [
-        '-4','--noproxy','*','-L','--connect-timeout','8','--max-time','20','-sS','-o',sink,'-w','%{http_code}|%{time_total}|%{speed_upload}',
+        ...tunnelCurlArgs,'-L','--connect-timeout','8','--max-time','20','-sS','-o',sink,'-w','%{http_code}|%{time_total}|%{speed_upload}|%{size_upload}',
         '-X','POST','--data-binary','@' + tempUpload,'https://speed.cloudflare.com/__up'
       ];
       for (let attempt = 0; attempt < 2; attempt++) {
         uploadAttempts++;
         up = await run('curl', uploadArgs, { timeout: 24000, allowFailure: true });
-        const [code,,speed] = String(up.stdout || '').trim().split('|');
-        if (code === '200' && Number(speed) > 0) break;
+        const [code,,speed,actualBytes] = String(up.stdout || '').trim().split('|');
+        if (up.code === 0 && code === '200' && Number(speed) > 0 &&
+            Number(actualBytes) === upBytes) break;
       }
     } finally {
       try { fs.unlinkSync(tempUpload); } catch {}
     }
-    const [upCode, upTime, upSpeed] = String(up?.stdout || '').trim().split('|');
-    if (upCode !== '200' || !(Number(upSpeed) > 0)) throw new Error('Real upload test did not complete successfully after a bounded retry.');
+    const [upCode, upTime, upSpeed, uploadedBytes] = String(up?.stdout || '').trim().split('|');
+    if (up?.code !== 0 || upCode !== '200' || !(Number(upSpeed) > 0) ||
+        Number(uploadedBytes) !== upBytes) throw new Error('Real upload test did not complete successfully after a bounded retry.');
+
+    const endStatus = await this.status();
+    if (!endStatus.connected || Number(endStatus.fullRoutes || 0) < 2 ||
+        ((this.platform === 'linux' || this.platform === 'win32') && endStatus.interface !== status.interface) ||
+        (status.activeSha && endStatus.activeSha !== status.activeSha)) {
+      throw new Error('Tunnel route or active connection changed during the speed test; result discarded.');
+    }
+
+    // The same adapter name can survive a tunnel reconnect or relay
+    // rotation. Check actual bound source again and the active profile SHA
+    // before attributing a completed upload/download to the original relay.
+    const endCurlArgs = await this._activeTunnelCurlArgs(endStatus);
+    if (JSON.stringify(endCurlArgs) !== JSON.stringify(tunnelCurlArgs)) {
+      throw new Error('VPN tunnel source changed during the speed test; result discarded.');
+    }
+    const endInventory = await this.profiles(endStatus);
+    if (!endInventory.activeSha || endInventory.activeSha !== active.sha256 ||
+        !endInventory.profiles.some(p => p.active && p.sha256 === active.sha256)) {
+      throw new Error('Active VPN relay rotated during the speed test; result discarded.');
+    }
 
     const previous = active.benchmark || {};
     const result = {
@@ -1004,12 +1663,16 @@ class Backend {
       serverIP: active.ip,
       country: status.country || active.country,
       publicIP: status.ip || '',
+      throughputPath: this.platform === 'linux' ? 'vpn-interface-bound' : 'vpn-source-ip-bound',
+      throughputInterface: String(status.interface || ''),
+      tunnelRouteVerifiedAfterTransfer: true,
       icmpPingMs,
       httpsLatencyMs: latencyMs,
       downloadMbps: Math.round(Number(downSpeed) * 8 / 1_000_000 * 100) / 100,
       uploadMbps: Math.round(Number(upSpeed) * 8 / 1_000_000 * 100) / 100,
-      downloadBytes: downBytes,
-      uploadBytes: upBytes,
+      downloadBytes: Number(downloadedBytes),
+      uploadBytes: Number(uploadedBytes),
+      downloadAttempts,
       uploadAttempts,
       downloadSeconds: Number(downTime) || null,
       uploadSeconds: Number(upTime) || null,
@@ -1076,18 +1739,28 @@ class Backend {
     return 0;
   }
 
+  // The managed Debian installation must not silently create a second
+  // versioned AppImage under the user's home on an online update.
+  _linuxInstallFlavor(executable = process.execPath) {
+    // Normalize only separators, not host-OS path semantics: a Linux
+    // package path is also evaluated by source tests on Windows runners.
+    return String(executable || '').replace(/\\/g, '/') ===
+      '/opt/open-internet-gateway/open-internet-gateway'
+      ? 'system-deb' : 'user-appimage';
+  }
+
   _selectUpdateAsset(assets, version) {
     const list = Array.isArray(assets) ? assets : [];
+    // Bind the downloaded binary to the exact release tag. SHA-256 proves
+    // the asset's bytes, but not that an older asset is the advertised version.
     if (this.platform === 'win32') {
-      return list.find(a => a.name === 'OpenInternetGateway-Setup-' + version + '.exe')
-        || list.find(a => /^OpenInternetGateway-Setup-.*\.exe$/i.test(a.name || ''));
+      return list.find(a => a.name === 'OpenInternetGateway-Setup-' + version + '.exe');
     }
     if (this.platform === 'linux') {
-      // Automatic Linux updates must remain user-space and never invoke apt/dpkg/sudo.
-      // Prefer the AppImage release asset; the DEB remains available for manual/system installs.
-      return list.find(a => a.name === 'OpenInternetGateway-' + version + '-x86_64.AppImage')
-        || list.find(a => /^OpenInternetGateway-.*-x86_64\.AppImage$/i.test(a.name || ''))
-        || list.find(a => /\.AppImage$/i.test(a.name || ''));
+      const name = this._linuxInstallFlavor() === 'system-deb'
+        ? 'OpenInternetGateway-Linux-Setup-' + version + '-amd64.run'
+        : 'OpenInternetGateway-' + version + '-x86_64.AppImage';
+      return list.find(a => a.name === name);
     }
     return null;
   }
@@ -1097,7 +1770,10 @@ class Backend {
     if (!force) {
       const cached = this._readJson(stateFile, null);
       const checked = cached?.checkedAt ? Date.parse(cached.checkedAt) : 0;
-      if (checked && Date.now() - checked < 5 * 60 * 1000) return cached;
+      if (checked && Date.now() - checked < 5 * 60 * 1000 &&
+          (this.platform !== 'linux' || cached.installScope === this._linuxInstallFlavor())) {
+        return cached;
+      }
     }
 
     const release = await this._githubJson('https://api.github.com/repos/GOD13emad/OpenInternetGateway/releases/latest');
@@ -1114,6 +1790,9 @@ class Backend {
       updateAvailable: comparison < 0,
       currentAhead: comparison > 0,
       upToDate: comparison === 0,
+      installScope: this.platform === 'linux' ? this._linuxInstallFlavor()
+        : this.platform === 'win32' ? 'current-user' : 'unsupported',
+      requiresOsAuthorization: this.platform === 'linux' && this._linuxInstallFlavor() === 'system-deb',
       releaseUrl: String(release.html_url || 'https://github.com/GOD13emad/OpenInternetGateway/releases/latest'),
       publishedAt: release.published_at || null,
       releaseName: release.name || release.tag_name || '',
@@ -1240,18 +1919,28 @@ try {
         updatePwsh = path.join(helperRuntime, 'pwsh.exe');
         if (!fs.existsSync(updatePwsh)) throw new Error('Copied Windows update PowerShell runtime is incomplete.');
       }
-      const pwshArgs = [
-        '-NoProfile','-WindowStyle','Hidden','-ExecutionPolicy','Bypass','-File',helper,
+      // On Windows, detached:true with windowsHide can return exit 0 while
+      // PowerShell never executes its -File command. An attached, hidden
+      // bootstrap starts the *real* helper with native Start-Process, which
+      // survives the Electron parent quitting without taking desktop focus.
+      const bootstrap = path.join(this.backendRoot, 'scripts', 'Start-UpdateBootstrap.ps1');
+      if (!fs.existsSync(bootstrap)) throw new Error('Verified Windows update bootstrap script is missing.');
+      fs.mkdirSync(path.dirname(resultFile), { recursive: true });
+      const bootstrapArgs = [
+        '-NoProfile','-NonInteractive','-WindowStyle','Hidden','-ExecutionPolicy','Bypass','-File',bootstrap,
+        '-Runner',updatePwsh,
+        '-Helper',helper,
         '-Installer',downloaded.path,
         '-ExpectedSha',expectedSha,
         '-Version',version,
         '-WaitPid',String(appPid),
         '-Target',target,
         '-Fallback',String(currentExecutable || ''),
-        '-ResultFile',resultFile
+        '-ResultFile',resultFile,
+        '-LaunchLog',launchLog
       ];
-      const child = spawn(updatePwsh, pwshArgs, {
-        detached: true,
+      const child = spawn(updatePwsh, bootstrapArgs, {
+        detached: false,
         windowsHide: true,
         stdio: ['ignore', 'ignore', 'ignore']
       });
@@ -1260,14 +1949,55 @@ try {
         child.once('error', reject);
       });
       child.unref();
-      const startedDeadline = Date.now() + 5000;
+      const startedDeadline = Date.now() + 12000;
       while (!fs.existsSync(startedFile) && Date.now() < startedDeadline) {
+        if (fs.existsSync(launchLog)) throw new Error('Windows native update bootstrap refused to start.');
         await new Promise(resolve => setTimeout(resolve, 50));
       }
       if (!fs.existsSync(startedFile)) {
         throw new Error('Windows update helper failed to start with the verified PowerShell runtime.');
       }
       return { ok: true, applying: true, restart: true, installScope: 'current-user', resultFile, target };
+    }
+
+    if (this.platform === 'linux' &&
+        this._linuxInstallFlavor(currentExecutable) === 'system-deb') {
+      const expectedName = 'OpenInternetGateway-Linux-Setup-' + version + '-amd64.run';
+      if (!/^[0-9]+\.[0-9]+\.[0-9]+$/.test(version) ||
+          path.basename(downloaded.path) !== expectedName ||
+          !/^[a-f0-9]{64}$/.test(expectedSha)) {
+        throw new Error('Linux Debian upgrade requires the exact verified one-file setup.');
+      }
+      const fileInfo = fs.lstatSync(downloaded.path);
+      if (!fileInfo.isFile() || fileInfo.isSymbolicLink()) {
+        throw new Error('Linux one-file update must be a regular non-symlink file.');
+      }
+      // Verify the embedded DEB before closing the app; the detached
+      // handoff repeats SHA validation before any native OS authorization.
+      const verified = await run('bash', [downloaded.path, '--verify-only'], {
+        timeout: 60000
+      });
+      const marker = 'OIG_LINUX_ONECLICK_EMBEDDED_DEB_VERIFIED version=' + version + ' sha256=';
+      const output = String(verified.stdout || '').trim();
+      if (!output.startsWith(marker) || !/^[a-f0-9]{64}$/.test(output.slice(marker.length))) {
+        throw new Error('Linux one-file update embedded Debian package could not be verified.');
+      }
+      const helper = path.join(this.backendRoot, 'linux', 'apply-oneclick-update.sh');
+      if (!fs.existsSync(helper)) {
+        throw new Error('Linux native Debian update handoff is unavailable.');
+      }
+      const child = spawn('/bin/bash', [
+        helper, downloaded.path, expectedSha, version, String(appPid),
+        resultFile, String(currentExecutable)
+      ], { detached: true, stdio: 'ignore', env: { ...process.env } });
+      await new Promise((resolve, reject) => {
+        child.once('spawn', resolve);
+        child.once('error', reject);
+      });
+      child.unref();
+      return { ok: true, applying: true, restart: true,
+        installScope: 'system-deb', requiresOsAuthorization: true,
+        resultFile, target: '/opt/open-internet-gateway/open-internet-gateway' };
     }
 
     if (this.platform === 'linux') {
@@ -1459,11 +2189,31 @@ exit 0
   }
 
   async action(action, options = {}) {
-    this.emit({ type: 'busy', action, busy: true });
+    if (this.platform === 'linux' && this.operatorTrialBusy && action !== 'disconnect') {
+      throw new Error('An isolated provider trial is active; normal gateway operations are temporarily blocked.');
+    }
+    this.gatewayActionCount += 1;
     try {
+      this.emit({ type: 'busy', action, busy: true });
       let result;
       if (this.platform === 'win32' && (action === 'connect' || action === 'connect-profile')) {
-        await this._ensureWindowsRuntimePrerequisites();
+        // First-Connect must not take over an unrelated active VPN just
+        // because OpenVPN Connect is already installed. Observe the current
+        // OIG-owned state without modifying any routes or services.
+        let ownedInterfaceIndex = 0;
+        try {
+          const observed = await this._windows('status');
+          const index = Number(observed?.managedInterfaceIndex || 0);
+          if (observed?.connected === true &&
+              observed?.engine === 'HeadlessConnector' &&
+              Number.isSafeInteger(index) && index > 0) {
+            ownedInterfaceIndex = index;
+          }
+        } catch {}
+        // Even a healthy OIG session can coexist with an unrelated VPN.
+        // Exclude only the observed OIG-owned interface, never skip the guard.
+        await this._assertWindowsIndependentVpnInactive(ownedInterfaceIndex);
+        await this.prepareWindowsInstallerPrerequisites();
       }
       if (action === 'connect-profile') result = await this.connectProfile(options.sha256);
       else if (action === 'benchmark-active') result = await this.benchmarkActive();
@@ -1509,6 +2259,8 @@ exit 0
     } catch (error) {
       this.emit({ type: 'error', action, busy: false, message: error.message });
       throw error;
+    } finally {
+      this.gatewayActionCount = Math.max(0, this.gatewayActionCount - 1);
     }
   }
 

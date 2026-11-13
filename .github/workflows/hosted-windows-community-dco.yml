@@ -1,0 +1,210 @@
+name: Disposable Windows Community ovpn-dco driver lifecycle QA
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/hosted-windows-community-dco.yml'
+      - 'app/tests/windows-community-dco-driver-smoke.ps1'
+      - 'app/tests/windows-community-dco-tunnel-qa.py'
+      - 'app/tests/windows-community-dco-fullroute-qa.py'
+      - 'app/tests/windows-community-dco-dualstack-dns-policy-qa.py'
+      - 'app/tests/windows-community-dco-fallback-wfp-qa.py'
+      - 'app/tests/windows-community-dco-packet-wfp-helper.cpp'
+      - 'app/tests/windows-community-dco-driver-safety.test.js'
+
+permissions:
+  contents: read
+
+jobs:
+  dco-driver:
+    if: ${{ github.event.pull_request.head.repo.full_name == github.repository && github.head_ref == 'qa/v2.5.20-operator-safety-20261019' }}
+    runs-on: windows-2025
+    timeout-minutes: 16
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - name: Pinned official Community 2.7.9 ovpn-dco driver install and owned teardown
+        shell: pwsh
+        timeout-minutes: 12
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & ./app/tests/windows-community-dco-driver-smoke.ps1
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: windows-community-dco-driver-lifecycle-receipt
+          path: ${{ runner.temp }}/oig-dco-driver-lifecycle.json
+          if-no-files-found: warn
+          retention-days: 7
+
+  # Independent disposable VM: the signed-driver lifecycle job must first PASS.
+  # Scoped /32 egress via ovpn-dco; does NOT change the default gateway.
+  dco-tunnel:
+    needs: dco-driver
+    if: ${{ github.event.pull_request.head.repo.full_name == github.repository && github.head_ref == 'qa/v2.5.20-operator-safety-20261019' }}
+    runs-on: windows-2025
+    timeout-minutes: 18
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.14'
+      - name: Parse Python scoped data-plane probe before any driver changes
+        shell: pwsh
+        run: |
+          python -c "import ast,pathlib; ast.parse(pathlib.Path('app/tests/windows-community-dco-tunnel-qa.py').read_text())"
+          if ($LASTEXITCODE -ne 0) { throw 'DCO_SCOPED_PYTHON_SYNTAX_INVALID' }
+      - name: OpenVPN Community DCO owned scoped TUN HTTPS with bounded rollback
+        shell: pwsh
+        timeout-minutes: 14
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & ./app/tests/windows-community-dco-driver-smoke.ps1 -ProbeTun -Receipt (Join-Path $env:RUNNER_TEMP 'oig-dco-tunnel-driver-lifecycle.json')
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: windows-community-dco-scoped-tunnel-receipts
+          path: |
+            ${{ runner.temp }}/oig-dco-scoped-tunnel.json
+            ${{ runner.temp }}/oig-dco-tunnel-driver-lifecycle.json
+          if-no-files-found: warn
+          retention-days: 7
+
+  # A distinct disposable Windows VM, after the real scoped TUN gate passes.
+  # IPv4 default routing only; not an IPv6/DNS or kill-switch claim.
+  dco-ipv4-fullroute:
+    needs: dco-tunnel
+    if: ${{ github.event.pull_request.head.repo.full_name == github.repository && github.head_ref == 'qa/v2.5.20-operator-safety-20261019' }}
+    runs-on: windows-2025
+    timeout-minutes: 18
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.14'
+      - name: Validate full-route QA syntax before any network changes
+        shell: pwsh
+        run: |
+          python -c "import ast,pathlib; ast.parse(pathlib.Path('app/tests/windows-community-dco-fullroute-qa.py').read_text())"
+          if ($LASTEXITCODE -ne 0) { throw 'FULL_IPV4_ROUTE_QA_SYNTAX_INVALID' }
+      - name: Temporary OpenVPN Community DCO IPv4 full-route and owned rollback
+        shell: pwsh
+        timeout-minutes: 14
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & ./app/tests/windows-community-dco-driver-smoke.ps1 -ProbeFullIpv4 -Receipt (Join-Path $env:RUNNER_TEMP 'oig-dco-fullroute-driver-lifecycle.json')
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: windows-community-dco-ipv4-fullroute-receipts
+          path: |
+            ${{ runner.temp }}/oig-dco-fullroute-ipv4.json
+            ${{ runner.temp }}/oig-dco-fullroute-driver-lifecycle.json
+          if-no-files-found: warn
+          retention-days: 7
+
+  # Independent disposable Windows VM: IPv6 global-route policy + WFP DNS
+  # observation, with baseline eligibility recorded. No kill-switch claim.
+  dco-dualstack-dns-policy:
+    needs: dco-ipv4-fullroute
+    if: ${{ github.event.pull_request.head.repo.full_name == github.repository && github.head_ref == 'qa/v2.5.20-operator-safety-20261019' }}
+    runs-on: windows-2025
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.14'
+      - name: Validate IPv6 and WFP DNS policy QA before network changes
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          python -c "import ast,pathlib; ast.parse(pathlib.Path('app/tests/windows-community-dco-dualstack-dns-policy-qa.py').read_text())"
+          if($LASTEXITCODE -ne 0){throw 'DCO_DUALSTACK_DNS_POLICY_SYNTAX_INVALID'}
+      - name: Pinned Community DCO IPv6 route and physical-vs-tunnel DNS behavior
+        shell: pwsh
+        timeout-minutes: 16
+        run: |
+          $ErrorActionPreference='Stop'
+          & ./app/tests/windows-community-dco-driver-smoke.ps1 -ProbeLeakPolicy -Receipt (Join-Path $env:RUNNER_TEMP 'oig-dco-leak-policy-driver-lifecycle.json')
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: windows-community-dco-dualstack-dns-policy-receipts
+          path: |
+            ${{ runner.temp }}/oig-dco-leak-policy.json
+            ${{ runner.temp }}/oig-dco-leak-policy-driver-lifecycle.json
+          if-no-files-found: warn
+          retention-days: 7
+
+  # Separate disposable Windows VM. Native WFP dynamic IPPACKET_V4 filter
+  # on one physical NIC and one HTTPS target; NOT a global kill switch.
+  dco-scoped-wfp-fallback:
+    needs: dco-driver
+    if: ${{ github.event.pull_request.head.repo.full_name == github.repository && github.head_ref == 'qa/v2.5.20-operator-safety-20261019' }}
+    runs-on: windows-2025
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.14'
+      - name: Validate scoped WFP fallback QA before any network changes
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          python -c "import ast,pathlib; ast.parse(pathlib.Path('app/tests/windows-community-dco-fallback-wfp-qa.py').read_text())"
+          if($LASTEXITCODE -ne 0){throw 'WFP_FALLBACK_PYTHON_SYNTAX_INVALID'}
+      - name: Build QA-only WFP packet-layer filter with installed signed MSVC toolchain
+        shell: pwsh
+        timeout-minutes: 3
+        run: |
+          $ErrorActionPreference='Stop'
+          $vswhere=Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+          if(-not(Test-Path -LiteralPath $vswhere)){throw 'MSVC_VSWHERE_MISSING'}
+          $vs=(& $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath | Select-Object -First 1)
+          if(-not $vs){throw 'MSVC_BUILD_TOOLS_MISSING'}
+          $vcvars=Join-Path $vs 'VC\Auxiliary\Build\vcvars64.bat'
+          if(-not(Test-Path -LiteralPath $vcvars)){throw 'MSVC_VCVARS_MISSING'}
+          $src=(Resolve-Path 'app/tests/windows-community-dco-packet-wfp-helper.cpp').Path
+          $out=Join-Path $env:RUNNER_TEMP 'oig-dco-packet-wfp-helper.exe'
+          if(Test-Path -LiteralPath $out){throw 'WFP_QA_BINARY_ALREADY_EXISTS'}
+          $compile='call "' + $vcvars + '" >nul && cl.exe /nologo /EHsc /std:c++17 /W4 "' + $src + '" /link /OUT:"' + $out + '" Fwpuclnt.lib Ws2_32.lib Rpcrt4.lib'
+          & cmd.exe /D /S /C $compile
+          if($LASTEXITCODE -ne 0 -or -not(Test-Path -LiteralPath $out)){throw 'WFP_PACKET_QA_MSVC_BUILD_FAILED'}
+      - name: Verify native per-interface WFP packet block and DCO fallback
+        shell: pwsh
+        timeout-minutes: 16
+        run: |
+          $ErrorActionPreference='Stop'
+          $env:OIG_PACKET_WFP_HELPER=Join-Path $env:RUNNER_TEMP 'oig-dco-packet-wfp-helper.exe'
+          $env:OIG_HOSTED_DCO_PACKET_QA='1'
+          try{
+            & ./app/tests/windows-community-dco-driver-smoke.ps1 -ProbeFallback -Receipt (Join-Path $env:RUNNER_TEMP 'oig-dco-fallback-driver-lifecycle.json')
+          }finally{
+            Remove-Item Env:\OIG_PACKET_WFP_HELPER -ErrorAction SilentlyContinue
+            Remove-Item Env:\OIG_HOSTED_DCO_PACKET_QA -ErrorAction SilentlyContinue
+          }
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: windows-community-dco-scoped-wfp-fallback-receipts
+          path: |
+            ${{ runner.temp }}/oig-dco-fallback-wfp.json
+            ${{ runner.temp }}/oig-dco-fallback-driver-lifecycle.json
+          if-no-files-found: warn
+          retention-days: 7

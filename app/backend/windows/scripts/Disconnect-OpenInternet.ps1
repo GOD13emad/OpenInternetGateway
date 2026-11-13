@@ -11,6 +11,15 @@ New-Item -ItemType Directory -Force -Path (Join-Path $Root 'state')|Out-Null
 foreach($name in @('exact-profile.request','headless-known-recover.request','headless-pool-probe.request','connector-probe.request')){
  Remove-Item -LiteralPath (Join-Path $Root ('state\'+$name)) -Force -ErrorAction SilentlyContinue
 }
+# A subsequent explicit Connect owns the new user intent. A pending older
+# Disconnect must never report success or re-trigger cleanup as if it still
+# owned that newer request.
+function Assert-DisconnectStillRequested {
+ $now='unknown'
+ try{$now=[string](Get-Content -LiteralPath $desired -Raw -ErrorAction Stop|ConvertFrom-Json).desired}catch{}
+ if($now -ne 'off'){throw 'Disconnect was superseded or its desired-state record cannot be verified.'}
+}
+Assert-DisconnectStillRequested
 $routes=@(Get-NetRoute -AddressFamily IPv4 -ErrorAction SilentlyContinue|Where-Object{$_.DestinationPrefix -in @('0.0.0.0/1','128.0.0.0/1')})
 $svc=Get-Service OVPNConnectorService -ErrorAction SilentlyContinue
 if($routes.Count -eq 0 -and (-not $svc -or $svc.Status -eq 'Stopped')){
@@ -21,14 +30,32 @@ $task=Get-ScheduledTask -TaskName 'OpenInternetGateway-AutoRecovery' -ErrorActio
 if(-not $task){throw 'Open Internet Gateway recovery task is missing while a managed tunnel may still be active.'}
 schtasks.exe /Run /TN OpenInternetGateway-AutoRecovery | Out-Null
 if($LASTEXITCODE -ne 0){throw 'Could not start the elevated Open Internet Gateway recovery task for disconnect.'}
-$until=(Get-Date).AddSeconds(45)
+# Task Scheduler is configured IgnoreNew. If a pre-existing elevated Ensure is
+# still running, /Run succeeds but the disconnect run may be discarded. Keep
+# the explicit desired=off intent, observe the actual service/routes, and
+# re-trigger only after the old task has exited. Do not spawn a second writer,
+# kill somebody else's VPN, or require another UAC prompt.
+$queuedAt=Get-Date
+$requeued=0
+$until=(Get-Date).AddSeconds(180)
 do{
  Start-Sleep -Seconds 2
+ Assert-DisconnectStillRequested
  $routes=@(Get-NetRoute -AddressFamily IPv4 -ErrorAction SilentlyContinue|Where-Object{$_.DestinationPrefix -in @('0.0.0.0/1','128.0.0.0/1')})
  $svc=Get-Service OVPNConnectorService -ErrorAction SilentlyContinue
  if($routes.Count -eq 0 -and (-not $svc -or $svc.Status -eq 'Stopped')){
    Write-Host 'DISCONNECTED'
    exit 0
  }
+ if($requeued -lt 6 -and ((Get-Date)-$queuedAt).TotalSeconds -ge 10){
+   $current=Get-ScheduledTask -TaskName 'OpenInternetGateway-AutoRecovery' -ErrorAction SilentlyContinue
+   if(-not $current){throw 'Open Internet Gateway recovery task disappeared while disconnect was pending.'}
+   if([string]$current.State -ne 'Running'){
+     schtasks.exe /Run /TN OpenInternetGateway-AutoRecovery | Out-Null
+     if($LASTEXITCODE -ne 0){throw 'Could not requeue elevated Open Internet Gateway disconnect.'}
+     $queuedAt=Get-Date
+     $requeued++
+   }
+ }
 }while((Get-Date)-lt $until)
-throw 'Headless disconnect task did not settle within 45 seconds.'
+throw 'Headless disconnect task did not settle within 180 seconds; desired=off retained.'

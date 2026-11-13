@@ -44,6 +44,18 @@ test('Config Factory is wired through platform and renderer',()=>{
 });
 
 
+test('hosted Linux packaged UX uses real WM graceful close and guards against XDestroyWindow false failures',()=>{
+  const script=fs.readFileSync(path.join(root,'tools/qaLinuxHostedWindowLifecycle.sh'),'utf8');
+  const workflow=fs.readFileSync(path.resolve(root,'../.github/workflows/build.yml'),'utf8');
+  assert.match(script,/wmctrl -ic/);
+  assert.doesNotMatch(script,/^\s*xdotool\s+windowclose\b/m);
+  assert.match(script,/ELECTRON_NATIVE_CLOSE_HANDLER_PASS/);
+  assert.match(script,/OIG_QA_WINDOW_EVENT close-after-hide/);
+  assert.match(script,/SECOND_INSTANCE_WINDOW_NOT_SHOWN/);
+  assert.match(script,/RUNNER_ENVIRONMENT:-.*github-hosted/s);
+  assert.match(workflow,/xvfb xauth xdotool wmctrl x11-utils openbox tint2/);
+});
+
 test('desktop app enforces single-instance tray UX',()=>{
   const main=fs.readFileSync(path.join(root,'src/main/main.js'),'utf8');
   assert.match(main,/requestSingleInstanceLock\(\{ intent: launchIntent \}\)/);
@@ -78,7 +90,8 @@ test('Windows backend is fully headless, self-healing, and independent from Open
   assert.match(factory,/successes\.json/i);
   assert.match(factory,/quarantine\.json/i);
   assert.match(auto,/OpenInternetGateway-AutoRecovery/i);
-  assert.doesNotMatch(production,/OpenVPNConnect(?:\.exe)?/i);
+  assert.match(headless,/Get-Process -Name 'OpenVPNConnect'/);
+  assert.doesNotMatch(production,/Start-Process[^\r\n]*OpenVPNConnect|OpenVPNConnect\.exe/i);
   assert.doesNotMatch(production,/--connect-shortcut/i);
   assert.ok(fs.existsSync(path.join(base,'Headless-Control.ps1')));
   assert.ok(fs.existsSync(path.join(base,'Bootstrap-HeadlessConnector.ps1')));
@@ -228,8 +241,12 @@ test('Windows status tolerates a transient geo probe failure only for a real man
   assert.match(winBlock,/\$managedActive=\(\$svc -and \$svc\.Status -eq 'Running'\)/);
   assert.match(winBlock,/\$probeDegraded=\$false/);
   assert.match(winBlock,/healthProbeDegraded=\[bool\]\$probeDegraded/);
-  assert.match(winStatus,/Connected=\(\$routes\.Count -ge 2 -and \$routePairValid -and \$ipv6Safe -and \$managedActive/);
-  assert.match(winBlock,/connected=\(\$routes\.Count -ge 2 -and \$routePairValid -and \$ipv6Safe -and \$managedActive/);
+  assert.match(winStatus,/Connected=\(\$desired -eq 'on' -and \$routes\.Count -ge 2 -and \$routePairValid -and \$ipv6Safe -and \$managedActive/);
+  assert.match(winStatus,/if\(-not \$loc -and \$managedActive[\s\S]*\$profileSha -match/);
+  assert.doesNotMatch(winStatus,/Connected=[^\r\n]*-not \$probeDegraded/);
+  assert.match(winBlock,/connected=\(\$desired -eq 'on' -and \$routes\.Count -ge 2 -and \$routePairValid -and \$ipv6Safe -and \$managedActive/);
+  assert.match(winBlock,/if\(-not \$loc -and \$managedActive[\s\S]*\$profileSha -match/);
+  assert.doesNotMatch(winBlock,/connected=[^\r\n]*-not \$probeDegraded/);
 });
 
 test('Linux failed exact relay does not turn desired gateway intent off',()=>{
@@ -343,7 +360,7 @@ test('selected relay connection is exact rather than fallback',()=>{
   assert.match(ensure,/exact-profile\.request/);
   assert.match(ensure,/-ProfileSha \$sha/);
   assert.match(backend,/exact-profile\.request/);
-  assert.match(backend,/_linux\('connect-profile', \[sha\]\)/);
+  assert.match(backend,/_linux\('connect-profile', \[sha\], \{\s*expectedCancelEpoch: initialCancelEpoch/);
 });
 
 test('explicit Windows disconnect cancels queued recovery and exact requests before running recovery task',()=>{
@@ -593,7 +610,7 @@ test('GitHub updater checks latest release and verifies published SHA-256',()=>{
   assert.ok(backend.includes("Programs', 'open-internet-gateway', 'Open Internet Gateway.exe'"));
   assert.match(backend,/pwsh-helper/);
   assert.match(backend,/copyDir\(bundledPwshRoot, helperRuntime\)/);
-  assert.match(backend,/spawn\(updatePwsh, pwshArgs/);
+  assert.match(backend,/spawn\(updatePwsh, bootstrapArgs/);
   assert.match(backend,/resultFile \+ '\.started'/);
   assert.match(backend,/Windows update helper failed to start/);
   assert.doesNotMatch(backend,/spawn\('pwsh\.exe'/);
@@ -609,23 +626,44 @@ test('GitHub updater checks latest release and verifies published SHA-256',()=>{
 });
 
 
-test('Linux Chromium sandbox hardening is fail-safe and update-persistent',()=>{
+test('Linux Chromium sandbox verification is fail-closed and never mutates packaged runtime files',()=>{
   const backend=fs.readFileSync(path.join(root,'src/main/platform-backend.js'),'utf8');
   const main=fs.readFileSync(path.join(root,'src/main/main.js'),'utf8');
   const helper=fs.readFileSync(path.join(root,'backend/linux/harden_sandbox.py'),'utf8');
+  const appRun=fs.readFileSync(path.join(root,'build/linux/AppRun'),'utf8');
+  const afterPack=fs.readFileSync(path.join(root,'tools/afterPack.js'),'utf8');
+  const afterAll=fs.readFileSync(path.join(root,'tools/afterAllArtifactBuild.js'),'utf8');
+  const pkg=require(path.join(root,'package.json'));
+  assert.deepEqual(pkg.build.appImage.executableArgs, []);
   assert.match(backend,/_hardenLinuxChromiumSandbox/);
-  assert.match(backend,/linux-sandbox-hardening.json/);
-  assert.match(backend,/sandboxHardened/);
-  assert.match(backend,/resources\/backend\/linux\/harden_sandbox\.py/);
-  assert.match(main,/OIG_SANDBOX_RESTARTED/);
-  assert.ok(main.includes('initialized?.sandboxHardening?.restartRequired'));
+  assert.match(backend,/linux-sandbox-hardening\.json/);
+  assert.match(backend,/processArgvVerified/);
+  assert.match(backend,/parsed\.runtimeRoot \|\| runtimeRoot/);
+  assert.match(main,/Secure startup blocked/);
+  assert.match(main,/sandbox\?\.currentProcessNoSandbox === false/);
+  assert.match(main,/app\.exit\(78\)/);
   assert.match(helper,/0o4755/);
-  assert.match(helper,/hash-compatible root-owned setuid Chromium sandbox/);
-  assert.match(helper,/OIG sandbox hardening: prefer a compatible root-owned setuid helper/);
+  assert.match(helper,/find_compatible_helper/);
   assert.match(helper,/CHROME_DEVEL_SANDBOX/);
-  assert.match(helper,/readlink -f .*chrome-sandbox/);
-  assert.match(helper,/LEGACY_REPLACEMENT/);
-  assert.doesNotMatch(helper,/sysctl|apparmor_parser|sudo|pkexec/);
+  assert.match(helper,/user_namespaces_available/);
+  assert.doesNotMatch(helper,/os\.replace|os\.symlink|sudo|pkexec/);
+  assert.match(appRun,/CHROME_DEVEL_SANDBOX/);
+  assert.match(appRun,/unshare -Ur true/);
+  assert.match(appRun,/--appimage-extract/);
+  assert.doesNotMatch(appRun,/--appimage-extract-and-run/);
+  assert.match(appRun,/mktemp -d/);
+  assert.match(appRun,/wait "\$child_pid"/);
+  assert.match(appRun,/rm -rf "\$tmp_root"/);
+  assert.match(appRun,/ln -s/);
+  assert.match(appRun,/rm -f \"\$local_sandbox\"/);
+  assert.match(helper,/os\.path\.islink\(local_sandbox\)/);
+  assert.match(helper,/not os\.path\.lexists\(local_sandbox\)/);
+  assert.match(appRun,/exit 78/);
+  assert.doesNotMatch(appRun,/NO_SANDBOX=\(--no-sandbox\)/);
+  assert.match(afterPack,/build.*linux.*AppRun/);
+  assert.match(afterPack,/fs\.copyFileSync\(customAppRun, appRun\)/);
+  assert.match(afterAll,/opt', 'open-internet-gateway', 'AppRun/);
+  assert.match(afterAll,/fs\.rmSync\(appRun\)/);
 });
 
 test('GitHub workflows use current hosted-runner actions and Node LTS',()=>{
@@ -829,6 +867,51 @@ test('automatic updater prefers user-space assets and avoids elevation paths',()
   fs.rmSync(tmp,{recursive:true,force:true});
 });
 
+test('release updater fails closed when a latest tag contains only wrong-version assets',async()=>{
+  const Backend=require(path.join(root,'src/main/platform-backend.js'));
+  const backend=new Backend({version:'2.5.19',resourcesPath:root,appPath:root,userData:root,emit:()=>{}});
+  const stale=[
+    {name:'OpenInternetGateway-Setup-2.5.19.exe',digest:'sha256:'+'a'.repeat(64)},
+    {name:'OpenInternetGateway-2.5.19-x86_64.AppImage',digest:'sha256:'+'a'.repeat(64)},
+    {name:'OpenInternetGateway-2.5.20-amd64.deb',digest:'sha256:'+'a'.repeat(64)},
+    {name:'OpenInternetGateway-2.5.18-arm64.AppImage',digest:'sha256:'+'a'.repeat(64)}
+  ];
+  backend.platform='win32';
+  assert.equal(backend._selectUpdateAsset(stale,'2.5.20'),undefined,
+    'an older signed installer must not stand in for the latest release');
+  backend.platform='linux';
+  assert.equal(backend._selectUpdateAsset(stale,'2.5.20'),undefined,
+    'an older AppImage or a DEB must not stand in for the latest release');
+  const exact=[
+    ...stale,
+    {name:'OpenInternetGateway-Setup-2.5.20.exe',digest:'sha256:'+'b'.repeat(64)},
+    {name:'OpenInternetGateway-2.5.20-x86_64.AppImage',digest:'sha256:'+'c'.repeat(64)}
+  ];
+  backend.platform='win32';
+  assert.equal(backend._selectUpdateAsset(exact,'2.5.20')?.name,
+    'OpenInternetGateway-Setup-2.5.20.exe');
+  backend.platform='linux';
+  assert.equal(backend._selectUpdateAsset(exact,'2.5.20')?.name,
+    'OpenInternetGateway-2.5.20-x86_64.AppImage');
+
+  // Exercise the public Update flow too: reject before any download/apply.
+  const tmp=fs.mkdtempSync(path.join(require('node:os').tmpdir(),'oig-update-wrong-release-'));
+  backend.backendRoot=tmp;
+  backend._githubJson=async()=>({tag_name:'v2.5.20',assets:stale});
+  backend._curlText=async()=>{throw new Error('No checksum request expected');};
+  backend._downloadWithSha256=async()=>{throw new Error('No download expected');};
+  try{
+    for(const platform of ['win32','linux']){
+      backend.platform=platform;
+      const info=await backend.updateInfo(true);
+      assert.equal(info.asset,null);
+      await assert.rejects(backend.downloadUpdate(),/No compatible update asset was published/);
+    }
+  }finally{
+    fs.rmSync(tmp,{recursive:true,force:true});
+  }
+});
+
 test('Linux OpenVPN quality engine uses multi-source refresh and safe public-profile filtering',()=>{
   const factory=fs.readFileSync(path.join(root,'backend/linux/config_factory.py'),'utf8');
   assert.match(factory,/https:\/\/www\.vpngate\.net/);
@@ -942,6 +1025,9 @@ test('Linux exact relay failure falls through to adaptive recovery when exact ro
   const target={sha256:'f'.repeat(64),country:'JP',host:'target',ip:'198.51.100.20',active:false,quarantined:false};
   const recoveredSha='1'.repeat(64);
   fs.writeFileSync(path.join(stateDir,'preferred-profile.json'),JSON.stringify(previous));
+  // The pre-existing selection flow had already requested desired=on.
+  // Off/missing intent now intentionally suppresses auto-reconnect.
+  fs.writeFileSync(path.join(stateDir,'desired-state'),'on\n');
   const backend=new Backend({version:'test',resourcesPath:tmp,appPath:tmp,userData:tmp,emit:()=>{}});
   backend.platform='linux';
   backend.backendRoot=tmp;
@@ -982,7 +1068,7 @@ test('Linux general recovery is present in every post-selection validation failu
   const block=backend.slice(backend.indexOf('async connectProfile'),backend.indexOf('async _directInternetPath'));
   assert.match(block,/const recoverAnyLinux = async/);
   assert.match(block,/this\.platform !== 'linux'/);
-  assert.match(block,/await this\._linux\('connect'\)/);
+  assert.match(block,/await this\._linux\('connect', \[\], \{\s*expectedCancelEpoch: initialCancelEpoch/);
   assert.match(block,/SELECTED_RELAY_FAILED_GENERAL_RECOVERY/);
   assert.match(block,/SELECTED_RELAY_NOT_ACTIVE_GENERAL_RECOVERY/);
   assert.match(block,/SELECTED_RELAY_COUNTRY_MISMATCH_GENERAL_RECOVERY/);
@@ -1109,8 +1195,8 @@ test('Windows shadow takeover preserves native profile bytes and fails closed un
   const dataAt=block.indexOf('Wait-NativeDataPlane');
   const removeAt=block.indexOf('Remove-PhysicalShadows');
   assert.ok(addAt >= 0 && addAt < startAt && startAt < nativeAt && nativeAt < dataAt && dataAt < removeAt);
-  assert.match(block,/DATAPLANE_READY_FAIL.*Stop-Connector/);
-  assert.match(block,/NATIVE_READY_FAIL.*Stop-Connector/);
+  assert.match(block,/DATAPLANE_READY_FAIL/);
+  assert.match(block,/NATIVE_READY_FAIL/);
   assert.match(block,/POST_TAKEOVER_HEALTH_FAIL/);
   const stop=headless.slice(headless.indexOf('function Stop-Connector'),headless.indexOf('function Stop-ServiceForConfig'));
   assert.match(stop,/Get-ShadowState/);
@@ -1186,14 +1272,16 @@ test('Windows first-connect OpenVPN prerequisite is pinned, verified and install
   assert.match(ensure,/WINDOWS_OPENVPN_CONNECT\.sha256/);
   assert.match(ensure,/Start-Process -FilePath 'msiexec\.exe' -Verb RunAs -Wait -PassThru/);
   assert.match(ensure,/\$msi='" \+ escapedMsi \+ "'/);
-  assert.match(ensure,/\$msiArgs='\/i \\"' \+ \$msi \+ '\\" \/passive \/norestart'/);
+  assert.match(ensure,/\$msiArgs='\/i /);
+  assert.match(ensure,/\/quiet \/norestart/);
+  assert.match(ensure,/\/quiet \/norestart AUTOSTART=no/);
   assert.match(ensure,/ArgumentList \$msiArgs/);
   assert.match(ensure,/run\(pwsh, \['-NoProfile','-Command',elevate\]/);
   assert.match(ensure,/administrator approval was cancelled/);
   assert.match(ensure,/ovpnconnector\.exe is still missing/);
   const actionStart=backend.indexOf('async action(action, options = {})');
   const action=backend.slice(actionStart,backend.indexOf('\n  async diagnostics()',actionStart));
-  const pre=action.indexOf('await this._ensureWindowsRuntimePrerequisites()');
+  const pre=action.indexOf('await this.prepareWindowsInstallerPrerequisites()');
   const bench=action.indexOf('await this.benchmarkAllFast()');
   assert.ok(pre >= 0 && bench > pre);
   assert.match(action,/action === 'connect' \|\| action === 'connect-profile'/);
@@ -1207,6 +1295,500 @@ test('Windows update helper uses an isolated copy of bundled PowerShell instead 
   assert.match(block,/const bundledPwshRoot = path\.join\(this\.resourcesPath \|\| '', 'pwsh'\)/);
   assert.match(block,/copyDir\(bundledPwshRoot, helperRuntime\)/);
   assert.match(block,/updatePwsh = path\.join\(helperRuntime, 'pwsh\.exe'\)/);
-  assert.match(block,/spawn\(updatePwsh, pwshArgs/);
+  assert.match(block,/spawn\(updatePwsh, bootstrapArgs/);
   assert.doesNotMatch(block,/where\.exe pwsh\.exe|process\.env\.ComSpec|apply-update\.cmd/);
+});
+
+
+test('real VPN throughput rejects physical ISP routes and binds Linux transfers to the tunnel', async()=>{
+  const Backend = require('../src/main/platform-backend');
+  const b = new Backend({
+    version: '2.5.20', appPath: root, resourcesPath: root,
+    userData: root, emit: () => {}
+  });
+  b.platform = 'linux';
+  b.profiles = async () => { throw new Error('Must not read inventory before tunnel guard'); };
+  b.status = async () => ({ connected: true, fullRoutes: 0, interface: 'enp1s0' });
+  await assert.rejects(b.benchmarkActive(), /active full-route VPN/);
+  b.status = async () => ({ connected: true, fullRoutes: 2, interface: 'enp1s0' });
+  await assert.rejects(b.benchmarkActive(), /VPN tunnel interface cannot be verified/);
+  assert.deepEqual(
+    await b._activeTunnelCurlArgs({ connected: true, fullRoutes: 2, interface: 'tun0' }),
+    ['-4','--noproxy','*','--interface','if!tun0']
+  );
+  for (const suspicious of ['enp1s0', 'wg0', 'tun0;id', '--option', '']) {
+    await assert.rejects(
+      () => b._activeTunnelCurlArgs({ connected: true, fullRoutes: 2, interface: suspicious }),
+      /VPN tunnel interface cannot be verified/
+    );
+  }
+  b.platform = 'win32';
+  await assert.rejects(() => b._activeTunnelCurlArgs({ connected: true, fullRoutes: 0 }),
+    /active full-route VPN/);
+  await assert.rejects(() => b._activeTunnelCurlArgs({ connected: true, fullRoutes: 2 }),
+    /Windows managed VPN interface is missing/);
+  const source = fs.readFileSync(path.join(root, 'src/main/platform-backend.js'), 'utf8');
+  const active = source.slice(source.indexOf('  async benchmarkActive()'),
+    source.indexOf('  _githubHeaders()', source.indexOf('  async benchmarkActive()')));
+  assert.ok((active.match(/\.\.\.tunnelCurlArgs/g) || []).length >= 2,
+    'VPN download and upload both require the verified tunnel args');
+  assert.match(active, /this\._httpsLatencyMs\(sink, tunnelCurlArgs\)/);
+  assert.match(active, /const endStatus = await this\.status\(\)/);
+  assert.match(active, /result discarded/);
+  assert.ok(active.indexOf('const endStatus = await this.status()') <
+            active.indexOf('this._writeJson('),
+    'Do not persist a throughput claim after the VPN route changed');
+});
+
+test('Windows tunnel speed is bound to a uniquely verified VPN IPv4 source, never an unbound physical connection',async()=>{
+  const vm = require('node:vm');
+  const {EventEmitter} = require('node:events');
+  const source = fs.readFileSync(path.join(root,'src/main/platform-backend.js'),'utf8');
+  const calls = [];
+  let output = '10.19.0.8';
+  // Intercept only the child process API in this isolated VM. No PowerShell,
+  // Windows network, OpenVPN connector, or actual Internet request is invoked.
+  const fakeSpawn = (program,argv,options)=>{
+    const child = new EventEmitter();
+    child.stdin = new EventEmitter();
+    child.stdin.end = ()=>{};
+    child.stdout = new EventEmitter();
+    child.stderr = new EventEmitter();
+    calls.push({program,argv,options});
+    process.nextTick(()=>{
+      child.stdout.emit('data',Buffer.from(output));
+      child.emit('close',0);
+    });
+    return child;
+  };
+  const moduleObj = {exports:{}};
+  vm.runInNewContext(source,{
+    module:moduleObj,exports:moduleObj.exports,process,Buffer,setTimeout,clearTimeout,
+    require:n=>n==='child_process'?{spawn:fakeSpawn}:require(n)
+  },{filename:'platform-backend-test-vm.js'});
+  const b=new moduleObj.exports({version:'2.5.20',appPath:root,resourcesPath:root,userData:root});
+  b.platform='win32';
+  b._requireWindowsPwsh=()=> 'qa-fake-pwsh.exe';
+  const route = {connected:true,fullRoutes:2,interface:'OIG OpenVPN QA Device'};
+  const args = await b._activeTunnelCurlArgs(route);
+  assert.deepEqual(Array.from(args),['-4','--noproxy','*','--interface','host!10.19.0.8']);
+  assert.equal(calls.length,1);
+  assert.equal(calls[0].program,'qa-fake-pwsh.exe');
+  assert.equal(calls[0].options.env.OIG_SPEED_TUNNEL_IFACE,route.interface);
+  const ps=calls[0].argv.at(-1);
+  assert.match(ps,/Get-NetRoute -AddressFamily IPv4/);
+  assert.match(ps,/0\.0\.0\.0\/1/);
+  assert.match(ps,/128\.0\.0\.0\/1/);
+  assert.match(ps,/\$routes\.Count -ne 2/);
+  assert.match(ps,/\$indexes\.Count -ne 1/);
+  assert.match(ps,/Get-NetIPAddress -AddressFamily IPv4 -InterfaceIndex/);
+  assert.doesNotMatch(ps,/OIG OpenVPN QA Device/,'VPN alias must never be shell-interpolated');
+  for(const invalid of ['127.0.0.1','169.254.1.2','bad-response','10.19.0.8\n10.19.0.9']){
+    output=invalid;
+    await assert.rejects(b._activeTunnelCurlArgs(route),/no trustworthy IPv4 source/);
+  }
+  assert.equal(calls.length,5);
+  await assert.rejects(
+    b._activeTunnelCurlArgs({...route,interface:'VPN\nmalicious'}),
+    /Windows managed VPN interface is missing or invalid/
+  );
+  const active=source.slice(source.indexOf('  async benchmarkActive()'),
+    source.indexOf('  _githubHeaders()',source.indexOf('  async benchmarkActive()')));
+  assert.match(active,/await this\._activeTunnelCurlArgs\(status\)/);
+  assert.match(active,/endStatus\.interface !== status\.interface/);
+  assert.match(active,/vpn-source-ip-bound/);
+});
+
+test('real throughput never persists measurements when VPN source or active relay changes mid-transfer',async()=>{
+  const vm = require('node:vm');
+  const os = require('node:os');
+  const {EventEmitter} = require('node:events');
+  const source = fs.readFileSync(path.join(root,'src/main/platform-backend.js'),'utf8');
+  const fakeSpawn = (file,args)=>{
+    assert.equal(file,'curl','Only inert mocked curl transfers may execute');
+    const child=new EventEmitter();
+    child.stdin=new EventEmitter();child.stdin.end=()=>{};
+    child.stdout=new EventEmitter();child.stderr=new EventEmitter();
+    process.nextTick(()=>{
+      const upload=args.includes('-X');
+      child.stdout.emit('data',Buffer.from(upload?'200|1|62500|512000':'200|1|1250000|2000000'));
+      child.emit('close',0);
+    });
+    return child;
+  };
+  const mod={exports:{}};
+  vm.runInNewContext(source,{module:mod,exports:mod.exports,process,Buffer,setTimeout,clearTimeout,
+    require:n=>n==='child_process'?{spawn:fakeSpawn}:require(n)},{filename:'backend-no-real-traffic-test.js'});
+  const profileSha='a'.repeat(64);
+  async function exercise(mode){
+    const temp=fs.mkdtempSync(path.join(os.tmpdir(),'oig-throughput-route-guard-'));
+    try{
+      const b=new mod.exports({version:'2.5.20',appPath:root,resourcesPath:root,userData:temp});
+      b.platform='win32';b.backendRoot=temp;
+      let statusReads=0;let profileReads=0;let tunnelIp='10.19.0.2';
+      b.status=async()=>{
+        statusReads++;
+        if(mode==='source-change' && statusReads===2)tunnelIp='10.19.0.3';
+        return {connected:mode!=='disconnect'||statusReads===1,fullRoutes:2,interface:'OIG VPN Alias'};
+      };
+      b._activeTunnelCurlArgs=async()=>['-4','--noproxy','*','--interface','host!'+tunnelIp];
+      b.profiles=async()=>{
+        profileReads++;
+        const moved=mode==='relay-change'&&profileReads>1;
+        return {activeSha:moved?'b'.repeat(64):profileSha,
+          profiles:[{active:true,sha256:moved?'b'.repeat(64):profileSha,ip:'198.51.100.1',
+            host:'synthetic.test',country:'US',benchmark:null}]};
+      };
+      b._httpsLatencyMs=async()=>55;
+      b._icmpPing=async()=>77;
+      const persisted=path.join(temp,'state','connection-benchmarks.json');
+      if(mode==='stable'){
+        const x=await b.benchmarkActive();
+        assert.equal(x.ok,true);
+        assert.equal(x.benchmark.throughputPath,'vpn-source-ip-bound');
+        assert.ok(x.benchmark.downloadMbps>0&&x.benchmark.uploadMbps>0);
+        assert.equal(x.benchmark.tunnelRouteVerifiedAfterTransfer,true);
+        assert.equal(JSON.parse(fs.readFileSync(persisted,'utf8'))[profileSha].sha256,profileSha);
+        assert.equal(statusReads,2);
+        assert.equal(profileReads,2);
+      }else{
+        const error=mode==='source-change'?/tunnel source changed/:
+          mode==='relay-change'?/Active VPN relay rotated/:/route or active connection changed/;
+        await assert.rejects(b.benchmarkActive(),error);
+        assert.equal(fs.existsSync(persisted),false,
+          'Never persist stale speed values after tunnel change '+mode);
+      }
+    }finally{fs.rmSync(temp,{recursive:true,force:true})}
+  }
+  for(const mode of ['stable','source-change','relay-change','disconnect'])await exercise(mode);
+});
+
+test('active download retries once on the same VPN-bound source and never persists failed or rotated results',async()=>{
+  const vm=require('node:vm');
+  const os=require('node:os');
+  const {EventEmitter}=require('node:events');
+  const source=fs.readFileSync(path.join(root,'src/main/platform-backend.js'),'utf8');
+  const sha='d'.repeat(64);
+  let mode='transient', downloadCount=0, uploadCount=0;
+  const mockSpawn=(program,args)=>{
+    assert.equal(program,'curl','Use synthetic curl only: no network or OS service');
+    const child=new EventEmitter();
+    child.stdin=new EventEmitter();child.stdin.end=()=>{};
+    child.stdout=new EventEmitter();child.stderr=new EventEmitter();
+    assert.ok(args.includes('--interface')&&args.includes('host!10.19.0.8'),
+      'Every curl operation must bind to the verified VPN source');
+    const isUpload=args.includes('--data-binary');
+    if(isUpload) uploadCount++;
+    else downloadCount++;
+    const response=isUpload
+      ? (mode==='short-upload'?'200|1|62500|256000':'200|1|62500|512000')
+      : (mode==='short-download'?'200|1|1250000|1000000'
+        : mode==='all-fail'||downloadCount===1?'503|0.8|0|0':'200|1|1250000|2000000');
+    const closeCode=mode==='curl-error'&&!isUpload?18:0;
+    process.nextTick(()=>{child.stdout.emit('data',Buffer.from(response));child.emit('close',closeCode)});
+    return child;
+  };
+  const mod={exports:{}};
+  vm.runInNewContext(source,{module:mod,exports:mod.exports,process,Buffer,setTimeout,clearTimeout,
+    require:n=>n==='child_process'?{spawn:mockSpawn}:require(n)
+  },{filename:'oig-active-download-retry-synthetic.js'});
+  async function exercise(scenario){
+    mode=scenario;downloadCount=0;uploadCount=0;
+    const temp=fs.mkdtempSync(path.join(os.tmpdir(),'oig-active-download-retry-'));
+    try {
+      const b=new mod.exports({version:'2.5.20',appPath:root,resourcesPath:root,userData:temp});
+      b.platform='win32';b.backendRoot=temp;
+      let statusCalls=0;
+      b.status=async()=>{statusCalls++;return {
+        connected:true,fullRoutes:2,interface:scenario==='source-change'&&statusCalls>1?'changed':'VPN QA',
+        activeSha:sha,country:'US',ip:'198.51.100.77'
+      }};
+      b._activeTunnelCurlArgs=async()=>['-4','--noproxy','*','--interface','host!10.19.0.8'];
+      b.profiles=async()=>({activeSha:sha,profiles:[{
+        active:true,sha256:sha,ip:'203.0.113.18',host:'qa.invalid',country:'US'
+      }]});
+      b._httpsLatencyMs=async()=>20;b._icmpPing=async()=>null;
+      const saved=path.join(temp,'state','connection-benchmarks.json');
+      if(['all-fail','short-download','curl-error'].includes(scenario)){
+        await assert.rejects(b.benchmarkActive(),/Real download test.*bounded retry/);
+        assert.equal(downloadCount,2);
+        assert.equal(uploadCount,0,'Never upload after an unverified download');
+        assert.equal(fs.existsSync(saved),false,'Failed transfer must not be persisted');
+      }else if(scenario==='short-upload'){
+        await assert.rejects(b.benchmarkActive(),/Real upload test.*bounded retry/);
+        assert.equal(downloadCount,2);
+        assert.equal(uploadCount,2);
+        assert.equal(fs.existsSync(saved),false,'Incomplete upload must not be counted');
+      }else if(scenario==='source-change'){
+        await assert.rejects(b.benchmarkActive(),/Tunnel route or active connection changed/);
+        assert.equal(downloadCount,2);
+        assert.equal(fs.existsSync(saved),false,'Changed route must not be attributed to old relay');
+      }else{
+        const res=await b.benchmarkActive();
+        assert.equal(res.ok,true);
+        assert.equal(res.benchmark.downloadAttempts,2);
+        assert.equal(res.benchmark.uploadAttempts,1);
+        assert.equal(res.benchmark.throughputPath,'vpn-source-ip-bound');
+        assert.equal(res.benchmark.downloadBytes,2000000);
+        assert.equal(res.benchmark.uploadBytes,512000);
+        assert.equal(downloadCount,2);
+        assert.equal(uploadCount,1);
+        assert.equal(JSON.parse(fs.readFileSync(saved,'utf8'))[sha].downloadAttempts,2);
+      }
+    }finally{fs.rmSync(temp,{recursive:true,force:true})}
+  }
+  for(const scenario of ['transient','all-fail','short-download','short-upload','curl-error','source-change'])await exercise(scenario);
+});
+
+test('Windows packaged capture QA is fail-closed and never writes the real installed backend or registers autostart', async()=>{
+  const Backend=require('../src/main/platform-backend');
+  const os=require('node:os');
+  const tmp=fs.mkdtempSync(path.join(os.tmpdir(),'oig-passive-win-capture-'));
+  const vars=['OIG_CAPTURE_ONLY','OIG_CAPTURE_ROOT','LOCALAPPDATA'];
+  const previous=Object.fromEntries(vars.map(name=>[name,process.env[name]]));
+  try {
+    const fakeResource=path.join(tmp,'app','backend','windows');
+    fs.mkdirSync(fakeResource,{recursive:true});
+    fs.writeFileSync(path.join(fakeResource,'OpenInternetGateway.ps1'),'# harmless fixture');
+    const realUserLocal=path.join(tmp,'real-user-local');
+    const installed=path.join(realUserLocal,'OpenInternetGateway');
+    fs.mkdirSync(installed,{recursive:true});
+    const sentinel=path.join(installed,'OpenInternetGateway.ps1');
+    fs.writeFileSync(sentinel,'USER_BACKEND_MUST_NOT_BE_REPLACED');
+    process.env.LOCALAPPDATA=realUserLocal;
+    process.env.OIG_CAPTURE_ONLY='1';
+    delete process.env.OIG_CAPTURE_ROOT;
+    const makeBackend=()=>{
+      const b=new Backend({version:'2.5.20',appPath:path.join(tmp,'app'),
+        resourcesPath:path.join(tmp,'app'),userData:path.join(tmp,'user-data')});
+      b.platform='win32';
+      return b;
+    };
+    await assert.rejects(makeBackend().initialize(),/isolated absolute OIG_CAPTURE_ROOT/);
+    process.env.OIG_CAPTURE_ROOT='relative-scratch';
+    await assert.rejects(makeBackend().initialize(),/isolated absolute OIG_CAPTURE_ROOT/);
+    const privateRoot=path.join(tmp,'capture-only-qa');
+    process.env.OIG_CAPTURE_ROOT=privateRoot;
+    const b=makeBackend();
+    await b.initialize();
+    assert.equal(b.backendRoot,path.join(privateRoot,'backend-windows'));
+    assert.equal(fs.readFileSync(path.join(b.backendRoot,'OpenInternetGateway.ps1'),'utf8'),
+      '# harmless fixture');
+    assert.equal(fs.readFileSync(sentinel,'utf8'),'USER_BACKEND_MUST_NOT_BE_REPLACED');
+    const entry=fs.readFileSync(path.join(root,'src/main/main.js'),'utf8');
+    assert.match(entry,/app\.isPackaged && process\.env\.OIG_CAPTURE_ONLY !== '1'/,
+      "QA must not register the user's Windows login autostart");
+    assert.match(entry,/process\.platform !== 'win32' \|\| process\.env\.OIG_CAPTURE_ONLY !== '1'\) createTray\(\)/,
+      'QA must not create a notification icon in the real Windows tray');
+    const frame=entry.slice(entry.indexOf("win.once('ready-to-show'"),
+      entry.indexOf("win.on('close'"));
+    assert.ok(frame.indexOf('fs.writeFileSync(process.env.OIG_CAPTURE_PATH') >= 0,
+      'Capture frame must be stored before quitting');
+    assert.ok(frame.indexOf('app.exit(0)') >
+      frame.indexOf('fs.writeFileSync(process.env.OIG_CAPTURE_PATH'),
+      'Capture must exit the Electron process unconditionally after writing the frame');
+  } finally {
+    for(const name of vars){
+      if(previous[name]===undefined)delete process.env[name];else process.env[name]=previous[name];
+    }
+    fs.rmSync(tmp,{recursive:true,force:true});
+  }
+});
+
+test('Windows direct ISP requires the winning physical route before claiming physical speed',async()=>{
+  const vm=require('node:vm');
+  const os=require('node:os');
+  const {EventEmitter}=require('node:events');
+  const source=fs.readFileSync(path.join(root,'src/main/platform-backend.js'),'utf8');
+  const calls=[];
+  let redirectedDestination='';
+  let truncateDownload=false,truncateUpload=false,downloadCurlError=false;
+  const spawnMock=(program,args,options)=>{
+    const cmd=args.at(-1);
+    let response='';
+    if(program==='qa-pwsh.exe'){
+      const to=options.env.OIG_DIRECT_REMOTE_IPV4;
+      assert.match(cmd,/Find-NetRoute -RemoteIPAddress/);
+      assert.equal(options.env.OIG_DIRECT_LOCAL_IPV4,'192.0.2.10');
+      assert.equal(options.env.OIG_DIRECT_IFINDEX,'17');
+      calls.push(to);
+      response=to===redirectedDestination?'REJECTED_FAKE_VPN_ROUTE':'VERIFIED_DIRECT_ROUTE';
+    }else if(program==='curl'){
+      if(args.includes('--data-binary'))response='200|1|900000|203.0.113.21|'+(truncateUpload?'250000':'1000000');
+      else if(args.some(a=>String(a).includes('__down')))response='200|1|1800000|203.0.113.20|'+(truncateDownload?'2500000':'5000000');
+      else response='ip=203.0.113.50\\nloc=US';
+    }else throw Error('Unexpected external process in QA route fixtures '+program);
+    const child=new EventEmitter();child.stdin=new EventEmitter();child.stdin.end=()=>{};
+    child.stdout=new EventEmitter();child.stderr=new EventEmitter();
+    process.nextTick(()=>{child.stdout.emit('data',Buffer.from(response));child.emit('close',downloadCurlError&&program==='curl'&&args.some(a=>String(a).includes('__down'))?18:0)});
+    return child;
+  };
+  const mod={exports:{}};
+  vm.runInNewContext(source,{
+    module:mod,exports:mod.exports,process,Buffer,setTimeout,clearTimeout,
+    require:n=>n==='child_process'?{spawn:spawnMock}:require(n)
+  },{filename:'windows-direct-route-no-real-network-fixture.js'});
+  const temp=fs.mkdtempSync(path.join(os.tmpdir(),'oig-win-direct-winning-route-'));
+  try {
+    const b=new mod.exports({version:'2.5.20',appPath:root,resourcesPath:root,userData:temp});
+    b.platform='win32';b.backendRoot=temp;b._requireWindowsPwsh=()=> 'qa-pwsh.exe';
+    const routeSelection = source.slice(source.indexOf("  async _directInternetPath()"),
+      source.indexOf("  async _assertWindowsDirectEgress("));
+    assert.match(routeSelection,/\.HardwareInterface/,
+      'Only a physical hardware adapter can qualify as ISP');
+    assert.match(routeSelection,/Find-NetRoute -RemoteIPAddress '1\.1\.1\.1'/,
+      'Pick the adapter from the actual winning route when multiple physical adapters exist');
+    assert.doesNotMatch(routeSelection,/Sort-Object RouteMetric,InterfaceMetric/,
+      'Do not pick the first physical 0\/0 route on a multi-NIC system');
+    assert.doesNotMatch(routeSelection,/if\(-not \$r\)\{\$r=\$routes/,
+      'Do not fall back to a virtual Windows route when no hardware adapter exists');
+    const physical={interface:'Ethernet QA',index:17,localIP:'192.0.2.10',gateway:'192.0.2.1',
+      curlInterface:'host!192.0.2.10',bindMode:'physical-ip'};
+    for(const invalid of ['', 'not-an-ip', '::1','127.0.0.1/8']){
+      await assert.rejects(b._assertWindowsDirectEgress(physical,invalid),/invalid remote\/source/);
+    }
+    await b._assertWindowsDirectEgress(physical,'1.1.1.1');
+    assert.equal(calls.at(-1),'1.1.1.1');
+    redirectedDestination='203.0.113.21';
+    await assert.rejects(b._assertWindowsDirectEgress(physical,'203.0.113.21'),
+      /refused rather than attributing VPN traffic/);
+    assert.equal(calls.at(-1),'203.0.113.21');
+    const tempJson=path.join(temp,'state','direct-internet-benchmark.json');
+    b._directInternetPath=async()=>physical;
+    b._directTrace=async()=>({publicIP:'203.0.113.50',country:'US',colo:'QA',
+      httpsLatencyMs:20,remoteIP:'203.0.113.19'});
+    b._icmpPing=async()=>42;
+    await assert.rejects(b.benchmarkDirectInternet(),
+      /refused rather than attributing VPN traffic/);
+    assert.equal(fs.existsSync(tempJson),false,
+      'Windows direct ISP result must not be persisted after winning route changed');
+    assert.equal(fs.existsSync(path.join(temp,'state','direct-benchmark-upload.bin')),false,
+      'QA upload payload must be removed on refusal');
+    redirectedDestination='';
+    truncateDownload=true;
+    await assert.rejects(b.benchmarkDirectInternet(),/Direct ISP download test did not complete/);
+    assert.equal(fs.existsSync(tempJson),false,'Short physical download cannot be persisted');
+    truncateDownload=false;
+    truncateUpload=true;
+    await assert.rejects(b.benchmarkDirectInternet(),/Direct ISP upload test did not complete/);
+    assert.equal(fs.existsSync(tempJson),false,'Short physical upload cannot be persisted');
+    assert.equal(fs.existsSync(path.join(temp,'state','direct-benchmark-upload.bin')),false);
+    truncateUpload=false;
+    downloadCurlError=true;
+    await assert.rejects(b.benchmarkDirectInternet(),/Direct ISP download test did not complete/);
+    assert.equal(fs.existsSync(tempJson),false,'Nonzero curl exit invalidates positive metadata');
+    downloadCurlError=false;
+    const ok=await b.benchmarkDirectInternet();
+    assert.equal(ok.ok,true);
+    assert.equal(ok.benchmark.effectiveRouteVerified,true);
+    assert.equal(ok.benchmark.interface,'Ethernet QA');
+    assert.equal(ok.benchmark.downloadMbps,14.4);
+    assert.equal(ok.benchmark.uploadMbps,7.2);
+    assert.equal(ok.benchmark.downloadBytes,5000000);
+    assert.equal(ok.benchmark.uploadBytes,1000000);
+    assert.deepEqual(calls.slice(-3),['203.0.113.19','203.0.113.20','203.0.113.21']);
+    assert.equal(JSON.parse(fs.readFileSync(tempJson,'utf8')).effectiveRouteVerified,true);
+  }finally{fs.rmSync(temp,{recursive:true,force:true})}
+});
+
+
+test('Windows updater uses hidden native Start-Process bootstrap and preserves fail-closed checksum',()=>{
+  const backend=fs.readFileSync(path.join(root,'src/main/platform-backend.js'),'utf8');
+  const bootstrap=fs.readFileSync(path.join(root,'backend/windows/scripts/Start-UpdateBootstrap.ps1'),'utf8');
+  const begin=backend.indexOf('async launchDownloadedUpdate');
+  const end=backend.indexOf("if (this.platform === 'linux')",begin);
+  const windows=backend.slice(begin,end);
+  assert.match(windows,/spawn\(updatePwsh, bootstrapArgs/);
+  assert.match(windows,/detached: false/);
+  assert.match(windows,/Start-UpdateBootstrap\.ps1/);
+  assert.match(windows,/Windows native update bootstrap refused to start/);
+  assert.match(bootstrap,/WINDOWS_UPDATE_BOOTSTRAP_FAILED/);
+  assert.match(windows,/resultFile \+ '\.started'/);
+  assert.match(bootstrap,/Start-Process -FilePath \$Runner -ArgumentList \$arguments -WindowStyle Hidden/);
+  assert.match(bootstrap,/Quote-UpdateArg/);
+  assert.doesNotMatch(bootstrap,/RunAs|sudo|Start-Process.+-Verb/);
+});
+
+test('native Windows update handoff rejects an invalid synthetic installer before launch',
+  { skip: process.platform !== 'win32' }, async()=>{
+  const Backend=require('../src/main/platform-backend');
+  const os=require('node:os');
+  const temp=fs.mkdtempSync(path.join(os.tmpdir(),'oig-native-update-negative-'));
+  const parent=path.join(temp,'QA Folder With Spaces');
+  const backendRoot=path.join(parent,'backend');
+  const version='9.9.9';
+  const updateDir=path.join(backendRoot,'updates','v'+version);
+  const scripts=path.join(backendRoot,'scripts');
+  const scratchLocal=path.join(parent,'Local');
+  const oldLocal=process.env.LOCALAPPDATA;
+  fs.mkdirSync(scripts,{recursive:true});
+  fs.mkdirSync(updateDir,{recursive:true});
+  fs.mkdirSync(scratchLocal,{recursive:true});
+  fs.copyFileSync(path.join(root,'backend/windows/scripts/Start-UpdateBootstrap.ps1'),
+    path.join(scripts,'Start-UpdateBootstrap.ps1'));
+  const fake=path.join(updateDir,'OpenInternetGateway-Setup-'+version+'.exe');
+  fs.writeFileSync(fake,'NOT_A_REAL_INSTALLER_INVALID_SHA_ONLY\n');
+  const fallback=path.join(parent,'nonexistent-previous-app.exe');
+  const expectedSha='f'.repeat(64);
+  const installed=path.join(scratchLocal,'Programs','open-internet-gateway','Open Internet Gateway.exe');
+  const pwsh=path.join(process.env.ProgramFiles||'C:\\Program Files','PowerShell','7','pwsh.exe');
+  assert.ok(fs.existsSync(pwsh),'Windows PowerShell 7 required for native handoff test');
+  const b=new Backend({version:'2.5.20',resourcesPath:parent,appPath:parent,userData:parent});
+  b.platform='win32';
+  b.backendRoot=backendRoot;
+  b._requireWindowsPwsh=()=>pwsh;
+  process.env.LOCALAPPDATA=scratchLocal;
+  try{
+    const handoff=await b.launchDownloadedUpdate({
+      path:fake,sha256:expectedSha,info:{latestVersion:version}
+    },{appPid:2147000000,currentExecutable:fallback});
+    assert.equal(handoff.applying,true);
+    assert.equal(handoff.installScope,'current-user');
+    const until=Date.now()+15000;
+    let result=null;
+    while(Date.now()<until){
+      if(fs.existsSync(handoff.resultFile)){
+        try{result=JSON.parse(fs.readFileSync(handoff.resultFile,'utf8'));break;}catch{}
+      }
+      await new Promise(resolve=>setTimeout(resolve,120));
+    }
+    assert.ok(result,'Native helper must finish its rejected-hash check');
+    assert.equal(result.ok,false);
+    assert.match(result.error,/Verified installer hash changed before apply/);
+    assert.ok(fs.existsSync(handoff.resultFile+'.started'));
+    assert.equal(fs.existsSync(installed),false);
+    assert.equal(fs.existsSync(fallback),false);
+  }finally{
+    if(oldLocal===undefined)delete process.env.LOCALAPPDATA;
+    else process.env.LOCALAPPDATA=oldLocal;
+    fs.rmSync(temp,{recursive:true,force:true});
+  }
+});
+
+test('Windows failed post-takeover health stops the owned connector without adding competing shadow routes',()=>{
+  const headless=fs.readFileSync(path.join(root,'backend/windows/scripts/Headless-Control.ps1'),'utf8').replace(/\r\n/g,'\n');
+  const start=headless.indexOf('if(-not $h.Healthy){');
+  const end=headless.indexOf('if(-not(Test-DesiredOn))',start);
+  assert.ok(start>0 && end>start,'Must identify the exact post-takeover unhealthy branch');
+  const unhealthy=headless.slice(start,end);
+  assert.doesNotMatch(unhealthy,/Add-PhysicalShadows|New-NetRoute|Remove-NetRoute/,
+    'Failed health must not add a second /1 pair while native routes still exist');
+  assert.match(unhealthy,/POST_TAKEOVER_HEALTH_FAIL/);
+  assert.match(unhealthy,/recovery='stop-owned-connector'/);
+  assert.match(unhealthy,/Write-ShadowEvidence[\s\S]*Record-Failure[\s\S]*return \$null/);
+  const txn=headless.slice(headless.indexOf(' $handoverCommitted=$false'),headless.indexOf('\n}\n\n$mutex=',start));
+  assert.match(txn,/try\s*\{[\s\S]*POST_TAKEOVER_HEALTH_FAIL[\s\S]*\}\s*finally\s*\{\s*if\(-not \$handoverCommitted\)\{Stop-Connector\}/);
+});
+
+test('Windows routes are journaled before the first /1 mutation and all abnormal handovers clean up',()=>{
+  const headless=fs.readFileSync(path.join(root,'backend/windows/scripts/Headless-Control.ps1'),'utf8').replace(/\r\n/g,'\n');
+  const add=headless.slice(headless.indexOf('function Add-PhysicalShadows'),headless.indexOf('function Get-ShadowState'));
+  const journal=add.indexOf('$state|ConvertTo-Json');
+  const route=add.indexOf('New-NetRoute -DestinationPrefix');
+  assert.ok(journal>0 && journal<route,'Durable owned-route journal must precede any /1 route mutation');
+  assert.match(add,/status='cleanup-armed'/);
+  assert.match(add,/catch\s*\{[\s\S]*Remove-PhysicalShadows[\s\S]*throw/);
+  const candidate=headless.slice(headless.indexOf('function Try-Candidate'),headless.indexOf('\n$mutex='));
+  assert.match(candidate,/\$handoverCommitted=\$false\s*try\s*\{\s*\$shadow=Add-PhysicalShadows/);
+  assert.match(candidate,/\$handoverCommitted=\$true\s*return \$h\s*\}\s*finally\s*\{\s*if\(-not \$handoverCommitted\)\{Stop-Connector\}/);
 });

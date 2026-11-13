@@ -77,7 +77,7 @@ function Get-Health([string]$ExpectedCountry='') {
  $cf=@(curl.exe -4 --max-time 4 -s https://www.cloudflare.com/cdn-cgi/trace)
  $ip=[string]((($cf|Where-Object{$_ -like 'ip=*'}|Select-Object -First 1)-replace '^ip=',''));$ip=$ip.Trim()
  $loc=[string]((($cf|Where-Object{$_ -like 'loc=*'}|Select-Object -First 1)-replace '^loc=',''));$loc=$loc.Trim()
- $dns=@(Resolve-DnsName dns.google -Type A -DnsOnly -ErrorAction SilentlyContinue|Where-Object IPAddress|Select-Object -ExpandProperty IPAddress)
+ $dns=@(Resolve-DnsName dns.google -Type A -DnsOnly -ErrorAction SilentlyContinue|Where-Object {$_.IPAddress -and $_.Section -eq 'Answer'}|Select-Object -ExpandProperty IPAddress)
  $poison=if($dns.Count -eq 0){$null}else{@($dns|Where-Object{$_ -notin @('8.8.8.8','8.8.4.4')}).Count -gt 0}
  $foreign=($loc -and $loc -ne 'IR')
  $countryOk=([string]::IsNullOrWhiteSpace($ExpectedCountry) -or $loc -eq $ExpectedCountry)
@@ -93,8 +93,50 @@ function Wait-Health([bool]$Want,[int]$Seconds,[string]$ExpectedCountry=''){
  }while((Get-Date)-lt $until)
  return (Get-Health $ExpectedCountry)
 }
+# Privileged Auto-Recovery enforces the same foreign-VPN check as the UI.
+function Get-OigOwnedInterfaceIndex {
+ $svc=Get-Service $service -ErrorAction SilentlyContinue
+ if(-not $svc -or $svc.Status -ne 'Running'){return 0}
+ if(-not(Test-Path -LiteralPath $stateFile)){return 0}
+ try{
+  $owned=Get-Content -LiteralPath $stateFile -Raw -Encoding UTF8|ConvertFrom-Json
+  if([string]$owned.engine -ne 'OVPNConnectorService' -or
+     [string]$owned.sha256 -notmatch '^[a-fA-F0-9]{64}$'){return 0}
+  $routes=@(Get-NetRoute -AddressFamily IPv4 -ErrorAction Stop|
+    Where-Object {$_.DestinationPrefix -in @('0.0.0.0/1','128.0.0.0/1')})
+  if(-not(Test-OigFullRoutePair -Routes $routes)){return 0}
+  return [int]$routes[0].InterfaceIndex
+ }catch{return 0}
+}
+function Assert-OigNoIndependentVpn {
+ $guard=Join-Path $PSScriptRoot 'Guard-IndependentVpn.ps1'
+ if(-not(Test-Path -LiteralPath $guard)){throw 'Independent VPN safety observer is missing.'}
+ $pwsh=Join-Path $PSHOME 'pwsh.exe'
+ if(-not(Test-Path -LiteralPath $pwsh)){throw 'PowerShell safety observer is missing.'}
+ $own=Get-OigOwnedInterfaceIndex
+ & $pwsh -NoProfile -NonInteractive -File $guard -OwnedInterfaceIndex $own
+ $code=$LASTEXITCODE
+ if($code -eq 17){throw 'Independent VPN is active; refusing connector changes.'}
+ if($code -ne 0){throw 'Independent VPN state unknown; refusing connector changes.'}
+}
+function Test-DesiredOn {
+ if(-not(Test-Path -LiteralPath $desiredFile)){return $false}
+ try{return ([string](Get-Content -LiteralPath $desiredFile -Raw|ConvertFrom-Json).desired -eq 'on')}
+ catch{return $false}
+}
 function Save-Desired([string]$Value){
  [ordered]@{desired=$Value;at=(Get-Date).ToString('o')}|ConvertTo-Json|Set-Content -Encoding UTF8 $desiredFile
+}
+function Test-OigOpenVpnGuiRunning {
+ try{return (@(Get-Process -Name 'OpenVPNConnect' -ErrorAction Stop).Count -gt 0)}
+ catch{if($_.FullyQualifiedErrorId -like 'NoProcessFoundForGivenName*'){return $false};throw 'Cannot confirm whether OpenVPN Connect GUI is running; refusing headless service mutation.'}
+}
+function Assert-OpenVpnGuiClosed {
+ if(Test-OigOpenVpnGuiRunning){
+   Save-Desired 'off'
+   Remove-Item -LiteralPath (Join-Path $Root 'state\exact-profile.request') -Force -ErrorAction SilentlyContinue
+   throw 'OpenVPN Connect GUI is already running; headless Connect was cancelled. Close the independent app and click Connect again.'
+ }
 }
 function Read-Map([string]$Path){
  if(Test-Path $Path){try{return (Get-Content -Raw $Path|ConvertFrom-Json -AsHashtable)}catch{}}
@@ -116,7 +158,8 @@ function Record-Failure($c,[string]$Reason){
  if($count -ge 3){$quar[$key]=[ordered]@{at=(Get-Date).ToString('o');reason=$Reason;failures=$count;host=[string]$c.Host;ip=[string]$c.IP;port=[int]$c.Port;sha256=[string]$c.SHA256}}
  Write-Map $fail $failureFile;Write-Map $quar $quarantineFile
 }
-function Record-Success($c,$h){
+function Record-Success($c,$h,[string]$CaSha256){
+ if($CaSha256 -notmatch '^[a-f0-9]{64}$'){throw 'Cannot record successful relay without a parsed CA fingerprint.'}
  $success=Read-Map $successFile;$fail=Read-Map $failureFile;$quar=Read-Map $quarantineFile
  $key=Config-Key $c
  $prior=@{}
@@ -125,7 +168,7 @@ function Record-Success($c,$h){
  $first=$stamp;$count=1
  try{if($prior.first){$first=[string]$prior.first}elseif($prior.at){$first=[string]$prior.at}}catch{}
  try{$count=[int]$prior.count+1}catch{$count=1}
- $success[$key]=[ordered]@{at=$stamp;first=$first;count=$count;host=[string]$c.Host;ip=[string]$c.IP;port=[int]$c.Port;sha256=[string]$c.SHA256;observedIP=[string]$h.IP;country=[string]$h.Country;engine='OVPNConnectorService'}
+ $success[$key]=[ordered]@{at=$stamp;first=$first;count=$count;host=[string]$c.Host;ip=[string]$c.IP;port=[int]$c.Port;sha256=[string]$c.SHA256;caSha256=$CaSha256;observedIP=[string]$h.IP;country=[string]$h.Country;engine='OVPNConnectorService'}
  if($fail.ContainsKey($key)){$fail.Remove($key)}
  if($quar.ContainsKey($key)){$quar.Remove($key)}
  Write-Map $success $successFile;Write-Map $fail $failureFile;Write-Map $quar $quarantineFile
@@ -225,13 +268,22 @@ function Add-PhysicalShadows {
  $existing=@(Get-NetRoute -AddressFamily IPv4 -ErrorAction SilentlyContinue|Where-Object {$_.DestinationPrefix -in @('0.0.0.0/1','128.0.0.0/1')})
  if($existing.Count -gt 0){throw 'Refusing to add physical shadows while /1 routes already exist.'}
  $p=Get-PhysicalDefaultPath
- foreach($prefix in @('0.0.0.0/1','128.0.0.0/1')){New-NetRoute -DestinationPrefix $prefix -InterfaceIndex $p.InterfaceIndex -NextHop $p.NextHop -RouteMetric 1 -PolicyStore ActiveStore -ErrorAction Stop|Out-Null}
- $owned=@(Get-NetRoute -AddressFamily IPv4 -ErrorAction SilentlyContinue|Where-Object {$_.DestinationPrefix -in @('0.0.0.0/1','128.0.0.0/1') -and $_.InterfaceIndex -eq $p.InterfaceIndex -and $_.NextHop -eq $p.NextHop})
- if($owned.Count -ne 2){throw ('Physical shadow verification failed; expected 2 routes, found '+$owned.Count+'.')}
- $state=[ordered]@{at=(Get-Date).ToString('o');status='holding-physical';interfaceIndex=$p.InterfaceIndex;interfaceAlias=$p.InterfaceAlias;nextHop=$p.NextHop;routeMetric=1;interfaceMetric=$p.InterfaceMetric;effectiveMetric=(1+$p.InterfaceMetric);prefixes=@('0.0.0.0/1','128.0.0.0/1')}
- $state|ConvertTo-Json -Depth 7|Set-Content -Encoding UTF8 $shadowFile
- Write-ShadowEvidence ([ordered]@{at=(Get-Date).ToString('o');result='HOLDING';state=$state})
- return [pscustomobject]$state
+ # Durable cleanup journal BEFORE the first /1 mutation. A failed second
+ # New-NetRoute or evidence write must never strand the first physical route.
+ # The journal is intentionally not rewritten after route creation.
+ $state=[ordered]@{at=(Get-Date).ToString('o');status='cleanup-armed';interfaceIndex=$p.InterfaceIndex;interfaceAlias=$p.InterfaceAlias;nextHop=$p.NextHop;routeMetric=1;interfaceMetric=$p.InterfaceMetric;effectiveMetric=(1+$p.InterfaceMetric);prefixes=@('0.0.0.0/1','128.0.0.0/1')}
+ $state|ConvertTo-Json -Depth 7|Set-Content -Encoding UTF8 $shadowFile -ErrorAction Stop
+ try{
+   foreach($prefix in @('0.0.0.0/1','128.0.0.0/1')){New-NetRoute -DestinationPrefix $prefix -InterfaceIndex $p.InterfaceIndex -NextHop $p.NextHop -RouteMetric 1 -PolicyStore ActiveStore -ErrorAction Stop|Out-Null}
+   $owned=@(Get-NetRoute -AddressFamily IPv4 -ErrorAction SilentlyContinue|Where-Object {$_.DestinationPrefix -in @('0.0.0.0/1','128.0.0.0/1') -and $_.InterfaceIndex -eq $p.InterfaceIndex -and $_.NextHop -eq $p.NextHop})
+   if($owned.Count -ne 2){throw ('Physical shadow verification failed; expected 2 routes, found '+$owned.Count+'.')}
+   Write-ShadowEvidence ([ordered]@{at=(Get-Date).ToString('o');result='HOLDING';state=$state})
+   return [pscustomobject]$state
+ }catch{
+   # The journal remains readable even if just one /1 route was installed.
+   try{Remove-PhysicalShadows}catch{}
+   throw
+ }
 }
 function Get-ShadowState {if(Test-Path $shadowFile){try{return (Get-Content -Raw $shadowFile|ConvertFrom-Json)}catch{}};return $null}
 function Test-TcpDataPlane([string]$Address,[int]$Port=443,[int]$TimeoutMs=900){
@@ -261,10 +313,20 @@ function Wait-NativeDataPlane([int]$Seconds=6){
 }
 
 function Remove-PhysicalShadows {
- $s=Get-ShadowState;if(-not $s){return}
+ $s=Get-ShadowState
+ if(-not $s){
+   if(Test-Path -LiteralPath $shadowFile){throw 'Shadow cleanup journal exists but cannot be parsed; retain it for recovery.'}
+   return
+ }
  $idx=[int]$s.interfaceIndex;$hop=[string]$s.nextHop
- foreach($prefix in @('0.0.0.0/1','128.0.0.0/1')){@(Get-NetRoute -AddressFamily IPv4 -DestinationPrefix $prefix -ErrorAction SilentlyContinue|Where-Object {$_.InterfaceIndex -eq $idx -and $_.NextHop -eq $hop})|Remove-NetRoute -Confirm:$false -ErrorAction SilentlyContinue}
- Remove-Item $shadowFile -Force -ErrorAction SilentlyContinue
+ foreach($prefix in @('0.0.0.0/1','128.0.0.0/1')){
+   @(Get-NetRoute -AddressFamily IPv4 -DestinationPrefix $prefix -ErrorAction Stop|Where-Object {$_.InterfaceIndex -eq $idx -and $_.NextHop -eq $hop})|Remove-NetRoute -Confirm:$false -ErrorAction Stop
+ }
+ $remaining=@(Get-NetRoute -AddressFamily IPv4 -ErrorAction Stop|Where-Object {
+   $_.DestinationPrefix -in @('0.0.0.0/1','128.0.0.0/1') -and $_.InterfaceIndex -eq $idx -and $_.NextHop -eq $hop
+ })
+ if($remaining.Count){throw ('Physical shadow removal incomplete; '+$remaining.Count+' owned route(s) remain. Recovery journal preserved.')}
+ Remove-Item -LiteralPath $shadowFile -Force -ErrorAction Stop
 }
 function Read-ServiceLogDelta([long]$Offset){
  if(-not(Test-Path $serviceLog)){return ''}
@@ -291,6 +353,9 @@ function Stop-Connector {
  $shadow=Get-ShadowState
  try{[void](Invoke-Connector @('stop') 20000 -IgnoreExit)}catch{}
  try{Stop-Service $service -Force -ErrorAction SilentlyContinue}catch{}
+ # Stop the owned service first, then reject an unreadable cleanup journal.
+ # Never erase an unreadable journal or claim clean rollback.
+ if(-not $shadow -and (Test-Path -LiteralPath $shadowFile)){throw 'Owned shadow cleanup journal is unreadable; manual route recovery required.'}
  if($shadow){$until=(Get-Date).AddSeconds(6);do{$native=@(Get-NetRoute -AddressFamily IPv4 -ErrorAction SilentlyContinue|Where-Object {$_.DestinationPrefix -in @('0.0.0.0/1','128.0.0.0/1') -and $_.InterfaceIndex -ne [int]$shadow.interfaceIndex});if($native.Count -eq 0){break};Start-Sleep -Milliseconds 100}while((Get-Date)-lt $until);Remove-PhysicalShadows}
  [void](Wait-Health $false 20)
 }
@@ -323,6 +388,7 @@ function Ensure-ServiceInstalled {
  }
  Stop-ServiceForConfig
  [void](Invoke-Connector @('set-config','profile',$serviceProfile) 12000)
+ if(-not(Test-DesiredOn)){Stop-Connector;return $null}
  [void](Invoke-Connector @('set-config','log',$serviceLog) 12000)
  [void](Invoke-Connector @('set-config','dco','false') 12000)
  [void](Invoke-Connector @('set-config','security-level','legacy') 12000)
@@ -336,36 +402,75 @@ function Schedule-ManualServiceMode {
 }
 
 function Try-Candidate($c){
+ if(-not(Test-DesiredOn)){return $null}
  $profile=Resolve-ProfilePath $c
  if(-not(Test-Path $profile)){Record-Failure $c 'PROFILE_MISSING';return $null}
  $sha=(Get-FileHash -Algorithm SHA256 $profile).Hash.ToLowerInvariant()
  if($c.SHA256 -and $sha -ne ([string]$c.SHA256).ToLowerInvariant()){Record-Failure $c 'HASH_MISMATCH';return $null}
- try{$policyOK=Test-OigVpnProfile -Text ([IO.File]::ReadAllText($profile)) -ExpectedIP ([string]$c.IP) -ExpectedPort ([int]$c.Port) -ExpectedProtocol ([string]$c.Protocol)}catch{$policyOK=$false}
- if(-not $policyOK){Record-Failure $c 'PROFILE_POLICY_DENIED';return $null}
+ $caSha256=''
+ try{
+   $profileText=[IO.File]::ReadAllText($profile)
+   $policyOK=Test-OigVpnProfile -Text $profileText -ExpectedIP ([string]$c.IP) -ExpectedPort ([int]$c.Port) -ExpectedProtocol ([string]$c.Protocol)
+   if($policyOK){$caSha256=[string](Get-OigVpnProfileCaSha256 -Text $profileText)}
+ }catch{$policyOK=$false}
+ if(-not $policyOK -or $caSha256 -notmatch '^[a-f0-9]{64}$'){Record-Failure $c 'PROFILE_POLICY_OR_CA_INVALID';return $null}
+ $continuity=Test-OigKnownRelayCaContinuity -IP ([string]$c.IP) -Port ([int]$c.Port) -ProfileSha256 $sha -CaSha256 $caSha256 -KnownSuccesses (Read-Map $successFile)
+ if(-not $continuity){Record-Failure $c 'PREVIOUSLY_SEEN_ENDPOINT_CA_CHANGED';return $null}
+ # The interactive GUI and service daemon are mutually exclusive. Never kill
+ # or reconfigure an independent OpenVPN Connect session.
+ Assert-OpenVpnGuiClosed
  Stop-Connector
+ if(-not(Test-DesiredOn)){return $null}
  Copy-Item -LiteralPath $profile -Destination $serviceProfile -Force
  if((Get-FileHash -Algorithm SHA256 $serviceProfile).Hash.ToLowerInvariant() -ne $sha){throw 'ProgramData profile copy hash mismatch.'}
  [void](Invoke-Connector @('set-config','profile',$serviceProfile) 12000)
+ if(-not(Test-DesiredOn)){Stop-Connector;return $null}
+ # Every operation after this point is inside a single rollback scope:
+ # desired-off, connector failures, telemetry exceptions and even a partially
+ # added shadow route all trigger owned connector/shadow cleanup.
+ $handoverCommitted=$false
+ try{
  $shadow=Add-PhysicalShadows
  $logOffset=0;if(Test-Path $serviceLog){$logOffset=(Get-Item $serviceLog).Length}
  try{[void](Invoke-Connector @('start') 20000)}catch{
-   Record-Failure $c 'START_FAIL';Stop-Connector;return $null
+   $startError=[string]$_.Exception.Message
+   $startError=[regex]::Replace($startError,'(?i)(password|token|secret|key)\s*[=:]\s*\S+','$1=[redacted]')
+   $startError=[regex]::Replace($startError,'[A-Za-z0-9+/]{64,}={0,2}','[redacted]')
+   if($startError.Length -gt 400){$startError=$startError.Substring(0,400)}
+   Write-ShadowEvidence ([ordered]@{at=(Get-Date).ToString('o');result='START_REJECTED';error=$startError;candidate=[string]$c.SHA256})
+   Record-Failure $c 'START_FAIL';return $null
  }
+ if(-not(Test-DesiredOn)){return $null}
  $native=Wait-NativeReady $c $logOffset 18
- if(-not $native.Ready){Write-ShadowEvidence ([ordered]@{at=(Get-Date).ToString('o');result='NATIVE_NOT_READY';candidate=[string]$c.SHA256;native=$native;shadow=$shadow});Record-Failure $c 'NATIVE_READY_FAIL';Stop-Connector;return $null}
+ if(-not $native.Ready){Write-ShadowEvidence ([ordered]@{at=(Get-Date).ToString('o');result='NATIVE_NOT_READY';candidate=[string]$c.SHA256;native=$native;shadow=$shadow});Record-Failure $c 'NATIVE_READY_FAIL';return $null}
+ if(-not(Test-DesiredOn)){return $null}
  $dataPlane=Wait-NativeDataPlane 6
- if(-not $dataPlane.Ready){Write-ShadowEvidence ([ordered]@{at=(Get-Date).ToString('o');result='DATAPLANE_NOT_READY';candidate=[string]$c.SHA256;native=$native;dataPlane=$dataPlane;shadow=$shadow});Record-Failure $c 'DATAPLANE_READY_FAIL';Stop-Connector;return $null}
+ if(-not $dataPlane.Ready){Write-ShadowEvidence ([ordered]@{at=(Get-Date).ToString('o');result='DATAPLANE_NOT_READY';candidate=[string]$c.SHA256;native=$native;dataPlane=$dataPlane;shadow=$shadow});Record-Failure $c 'DATAPLANE_READY_FAIL';return $null}
+ if(-not(Test-DesiredOn)){return $null}
  Write-ShadowEvidence ([ordered]@{at=(Get-Date).ToString('o');result='DATAPLANE_READY';candidate=[string]$c.SHA256;native=$native;dataPlane=$dataPlane;shadow=$shadow})
  Remove-PhysicalShadows
  $h=Wait-Health $true 14 ([string]$c.Country)
- if(-not $h.Healthy){$fallback=Add-PhysicalShadows;Write-ShadowEvidence ([ordered]@{at=(Get-Date).ToString('o');result='POST_TAKEOVER_HEALTH_FAIL';candidate=[string]$c.SHA256;health=$h;fallback=$fallback;native=$native});Record-Failure $c 'LIVE_FAIL';Stop-Connector;return $null}
+ if(-not $h.Healthy){
+   # Native /1 routes are still live after handover. Never create a
+   # competing physical /1 pair in this state: stop the owned connector,
+   # which already removes its routes, then let the next candidate retry.
+   # The independent hosted watchdog remains armed until final cleanup.
+   Write-ShadowEvidence ([ordered]@{at=(Get-Date).ToString('o');result='POST_TAKEOVER_HEALTH_FAIL';candidate=[string]$c.SHA256;health=$h;native=$native;recovery='stop-owned-connector'})
+   Record-Failure $c 'LIVE_FAIL'
+   return $null
+ }
+ if(-not(Test-DesiredOn)){return $null}
  Write-ShadowEvidence ([ordered]@{at=(Get-Date).ToString('o');result='PASS';candidate=[string]$c.SHA256;health=$h;native=$native;dataPlane=$dataPlane})
- Record-Success $c $h
+ Record-Success $c $h $caSha256
  Schedule-ManualServiceMode
  $state=[ordered]@{at=(Get-Date).ToString('o');engine='OVPNConnectorService';service=$service;host=$c.Host;serverIP=$c.IP;port=$c.Port;protocol=$c.Protocol;configuredCountry=[string]$c.Country;countryName=[string]$c.CountryName;profile=$profile;serviceProfile=$serviceProfile;sha256=$sha;observedIP=$h.IP;country=$h.Country;dns=$h.DNS}
  $state|ConvertTo-Json -Depth 7|Set-Content -Encoding UTF8 $stateFile
  $state|ConvertTo-Json -Depth 7|Set-Content -Encoding UTF8 (Join-Path $Root 'evidence\connect-last-success.json')
+ $handoverCommitted=$true
  return $h
+ }finally{
+   if(-not $handoverCommitted){Stop-Connector}
+ }
 }
 
 $mutex=New-Object System.Threading.Mutex($false,'Global\OpenInternetGatewayHeadless')
@@ -388,7 +493,7 @@ try{
    exit 0
  }
 
- if($Action -eq 'Connect'){Save-Desired 'on'}
+ if($Action -eq 'Connect'){Assert-OigNoIndependentVpn;Save-Desired 'on'}
  $desired='off'
  if(Test-Path $desiredFile){try{$desired=[string](Get-Content -Raw $desiredFile|ConvertFrom-Json).desired}catch{}}
  if($desired -ne 'on'){
@@ -398,29 +503,43 @@ try{
    exit 0
  }
 
+ Assert-OigNoIndependentVpn
+ Assert-OpenVpnGuiClosed
  try{& (Join-Path $PSScriptRoot 'Config-Factory.ps1') -Action Ensure -MaxAgeHours 8|Out-Null}catch{}
  $pre=Get-Health
  $currentEngine=''
  if(Test-Path $stateFile){try{$currentEngine=[string](Get-Content -Raw $stateFile|ConvertFrom-Json).engine}catch{}}
+ Assert-OpenVpnGuiClosed
  if($pre.Healthy -and $currentEngine -eq 'OVPNConnectorService' -and [string]::IsNullOrWhiteSpace($ProfileSha)){
     Schedule-ManualServiceMode
    Write-Host ('HEALTHY HEADLESS '+$pre.IP+' '+$pre.Country)
    exit 0
  }
 
+ Assert-OpenVpnGuiClosed
  Ensure-ServiceInstalled
+ if(-not(Test-DesiredOn)){Stop-Connector;Write-Host 'CONNECT CANCELLED - DESIRED OFF';exit 0}
  Set-Service -Name $service -StartupType Automatic
 
  $connected=$null
  $maxCycles=$(if([string]::IsNullOrWhiteSpace($ProfileSha)){2}else{1})
  for($cycle=0;$cycle -lt $maxCycles -and -not $connected;$cycle++){
+   if(-not(Test-DesiredOn)){break}
    foreach($c in @(Get-Candidates $ProfileSha)){
+     if(-not(Test-DesiredOn)){break}
      $connected=Try-Candidate $c
+     if(-not(Test-DesiredOn)){break}
      if($connected){break}
    }
+   if(-not(Test-DesiredOn)){break}
    if(-not $connected -and $cycle -eq 0 -and [string]::IsNullOrWhiteSpace($ProfileSha)){
      try{& (Join-Path $PSScriptRoot 'Config-Factory.ps1') -Action Refresh|Out-Null}catch{}
    }
+ }
+ if(-not(Test-DesiredOn)){
+   Stop-Connector
+   Write-Host 'CONNECT CANCELLED - DESIRED OFF'
+   exit 0
  }
  if(-not $connected){
    if($ProfileSha){

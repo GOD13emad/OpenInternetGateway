@@ -1,0 +1,88 @@
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+const root = path.join(__dirname, '..');
+const headless = fs.readFileSync(path.join(root, 'backend/windows/scripts/Headless-Control.ps1'), 'utf8').replace(/\r\n/g, '\n');
+const disconnect = fs.readFileSync(path.join(root, 'backend/windows/scripts/Disconnect-OpenInternet.ps1'), 'utf8').replace(/\r\n/g, '\n');
+const backend = fs.readFileSync(path.join(root, 'src/main/platform-backend.js'), 'utf8').replace(/\r\n/g, '\n');
+
+test('Disconnect persists off before scheduling privileged cleanup', () => {
+  const setOff = disconnect.indexOf("desired='off'");
+  const trigger = disconnect.indexOf('schtasks.exe /Run /TN OpenInternetGateway-AutoRecovery');
+  assert.ok(setOff >= 0 && trigger > setOff);
+});
+
+test('headless connector scan obeys desired off before trying, between attempts and before recording success', () => {
+  const helper = headless.slice(headless.indexOf('function Test-DesiredOn'), headless.indexOf('function Save-Desired'));
+  assert.match(helper, /-LiteralPath \$desiredFile/);
+  assert.match(helper, /catch\s*\{return \$false\}/);
+
+  const candidate = headless.slice(headless.indexOf('function Try-Candidate'), headless.indexOf('$mutex='));
+  assert.ok((candidate.match(/Test-DesiredOn/g) || []).length >= 6);
+  assert.match(candidate, /if\(-not\(Test-DesiredOn\)\)\{Stop-Connector;return \$null\}/);
+  assert.ok(candidate.indexOf('if(-not(Test-DesiredOn)){return $null}') < candidate.indexOf('Stop-Connector'));
+
+  const loop = headless.slice(headless.indexOf(' for($cycle=0;'), headless.indexOf(" & (Join-Path $PSScriptRoot 'Config-Factory.ps1') -Action Status"));
+  assert.match(loop, /if\(-not\(Test-DesiredOn\)\)\{break\}/);
+  assert.match(loop, /CONNECT CANCELLED - DESIRED OFF/);
+  assert.ok(loop.indexOf('CONNECT CANCELLED - DESIRED OFF') < loop.indexOf('if(-not $connected)'));
+});
+
+test('Windows status cannot label physical shadow routes a VPN without committed relay profile', () => {
+  const start = backend.indexOf("if (action === 'status') {");
+  const end = backend.indexOf('const mapped = map[action]', start);
+  const status = backend.slice(start, end);
+  assert.match(status, /\$profileSha=\[string\]\$s\.sha256/);
+  assert.match(status, /connected=\(\$desired -eq 'on'/);
+  assert.match(status, /\$profileSha -match '\^\[a-fA-F0-9\]\{64\}\$'/);
+  assert.match(status, /\$relay -and \$relay -ne ':'/);
+  assert.match(status, /\$profileCountry -and \$loc -eq \$profileCountry/);
+});
+
+test('foreground Connect only accepts a committed foreign relay, not service plus physical shadow routes',()=>{
+  const src=fs.readFileSync(path.join(root,'backend/windows/scripts/Connect-OpenInternet.ps1'),'utf8').replace(/\r\n/g,'\n');
+  assert.match(src,/Connect cancelled: explicit Disconnect requested desired=off/);
+  assert.match(src,/\$activeSha=\(\[string\]\$profile\.sha256\)/);
+  assert.match(src,/\$profileOk=\(\$activeSha -match '\^\[0-9a-f\]\{64\}\$'/);
+  assert.match(src,/\$loc -eq \$activeCountry/);
+  assert.match(src,/\$routePairValid -and \$ipv6Safe[\s\S]*\$profileOk -and \$exactOk/);
+});
+
+test('elevated Ensure requires committed SHA and matching foreign location before reporting pass',()=>{
+  const src=fs.readFileSync(path.join(root,'backend/windows/scripts/Ensure-OpenInternet.ps1'),'utf8').replace(/\r\n/g,'\n');
+  const start=src.indexOf("if($desired -eq 'on' -and $svc");
+  const end=src.indexOf("if($desired -ne 'on'",start);
+  const block=src.slice(start,end);
+  assert.ok(start>=0 && end>start);
+  assert.match(src,/current-openvpn-profile\.json/);
+  assert.match(block,/\$activeSha -match '\^\[a-fA-F0-9\]\{64\}\$'/);
+  assert.match(block,/\$observed\.Trim\(\) -eq \$profileCountry/);
+  assert.ok(block.indexOf('$observed.Trim() -eq $profileCountry') < block.indexOf('ELEVATED ENSURE PASS'));
+});
+
+test('Windows Disconnect reconciles coalesced scheduled Ensure before accepting rollback',()=>{
+  const off=disconnect.indexOf("desired='off'");
+  const trigger=disconnect.indexOf('schtasks.exe /Run /TN OpenInternetGateway-AutoRecovery');
+  const taskState=disconnect.indexOf("if([string]$current.State -ne 'Running')");
+  const retries=disconnect.indexOf('$requeued -lt 6');
+  const deadline=disconnect.indexOf('AddSeconds(180)');
+  const completed=disconnect.indexOf("Write-Host 'DISCONNECTED'",trigger);
+  assert.ok(off>=0 && trigger>off && retries>trigger && taskState>retries && deadline>trigger);
+  assert.ok(completed>trigger && completed<taskState,'actual stopped routes/service required before success');
+  assert.match(disconnect,/Headless disconnect task did not settle within 180 seconds; desired=off retained/);
+  assert.match(disconnect,/Could not requeue elevated Open Internet Gateway disconnect/);
+  assert.doesNotMatch(disconnect,/Stop-Process|Unregister-ScheduledTask|Start-Process[^\r\n]*RunAs/);
+});
+
+test('a newer Connect supersedes any pending Windows Disconnect requeue',()=>{
+  const intentGuard=disconnect.indexOf('function Assert-DisconnectStillRequested');
+  const firstAssert=disconnect.indexOf('Assert-DisconnectStillRequested\n$routes=@');
+  const laterAssert=disconnect.indexOf('Assert-DisconnectStillRequested\n $routes=@');
+  const firstTask=disconnect.indexOf('schtasks.exe /Run /TN OpenInternetGateway-AutoRecovery');
+  const retry=disconnect.indexOf("if([string]$current.State -ne 'Running')");
+  assert.ok(intentGuard>disconnect.indexOf("desired='off'"));
+  assert.ok(firstAssert>intentGuard && firstAssert<firstTask);
+  assert.ok(laterAssert>firstTask && laterAssert<retry);
+  assert.match(disconnect,/if\(\$now -ne 'off'\)\{throw 'Disconnect was superseded/);
+});

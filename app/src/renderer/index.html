@@ -63,7 +63,7 @@
         <div class="hero-grid">
           <article class="connection-card panel">
             <div class="connection-ambient"></div>
-            <div class="card-kicker">SECURE TUNNEL</div>
+            <div class="card-kicker">VPN TUNNEL</div>
             <button class="power-orb" id="powerButton" aria-label="Connect or disconnect">
               <span class="power-glyph">⏻</span>
               <span class="orb-ring"></span>
@@ -93,7 +93,7 @@
             </article>
 
             <article class="panel relay-card">
-              <div><span class="eyebrow">ACTIVE RELAY</span><h3 id="relayName">Not connected</h3><p id="relayMeta">Dynamic validated endpoint</p></div>
+              <div><span class="eyebrow">ACTIVE RELAY</span><h3 id="relayName">Not connected</h3><p id="relayMeta">Relay identity unverified</p></div>
               <div class="signal-bars" aria-hidden="true"><i></i><i></i><i></i><i></i></div>
             </article>
           </div>
@@ -102,14 +102,14 @@
         <div class="stats-grid">
           <article class="stat-card panel"><span class="stat-icon">◎</span><div><small>Public IP</small><strong id="ipStat">—</strong></div></article>
           <article class="stat-card panel"><span class="stat-icon">⌖</span><div><small>Exit country</small><strong id="countryStat">—</strong></div></article>
-          <article class="stat-card panel"><span class="stat-icon">◫</span><div><small>Secure DNS</small><strong id="dnsStat">—</strong></div></article>
-          <article class="stat-card panel"><span class="stat-icon">⇄</span><div><small>Protected routes</small><strong id="routesStat">—</strong></div></article>
+          <article class="stat-card panel"><span class="stat-icon">◫</span><div><small>DNS responses</small><strong id="dnsStat">—</strong></div></article>
+          <article class="stat-card panel"><span class="stat-icon">⇄</span><div><small>IPv4 VPN routes</small><strong id="routesStat">—</strong></div></article>
         </div>
 
         <div class="overview-lower">
           <article class="panel feature-card">
             <div class="feature-icon auto">↻</div>
-            <div class="feature-copy"><h3>Automatic recovery</h3><p>Checks the tunnel and restores a validated route after network or power interruptions.</p></div>
+            <div class="feature-copy"><h3>Automatic recovery</h3><p>Checks the tunnel and attempts to restore its VPN route after network or power interruptions. Relay identity may remain unverified.</p></div>
             <button class="btn compact" id="autoButton">Manage</button>
           </article>
           <article class="panel feature-card">
@@ -221,7 +221,7 @@
               <button class="btn" id="installUpdate" disabled>Install verified update</button>
               <button class="btn ghost" id="openRelease">Open GitHub release</button>
             </div>
-            <p class="measurement-note">Updates are applied only after SHA-256 matches both the GitHub asset digest and SHA256SUMS. Windows uses a current-user NSIS install and Linux uses AppImage under ~/.local/opt, so normal updates do not require administrator/root approval.</p>
+            <p class="measurement-note" id="updateInstallScopeNote">Updates require matching GitHub and SHA256SUMS digests. System-managed Linux installs use the same one-file installer with native OS approval only for installation; portable AppImage and Windows per-user updates do not require elevation.</p>
           </article>
         </div>
       </section>
@@ -243,6 +243,64 @@
               <button class="btn" id="installRecovery">Install / repair</button>
               <button class="btn ghost danger" id="removeRecovery">Remove</button>
             </div>
+          </article>
+
+          <article class="panel settings-card wide" id="windowsPinnedProfileCard" hidden>
+            <span class="eyebrow">OPTIONAL · WINDOWS · OFFLINE ONLY</span>
+            <h3>Inspect a pinned OpenVPN AUTLOGIN profile</h3>
+            <p>Requires an independently authenticated CA SHA-256, exact server certificate CN and provider endpoint. Select an owner-provided certificate-based AUTLOGIN .ovpn file. No VPN connection, client-key storage or automatic use is permitted by this check.</p>
+            <div class="operator-import-fields">
+              <label for="windowsPinnedCa">Independent CA DER SHA-256</label>
+              <input id="windowsPinnedCa" type="text" maxlength="95" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="64 hex characters">
+              <label for="windowsPinnedCN">Exact server certificate CN</label>
+              <input id="windowsPinnedCN" type="text" maxlength="128" autocomplete="off" spellcheck="false" placeholder="Independently authenticated server CN">
+              <label for="windowsPinnedHost">Expected server hostname</label>
+              <input id="windowsPinnedHost" type="text" maxlength="253" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="vpn.example.net">
+              <label for="windowsPinnedPort">Expected port</label>
+              <input id="windowsPinnedPort" type="number" min="1" max="65535" step="1" placeholder="443">
+              <label for="windowsPinnedProtocol">Transport</label>
+              <select id="windowsPinnedProtocol"><option value="udp">OpenVPN UDP</option><option value="tcp">OpenVPN TCP</option></select>
+            </div>
+            <div class="button-row">
+              <button class="btn secondary" id="windowsPinnedInspectButton">Choose .ovpn and inspect offline</button>
+            </div>
+            <p class="measurement-note" id="windowsPinnedStatus">No AUTLOGIN profile has been inspected. An offline match is not a real TLS handshake or authorization to connect.</p>
+          </article>
+          <article class="panel settings-card wide" id="operatorProfileCard" hidden>
+            <span class="eyebrow">OPTIONAL · LINUX · OFFLINE ONLY</span>
+            <h3>Import operator-pinned OpenVPN profile</h3>
+            <p>Select a provider-issued VPNBook .ovpn file and provide the CA certificate DER SHA-256 and exact server certificate CN from an independently trusted source. Neither value is derived from the selected file.</p>
+            <div class="operator-import-fields">
+              <label for="operatorCaPin">Independent CA SHA-256</label>
+              <input id="operatorCaPin" type="text" maxlength="95" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="64 hex characters (colon separators permitted)">
+              <label for="operatorPeerName">Expected server certificate CN</label>
+              <input id="operatorPeerName" type="text" maxlength="128" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="Exact operator-authenticated CN">
+            </div>
+            <div class="button-row">
+              <button class="btn secondary" id="operatorStageButton">Select and validate .ovpn</button>
+              <button class="btn ghost" id="operatorNativeCheckButton" disabled>Check NetworkManager import (no connection)</button>
+              <button class="btn ghost" id="operatorFullDevicePreflightButton" disabled>Check full-device feasibility (read-only)</button>
+            </div>
+            <p class="measurement-note" id="operatorFullDevicePreflightStatus">Read-only full-device feasibility has not been checked. This does not start or enable any tunnel.</p>
+            <div class="operator-import-fields" id="operatorTrialFields">
+              <label for="operatorUsername">Provider username (temporary)</label>
+              <input id="operatorUsername" type="text" maxlength="96" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="Provider login username">
+              <label for="operatorPassword">Provider password (temporary)</label>
+              <input id="operatorPassword" type="password" maxlength="256" autocomplete="off" spellcheck="false" placeholder="Not stored or saved">
+            </div>
+            <div class="button-row">
+              <button class="btn ghost" id="operatorFreeCredentialsButton">Get free VPNBook login (HTTPS only)</button>
+            </div>
+            <p class="measurement-note" id="operatorCredentialsStatus">VPNBook's shared login changes periodically. Fetching only fills temporary fields; it never connects or stores the password.</p>
+            <label class="measurement-note" style="display:block;margin-top:14px">
+              <input type="checkbox" id="operatorTrialConsent">
+              I authorize one temporary Linux OpenVPN trial. It verifies the server certificate against the pinned CA and exact CN, ignores pushed routes/DNS and never installs a default route, then removes the temporary connection and copied certificate files. It is blocked while any other VPN/tunnel is active; existing connections are never disconnected. It does not validate full-device routing or throughput.
+            </label>
+            <div class="button-row">
+              <button class="btn ghost" id="operatorTrialButton" disabled>Trial transport briefly (auto disconnect)</button>
+            </div>
+            <p class="measurement-note" id="operatorTrialResult">No live VPN trial performed; a successful import is not an authenticated connection test.</p>
+            <p class="measurement-note" id="operatorStageStatus">No operator profile staged. Staging stores a private client-key copy (0600) but never a VPN login password; it does not connect or change route/DNS.</p>
           </article>
           <article class="panel settings-card wide">
             <span class="eyebrow">SYSTEM</span><h3>Runtime information</h3>

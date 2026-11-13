@@ -53,6 +53,13 @@ app/tools/*
 !app/tools/afterPack.js
 !app/tools/afterAllArtifactBuild.js
 !app/tools/prepareWindowsPwsh.js
+!app/tools/prepareElectronChecksumCache.js
+!app/tools/electron-SHASUMS256-44.10.2.txt
+!app/tools/qaWindowsInstalledTray.ps1
+!app/tools/qaWindowsHostedUpdateApply.ps1
+!app/tools/qaLinuxHostedWindowLifecycle.sh
+!app/tools/qaLinuxOfflineDebLayout.sh
+!app/tools/prepareHostedUbuntuApt.sh
 
 # Electron archives and local build helpers
 app/electron-v*.zip

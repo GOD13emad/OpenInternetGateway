@@ -23,7 +23,9 @@ function download(url, file, redirects = 5) {
       }
       if (code < 200 || code >= 300) {
         res.resume();
-        reject(new Error(`PowerShell archive download failed with HTTP ${code}`));
+        const error = new Error('PowerShell archive download failed with HTTP ' + code);
+        error.statusCode = code;
+        reject(error);
         return;
       }
       const out = fs.createWriteStream(file, { flags: 'w' });
@@ -32,9 +34,58 @@ function download(url, file, redirects = 5) {
       out.on('error', reject);
       res.on('error', reject);
     });
-    req.setTimeout(60000, () => req.destroy(new Error('PowerShell archive download timed out')));
+    req.setTimeout(60000, () => {
+      const error = new Error('PowerShell archive download timed out');
+      error.code = 'ETIMEDOUT';
+      req.destroy(error);
+    });
     req.on('error', reject);
   });
+}
+
+const TRANSIENT_HTTP_STATUS_CODES = new Set([408, 425, 429, 500, 502, 503, 504]);
+const TRANSIENT_NETWORK_ERROR_CODES = new Set([
+  'ECONNRESET', 'ETIMEDOUT', 'EAI_AGAIN', 'ECONNREFUSED',
+  'EHOSTUNREACH', 'ENETUNREACH'
+]);
+
+function isTransientDownloadError(error) {
+  return TRANSIENT_HTTP_STATUS_CODES.has(Number(error?.statusCode)) ||
+    TRANSIENT_NETWORK_ERROR_CODES.has(String(error?.code || ''));
+}
+
+async function downloadWithRetry(url, file, options = {}) {
+  const attempts = options.attempts ?? 4;
+  const baseDelayMs = options.baseDelayMs ?? 1500;
+  const downloader = options.downloader ?? download;
+  const wait = options.wait ?? (ms => new Promise(resolve => setTimeout(resolve, ms)));
+  const logger = options.logger ?? console;
+  if (!Number.isInteger(attempts) || attempts < 1) {
+    throw new TypeError('PowerShell download attempts must be a positive integer');
+  }
+  if (!Number.isFinite(baseDelayMs) || baseDelayMs < 0) {
+    throw new TypeError('PowerShell download retry delay must be a non-negative number');
+  }
+
+  try { fs.rmSync(file, { force: true }); } catch {}
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    const attemptFile = file + '.attempt-' + attempt;
+    try {
+      fs.rmSync(attemptFile, { force: true });
+      await downloader(url, attemptFile);
+      fs.renameSync(attemptFile, file);
+      return;
+    } catch (error) {
+      try { fs.rmSync(attemptFile, { force: true }); } catch {}
+      if (attempt === attempts || !isTransientDownloadError(error)) throw error;
+      const delay = baseDelayMs * (2 ** (attempt - 1));
+      logger.warn?.(
+        'PowerShell archive attempt ' + attempt + '/' + attempts +
+        ' failed transiently; retrying in ' + delay + 'ms: ' + error.message
+      );
+      await wait(delay);
+    }
+  }
 }
 
 function sha256(file) {
@@ -65,7 +116,7 @@ async function main() {
   try {
     try { fs.unlinkSync(archive); } catch {}
     console.log(`Downloading verified PowerShell ${VERSION} portable runtime…`);
-    await download(PWSH_URL, archive);
+    await downloadWithRetry(PWSH_URL, archive);
     const actual = sha256(archive);
     if (actual !== SHA256) throw new Error(`PowerShell archive SHA-256 mismatch: ${actual}`);
     fs.rmSync(target, { recursive: true, force: true });
@@ -80,7 +131,19 @@ async function main() {
   }
 }
 
-main().catch(error => {
-  console.error(error?.stack || error);
-  process.exit(1);
-});
+if (require.main === module) {
+  main().catch(error => {
+    console.error(error?.stack || error);
+    process.exit(1);
+  });
+}
+
+module.exports = {
+  VERSION,
+  PWSH_URL,
+  SHA256,
+  download,
+  downloadWithRetry,
+  isTransientDownloadError,
+  sha256
+};
