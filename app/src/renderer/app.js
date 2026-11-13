@@ -305,9 +305,11 @@ function renderConnections() {
               ? (p.benchmark.httpsLatencyMs + ' ms HTTPS')
               : (wasFastTested ? 'No reply' : 'Not tested')));
     livePing.classList.toggle('metric-unavailable', fastPing == null && p.benchmark?.icmpPingMs == null && p.benchmark?.httpsLatencyMs == null);
-    livePing.title = wasFastTested && fastPing == null
-      ? 'Direct probe completed, but this relay did not answer the ICMP/TCP reachability probe. Source ping is shown separately.'
-      : (!wasFastTested ? 'Run Test all relays for a direct reachability probe, or Speed for a real tunnel measurement.' : '');
+    livePing.title = wasFastTested && p.benchmark?.fastMethod === 'icmp-only'
+      ? 'ICMP-only host response; this TCP port did not accept a direct connection. OpenVPN handshake not verified.'
+      : (wasFastTested && fastPing == null
+          ? 'Direct probe completed with no ICMP/TCP transport response. Source ping is shown separately.'
+          : (!wasFastTested ? 'Run Test all relays for a direct reachability probe, or Speed for a real tunnel measurement.' : ''));
 
     const down = document.createElement('td'); down.className = 'metric-real';
     down.textContent = p.benchmark?.downloadMbps == null ? 'Not tested' : (p.benchmark.downloadMbps + ' Mbps');
@@ -409,7 +411,7 @@ async function benchmarkCurrent() {
     renderConnections();
     const seconds = Math.max(0.1, Number(result?.elapsedMs || 0) / 1000).toFixed(1);
     const via = result?.directPath?.interface ? (' via ' + result.directPath.interface) : '';
-    showToast('Tested ' + String(result?.tested || 0) + ' relays in ' + seconds + 's • ' + String(result?.reachable || 0) + ' replied • ' + String(result?.noReply || 0) + ' no reply' + via + ' • direct Internet / proxy bypass.');
+    showToast('Tested ' + String(result?.tested || 0) + ' relays in ' + seconds + 's • ' + String(result?.reachable || 0) + ' passed quick probe • ' + String(result?.noReply || 0) + ' not reached' + via + ' • direct Internet / proxy bypass.');
   } catch (e) {
     showToast(e.message || 'Fast relay test failed.', true);
   } finally {
