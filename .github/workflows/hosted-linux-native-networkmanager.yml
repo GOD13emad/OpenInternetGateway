@@ -33,6 +33,7 @@ on:
       - 'app/tests/killswitch-nft-executor.test.js'
       - 'app/tests/hosted-linux-nft-executor-smoke.py'
       - 'app/tests/hosted-linux-root-boot-kernel-smoke.py'
+      - 'app/tests/hosted-linux-systemd-dependency-loss.py'
       - 'app/tests/local-linux-nft-kernel-netns-smoke.py'
       - 'app/tests/local-linux-nft-kernel-netns.test.js'
       - 'app/backend/linux/killswitch_bootstrap.py'
@@ -95,6 +96,7 @@ jobs:
           ast.parse(pathlib.Path('app/tests/killswitch-nft-executor-smoke.py').read_text())
           ast.parse(pathlib.Path('app/tests/hosted-linux-nft-executor-smoke.py').read_text())
           ast.parse(pathlib.Path('app/tests/hosted-linux-root-boot-kernel-smoke.py').read_text())
+          ast.parse(pathlib.Path('app/tests/hosted-linux-systemd-dependency-loss.py').read_text())
           ast.parse(pathlib.Path('app/tests/local-linux-nft-kernel-netns-smoke.py').read_text())
           ast.parse(pathlib.Path('app/backend/linux/killswitch_bootstrap.py').read_text())
           ast.parse(pathlib.Path('app/tests/killswitch-bootstrap-smoke.py').read_text())
@@ -160,7 +162,35 @@ jobs:
           set -e
           test "$boot_kernel_code" -ne 0
           test "$boot_kernel_result" = 'REFUSED: owner host or non-disposable runner'
+          set +e
+          systemd_loss_result="$(env -u GITHUB_ACTIONS -u RUNNER_ENVIRONMENT -u GITHUB_REPOSITORY \
+            python3 -B app/tests/hosted-linux-systemd-dependency-loss.py --github-hosted-only 2>&1)"
+          systemd_loss_code=$?
+          set -e
+          test "$systemd_loss_code" -ne 0
+          test "$systemd_loss_result" = 'REFUSED: owner host or non-disposable runner'
           echo 'OWNER_HOST_REFUSED=PASS'
+      - name: Real hosted user-systemd synthetic guard loss and dependency propagation
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -B app/tests/hosted-linux-systemd-dependency-loss.py --github-hosted-only
+          python3 -B - "$RUNNER_TEMP/oig-hosted-systemd-dependency-loss.json" <<'PYSYSTEMD'
+          import json,sys
+          r=json.load(open(sys.argv[1],encoding='utf8'))
+          assert r.get('schema') == 'oig-hosted-systemd-dependency-loss-v1'
+          assert r.get('pass') is True
+          for k in ('hostedUserSystemdVerified','onlySyntheticUnits',
+                    'previewBindsToAfterExact','syntheticDependenciesActive',
+                    'unexpectedGuardKillPropagatesStop',
+                    'skippedGuardBlocksDependent','ownUnitsRemoved'):
+              assert r.get(k) is True, k
+          for k in ('productionBootServiceInstalled',
+                    'productionKillSwitchVerified', 'ownerNetworkManagerTouched',
+                    'ownerNetworkChanged'):
+              assert r.get(k) is False, k
+          print('HOSTED_USER_SYSTEMD_REAL_LOSS_PROPAGATION_PASS_NO_OWNER_NET')
+          PYSYSTEMD
       - name: Real OIG NetworkManager import plus scoped live OpenVPN TUN in isolated Docker netns
         shell: bash
         run: |
@@ -182,5 +212,6 @@ jobs:
             ${{ runner.temp }}/oig-hosted-nm/oig-hosted-nft-killswitch-smoke.json
             ${{ runner.temp }}/oig-hosted-nm/oig-hosted-nft-executor.json
             ${{ runner.temp }}/oig-hosted-nm/oig-hosted-root-boot-kernel.json
+            ${{ runner.temp }}/oig-hosted-systemd-dependency-loss.json
           if-no-files-found: warn
           retention-days: 7

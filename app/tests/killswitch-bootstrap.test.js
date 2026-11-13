@@ -25,6 +25,19 @@ test('Linux root boot lockdown refuses owner checkout and passes offline fail-cl
     assert.match(qa.stdout, /OIG_ROOT_BOOT_MOCKED_NFT_0600_CHECK_THEN_COMMIT_PASS/);
   });
 
+test('GitHub-hosted real user-systemd BindsTo loss smoke refuses an owner host',
+  { skip: process.platform !== 'linux' }, () => {
+    const probe = spawnSync('python3', ['-B', path.join(__dirname,
+      'hosted-linux-systemd-dependency-loss.py'), '--github-hosted-only'], {
+      encoding: 'utf8', timeout: 6000,
+      env: Object.fromEntries(Object.entries(process.env).filter(([name]) =>
+        !['GITHUB_ACTIONS', 'RUNNER_ENVIRONMENT', 'GITHUB_REPOSITORY'].includes(name)))
+    });
+    assert.notEqual(probe.status, 0, probe.stdout);
+    assert.equal(probe.stderr.trim(),
+      'REFUSED: owner host or non-disposable runner');
+  });
+
 test('Hosted real root-boot nft Kernel acceptance refuses ordinary Linux host',
   { skip: process.platform !== 'linux' }, () => {
     const script = path.join(__dirname, 'hosted-linux-root-boot-kernel-smoke.py');
