@@ -39,7 +39,9 @@ desired_state() {
   if [[ -f "$DESIRED" ]]; then
     tr -d '\r\n' < "$DESIRED"
   else
-    echo on
+    # Missing intent is NOT consent to establish a new VPN on first launch.
+    # Only an explicit Connect or saved desired=on may restore a tunnel.
+    echo off
   fi
 }
 
