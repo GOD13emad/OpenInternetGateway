@@ -19,6 +19,7 @@ test('Linux root boot lockdown refuses owner checkout and passes offline fail-cl
     });
     assert.equal(qa.status, 0, qa.stderr || qa.stdout);
     assert.match(qa.stdout, /OIG_ROOT_BOOT_LOCKED_ONLY_OFFLINE_PASS/);
+    assert.match(qa.stdout, /OIG_HOSTED_BOOT_KERNEL_RECEIPT_FAIL_CLOSED_PASS 39/);
     assert.match(qa.stdout, /OIG_BOOT_NFT_JSON_STRICT_FAIL_CLOSED_PASS/);
     assert.match(qa.stdout, /OIG_ROOT_BOOT_MOCKED_NFT_0600_CHECK_THEN_COMMIT_PASS/);
   });

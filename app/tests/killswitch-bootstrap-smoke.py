@@ -253,7 +253,78 @@ def mocked_native_boot_transaction_boundary():
     print("OIG_ROOT_BOOT_MOCKED_NFT_0600_CHECK_THEN_COMMIT_PASS")
 
 
+def hosted_boot_kernel_receipt_negative_tests():
+    """Offline QA on the real Docker receipt validator; no kernel touched."""
+    exported = runpy.run_path(
+        str(Path(__file__).with_name("hosted-linux-root-boot-kernel-smoke.py")),
+        run_name="oig_kernel_receipt_offline_qa"
+    )
+    blank = exported["new_receipt"]
+    verify = exported["finalize_receipt"]
+    assert verify(blank()) is False, "No measurements can never PASS"
+
+    trusted = blank()
+    for key in (
+        "isolatedDockerScopeVerified", "kernelInitialLockdownVerified",
+        "kernelIdempotentRestartVerified", "kernelTableContentsVerified",
+        "outputDefaultDropVerified", "forwardDefaultDropVerified",
+        "isolatedOwnedTableRemoved", "containerRouteDnsBaselineRestored",
+    ):
+        trusted[key] = True
+    trusted["physicalIpv4DnsDropDelta"] = 8
+    assert verify(trusted) is True
+
+    negative = 0
+    for key in (
+        "isolatedDockerScopeVerified", "kernelInitialLockdownVerified",
+        "kernelIdempotentRestartVerified", "kernelTableContentsVerified",
+        "outputDefaultDropVerified", "forwardDefaultDropVerified",
+        "isolatedOwnedTableRemoved", "containerRouteDnsBaselineRestored",
+    ):
+        for invalid in (False, None):
+            tampered = copy.deepcopy(trusted)
+            tampered[key] = invalid
+            assert verify(tampered) is False, ("False positive", key, invalid)
+            negative += 1
+        missing = copy.deepcopy(trusted)
+        missing.pop(key)
+        assert verify(missing) is False, ("Missing proof passed", key)
+        negative += 1
+
+    for field in (
+        "productionKillSwitchVerified", "bootPersistenceVerified",
+        "installedRootServiceVerified", "realOpenVpnIdentityVerified",
+        "physicalOwnerNetworkChanged",
+    ):
+        tampered = copy.deepcopy(trusted)
+        tampered[field] = True
+        assert verify(tampered) is False, ("Unmeasured production proof", field)
+        negative += 1
+
+    for count in (True, False, 7, -1, None, "8", 8.0):
+        tampered = copy.deepcopy(trusted)
+        tampered["physicalIpv4DnsDropDelta"] = count
+        assert verify(tampered) is False, ("Forged counter", count)
+        negative += 1
+
+    missing_count = copy.deepcopy(trusted)
+    del missing_count["physicalIpv4DnsDropDelta"]
+    assert verify(missing_count) is False
+    negative += 1
+
+    for field, value in (
+        ("failureClass", "KernelRefused"),
+        ("schema", "oig-hosted-root-boot-kernel-v0"),
+    ):
+        tampered = copy.deepcopy(trusted)
+        tampered[field] = value
+        assert verify(tampered) is False
+        negative += 1
+    print("OIG_HOSTED_BOOT_KERNEL_RECEIPT_FAIL_CLOSED_PASS", negative)
+
+
 def main():
+    hosted_boot_kernel_receipt_negative_tests()
     mocked_native_boot_transaction_boundary()
     assert boot.INSTALLED_SCRIPT.as_posix() == (
         "/opt/open-internet-gateway/resources/backend/linux/killswitch_bootstrap.py"

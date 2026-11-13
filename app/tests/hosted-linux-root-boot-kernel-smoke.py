@@ -228,6 +228,34 @@ def new_receipt():
     }
 
 
+def finalize_receipt(result):
+    """Enforce honest, complete native-kernel evidence; never infer success."""
+    required = (
+        "isolatedDockerScopeVerified",
+        "kernelInitialLockdownVerified",
+        "kernelIdempotentRestartVerified",
+        "kernelTableContentsVerified",
+        "outputDefaultDropVerified",
+        "forwardDefaultDropVerified",
+        "isolatedOwnedTableRemoved",
+        "containerRouteDnsBaselineRestored",
+    )
+    result["pass"] = (
+        type(result) is dict
+        and result.get("schema") == "oig-hosted-root-boot-kernel-v1"
+        and all(result.get(key) is True for key in required)
+        and type(result.get("physicalIpv4DnsDropDelta")) is int
+        and result["physicalIpv4DnsDropDelta"] >= 8
+        and "failureClass" not in result
+        and all(result.get(key) is False for key in (
+            "productionKillSwitchVerified", "bootPersistenceVerified",
+            "installedRootServiceVerified", "realOpenVpnIdentityVerified",
+            "physicalOwnerNetworkChanged",
+        ))
+    )
+    return result["pass"]
+
+
 def main():
     try:
         scope_guard()
@@ -294,27 +322,7 @@ def main():
             except Exception as exc:
                 result.setdefault("failureStage", "ISOLATED_ROUTE_DNS_POSTCHECK")
                 result.setdefault("failureClass", type(exc).__name__)
-        needed = (
-            "isolatedDockerScopeVerified",
-            "kernelInitialLockdownVerified",
-            "kernelIdempotentRestartVerified",
-            "kernelTableContentsVerified",
-            "outputDefaultDropVerified",
-            "forwardDefaultDropVerified",
-            "isolatedOwnedTableRemoved",
-            "containerRouteDnsBaselineRestored",
-        )
-        result["pass"] = (
-            all(result[k] is True for k in needed) and
-            type(result["physicalIpv4DnsDropDelta"]) is int and
-            result["physicalIpv4DnsDropDelta"] >= 8 and
-            "failureClass" not in result and
-            all(result[k] is False for k in (
-                "productionKillSwitchVerified", "bootPersistenceVerified",
-                "installedRootServiceVerified", "realOpenVpnIdentityVerified",
-                "physicalOwnerNetworkChanged",
-            ))
-        )
+        finalize_receipt(result)
         fd = os.open(
             RECEIPT, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600
         )
