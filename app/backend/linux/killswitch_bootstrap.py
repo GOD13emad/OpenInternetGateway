@@ -309,8 +309,8 @@ class NativeBootBackend:
 def service_unit_preview():
     """Contract review only. The ordinary installer does NOT deploy this."""
     return """# REVIEW PREVIEW ONLY. DO NOT INSTALL OR ENABLE.
-# NetworkManager must have a separate Requires/After drop-in before enabling,
-# or a failed bootstrap will not stop NetworkManager from starting.
+# A separate BindsTo/After NM drop-in is required before enabling;
+# the bootstrap and this PREVIEW are not installed or activated.
 # Other network stacks and forced-disconnect events remain unverified.
 [Unit]
 Description=Open Internet Gateway opt-in root lockdown bootstrap (preview)
@@ -349,9 +349,11 @@ def networkmanager_dependency_preview():
     return """# REVIEW PREVIEW ONLY. DO NOT DEPLOY.
 # An opt-in native installer must first independently attest full boot/loss
 # coverage and have an owner-approved rollback/recovery method.
-# If the root-locked startup service fails, do not start NetworkManager.
+# After startup, a stopped/inactive root-locked unit must also stop NM.
+# BindsTo+After is stronger than Requires+After for unexpected unit loss,
+# but is NOT a watchdog for nft kernel table mutation or forced VPN loss.
 [Unit]
-Requires=openinternetgateway-lockdown.service
+BindsTo=openinternetgateway-lockdown.service
 After=openinternetgateway-lockdown.service
 """
 

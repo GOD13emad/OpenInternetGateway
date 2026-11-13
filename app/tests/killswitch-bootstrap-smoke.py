@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Offline boot-lockdown core regression; never calls root nft on the owner."""
+import configparser
 import copy
 import json
 from pathlib import Path
@@ -323,7 +324,116 @@ def hosted_boot_kernel_receipt_negative_tests():
     print("OIG_HOSTED_BOOT_KERNEL_RECEIPT_FAIL_CLOSED_PASS", negative)
 
 
+def review_noninstalled_boot_ordering_contract():
+    """Pure negative contract for opt-in, nondeployed systemd previews.
+
+    systemd.unit(5): Requires+After gates failed startup but BindsTo+After
+    also stops a dependent service when the requirement becomes inactive.
+    This cannot replace a live kernel-state watchdog or physical boot QA.
+    """
+    root = boot.service_unit_preview()
+    nm_gate = boot.networkmanager_dependency_preview()
+
+    def accept(root_unit, gate):
+        def parsed(raw):
+            cp = configparser.ConfigParser(
+                interpolation=None, strict=True, delimiters=("=",)
+            )
+            cp.optionxform = str
+            cp.read_string(raw)
+            return cp
+
+        try:
+            a = parsed(root_unit)
+            b = parsed(gate)
+            service = a["Service"]
+            unit = a["Unit"]
+            nm = b["Unit"]
+            expected = "openinternetgateway-lockdown.service"
+            root_before = unit["Before"].split()
+            root_after = unit["After"].split()
+            return all((
+                "Install" not in a,
+                "Install" not in b,
+                set(a.sections()) == {"Unit", "Service"},
+                set(b.sections()) == {"Unit"},
+                unit.get("DefaultDependencies") == "no",
+                "local-fs.target" in root_after,
+                "network-pre.target" in root_before,
+                "NetworkManager.service" in root_before,
+                unit.get("Wants") == "network-pre.target",
+                service.get("Type") == "oneshot",
+                service.get("RemainAfterExit") == "yes",
+                service.get("User") == "root",
+                service.get("Group") == "root",
+                service.get("NoNewPrivileges") == "true",
+                service.get("CapabilityBoundingSet") == "CAP_NET_ADMIN",
+                service.get("RestrictAddressFamilies") == "AF_UNIX AF_NETLINK",
+                service.get("ProtectSystem") == "strict",
+                service.get("PrivateNetwork") is None,
+                service.get("UMask") == "0077",
+                service.get("ExecStop") is None,
+                service.get("ExecStart") == (
+                    "/usr/bin/python3 -I "
+                    "/opt/open-internet-gateway/resources/backend/linux/"
+                    "killswitch_bootstrap.py --bootstrap-lockdown"
+                ),
+                nm.get("BindsTo") == expected,
+                nm.get("After") == expected,
+                nm.get("Requires") is None,
+                nm.get("Wants") is None,
+            ))
+        except (configparser.Error, KeyError, ValueError):
+            return False
+
+    assert accept(root, nm_gate)
+    negative = [
+        (root, nm_gate.replace(
+            "BindsTo=openinternetgateway-lockdown.service",
+            "Requires=openinternetgateway-lockdown.service")),
+        (root, nm_gate.replace(
+            "BindsTo=openinternetgateway-lockdown.service",
+            "Wants=openinternetgateway-lockdown.service")),
+        (root, nm_gate.replace(
+            "After=openinternetgateway-lockdown.service",
+            "After=network-pre.target")),
+        (root, nm_gate.replace(
+            "BindsTo=openinternetgateway-lockdown.service",
+            "BindsTo=another.service")),
+        (root, nm_gate + "\n[Install]\nWantedBy=multi-user.target\n"),
+        (root.replace(
+            "Before=network-pre.target NetworkManager.service",
+            "Before=network-pre.target"), nm_gate),
+        (root.replace("After=local-fs.target",
+                      "After=network-online.target"), nm_gate),
+        (root.replace("DefaultDependencies=no",
+                      "DefaultDependencies=yes"), nm_gate),
+        (root.replace("RemainAfterExit=yes",
+                      "RemainAfterExit=no"), nm_gate),
+        (root.replace("CapabilityBoundingSet=CAP_NET_ADMIN",
+                      "CapabilityBoundingSet=CAP_NET_ADMIN CAP_SYS_ADMIN"), nm_gate),
+        (root.replace("RestrictAddressFamilies=AF_UNIX AF_NETLINK",
+                      "RestrictAddressFamilies=AF_INET AF_INET6"), nm_gate),
+        (root.replace("UMask=0077", "UMask=0000"), nm_gate),
+        (root.replace(
+            "NoNewPrivileges=true", "NoNewPrivileges=false"), nm_gate),
+        (root.replace(
+            "ExecStart=/usr/bin/python3 -I ",
+            "ExecStart=/usr/bin/python3 "), nm_gate),
+        (root.replace(
+            "[Service]", "[Service]\nPrivateNetwork=true"), nm_gate),
+        (root.replace(
+            "[Service]", "[Service]\nExecStop=/usr/sbin/nft flush ruleset"), nm_gate),
+        (root + "\n[Install]\nWantedBy=multi-user.target\n", nm_gate),
+    ]
+    for idx, pair in enumerate(negative):
+        assert not accept(*pair), ("BOOT_ORDER_FAIL_OPEN", idx)
+    print("OIG_ROOT_BOOT_SYSTEMD_DEPENDENCY_REVIEW_PASS",
+          len(negative), "dangerous_dependency_mutations_rejected")
+
+
 def main():
+    review_noninstalled_boot_ordering_contract()
     hosted_boot_kernel_receipt_negative_tests()
     mocked_native_boot_transaction_boundary()
     assert boot.INSTALLED_SCRIPT.as_posix() == (

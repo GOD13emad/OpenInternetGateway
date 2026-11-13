@@ -20,6 +20,7 @@ test('Linux root boot lockdown refuses owner checkout and passes offline fail-cl
     assert.equal(qa.status, 0, qa.stderr || qa.stdout);
     assert.match(qa.stdout, /OIG_ROOT_BOOT_LOCKED_ONLY_OFFLINE_PASS/);
     assert.match(qa.stdout, /OIG_HOSTED_BOOT_KERNEL_RECEIPT_FAIL_CLOSED_PASS 39/);
+    assert.match(qa.stdout, /OIG_ROOT_BOOT_SYSTEMD_DEPENDENCY_REVIEW_PASS 17/);
     assert.match(qa.stdout, /OIG_BOOT_NFT_JSON_STRICT_FAIL_CLOSED_PASS/);
     assert.match(qa.stdout, /OIG_ROOT_BOOT_MOCKED_NFT_0600_CHECK_THEN_COMMIT_PASS/);
   });
@@ -70,7 +71,8 @@ test('Linux optional root systemd unit parses but is deliberately not installabl
       '-B', '-I', python, '--print-noninstallable-nm-gate-preview'
     ], { encoding: 'utf8', timeout: 5000 });
     assert.equal(gate.status, 0, gate.stderr);
-    assert.match(gate.stdout, /Requires=openinternetgateway-lockdown\.service/);
+    assert.match(gate.stdout, /BindsTo=openinternetgateway-lockdown\.service/);
+    assert.doesNotMatch(gate.stdout, /^Requires=/m);
     assert.match(gate.stdout, /After=openinternetgateway-lockdown\.service/);
     assert.match(gate.stdout, /# REVIEW PREVIEW ONLY/);
     const pkg = JSON.parse(fs.readFileSync(path.join(__dirname, '../package.json'), 'utf8'));
@@ -78,10 +80,30 @@ test('Linux optional root systemd unit parses but is deliberately not installabl
     assert.match(unit.stdout, /ExecStart=\/usr\/bin\/python3 -I \/opt\/open-internet-gateway\/resources\/backend\/linux\/killswitch_bootstrap\.py --bootstrap-lockdown/);
     const folder = fs.mkdtempSync(path.join(os.tmpdir(), 'oig-boot-unit-qa-'));
     try {
-      const file = path.join(folder, 'oig-lockdown-preview.service');
+      const file = path.join(folder, 'openinternetgateway-lockdown.service');
       fs.writeFileSync(file, unit.stdout, { mode: 0o600 });
-      const checked = spawnSync('/usr/bin/systemd-analyze', ['verify', file], {
-        encoding: 'utf8', timeout: 8000
+      const gateDir = path.join(folder, 'NetworkManager.service.d');
+      fs.mkdirSync(gateDir, { mode: 0o700 });
+      fs.writeFileSync(path.join(gateDir, '90-oig-lockdown.conf'),
+        gate.stdout, { mode: 0o600 });
+      // Stand-in unit is NEVER started. Its executable is /usr/bin/true.
+      // This exercises the real systemd parser and drop-in resolution
+      // while leaving the owner's NetworkManager entirely untouched.
+      const nmStub = path.join(folder, 'NetworkManager.service');
+      fs.writeFileSync(nmStub, [
+        '[Unit]',
+        'Description=Offline NetworkManager dependency-parser stub',
+        '[Service]',
+        'Type=oneshot',
+        'ExecStart=/usr/bin/true',
+        'RemainAfterExit=yes',
+        ''
+      ].join('\n'), { mode: 0o600 });
+      const checked = spawnSync('/usr/bin/systemd-analyze', [
+        'verify', file, nmStub
+      ], {
+        encoding: 'utf8', timeout: 8000,
+        env: { ...process.env, SYSTEMD_UNIT_PATH: folder + ':' }
       });
       assert.equal(checked.status, 0, checked.stderr || checked.stdout);
     } finally {
