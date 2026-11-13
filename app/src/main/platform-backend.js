@@ -880,12 +880,22 @@ class Backend {
     return { ok: true, output: r.stdout || r.stderr };
   }
 
-  async _linux(action, extraArgs = []) {
+  async _linux(action, extraArgs = [], { expectedCancelEpoch } = {}) {
     const script = path.join(this.backendRoot, 'linux', 'oig-linux.sh');
     const env = {
       OIG_HOME: this.backendRoot,
       OIG_COMMON: path.join(this.backendRoot, 'common')
     };
+    // Intended only as a stale-request fence, not a privilege/identity
+    // attestation. An older exact-profile recovery must not reconnect after
+    // a newer Disconnect, even if its child launches after that Disconnect.
+    if (expectedCancelEpoch !== undefined) {
+      if (typeof expectedCancelEpoch !== 'string' ||
+          !/^(?:initial|[0-9]+\.[0-9]+\.[0-9]+)$/.test(expectedCancelEpoch)) {
+        throw new Error('Invalid Linux gateway cancellation epoch.');
+      }
+      env.OIG_EXPECT_DISCONNECT_GENERATION = expectedCancelEpoch;
+    }
     const r = await run('/bin/bash', [script, action, ...extraArgs], {
       cwd: this.backendRoot,
       env,
@@ -990,6 +1000,29 @@ class Backend {
   }
 
   async connectProfile(sha256) {
+    const readLinuxCancelEpoch = () => {
+      if (this.platform !== 'linux') return null;
+      try {
+        return fs.readFileSync(path.join(this.backendRoot, 'state',
+          'disconnect-generation'), 'utf8').trim();
+      } catch (error) {
+        return error?.code === 'ENOENT' ? 'initial' : null;
+      }
+    };
+    const initialCancelEpoch = readLinuxCancelEpoch();
+    const supersededByLinuxDisconnect = () => (
+      this.platform === 'linux' &&
+      (initialCancelEpoch === null ||
+       readLinuxCancelEpoch() !== initialCancelEpoch)
+    );
+    const linuxRecoveryForbidden = () => {
+      if (this.platform !== 'linux') return false;
+      if (supersededByLinuxDisconnect()) return true;
+      try {
+        return fs.readFileSync(path.join(this.backendRoot, 'state',
+          'desired-state'), 'utf8').trim() !== 'on';
+      } catch { return true; }
+    };
     const wanted = String(sha256 || '').toLowerCase();
     if (!wanted) throw new Error('Profile SHA-256 is required.');
     const list = await this.profiles();
@@ -1010,6 +1043,9 @@ class Backend {
 
     const request = path.join(this.backendRoot, 'state', 'exact-profile.request');
     const requestExact = async (sha, country, host) => {
+      if (supersededByLinuxDisconnect()) {
+        throw new Error('Relay switch canceled by a newer Disconnect.');
+      }
       // Both Windows and Linux receive the selected SHA explicitly. Legacy
       // request files are removed so an old/stale exact request can never
       // affect a later app session.
@@ -1021,9 +1057,12 @@ class Backend {
         message: 'Switching to ' + (country || 'selected') + ' relay ' + (host || '') + '…'
       });
       if (this.platform === 'win32') await this._windows('connect', ['-ProfileSha', sha]);
-      else await this._linux('connect-profile', [sha]);
+      else await this._linux('connect-profile', [sha], {
+        expectedCancelEpoch: initialCancelEpoch
+      });
     };
     const restorePrevious = async () => {
+      if (linuxRecoveryForbidden()) return false;
       if (!previousSha || previousSha === wanted) return false;
       this.emit({
         type: 'progress',
@@ -1050,7 +1089,7 @@ class Backend {
       status: await this.status()
     });
     const recoverAnyLinux = async () => {
-      if (this.platform !== 'linux') return false;
+      if (this.platform !== 'linux' || linuxRecoveryForbidden()) return false;
       this.emit({
         type: 'progress',
         action: 'connect-profile',
@@ -1058,7 +1097,10 @@ class Backend {
         message: 'Exact rollback is unavailable. Recovering with another validated relay…'
       });
       try {
-        await this._linux('connect');
+        await this._linux('connect', [], {
+          expectedCancelEpoch: initialCancelEpoch
+        });
+        if (linuxRecoveryForbidden()) return false;
         const recoveredStatus = await this.status();
         const recovered = this._readJson(this._profileStatePath(), {}) || {};
         const recoveredSha = String(recovered.sha256 || '').toLowerCase();
@@ -1079,6 +1121,9 @@ class Backend {
       await requestExact(wanted, profile.country, profile.host || profile.ip);
     } catch {
       try { fs.unlinkSync(request); } catch {}
+      if (linuxRecoveryForbidden()) {
+        throw new Error('Relay switch canceled by Disconnect; automatic recovery was suppressed.');
+      }
       const restored = await restorePrevious();
       if (restored) return recoveredResult(
         'SELECTED_RELAY_FAILED_RESTORED',
@@ -1091,6 +1136,9 @@ class Backend {
       throw new Error('Selected relay failed validation, and neither exact rollback nor general recovery could restore protection. Run Repair now.');
     }
 
+    if (linuxRecoveryForbidden()) {
+      throw new Error('Relay switch canceled by Disconnect; automatic recovery was suppressed.');
+    }
     this.emit({
       type: 'progress',
       action: 'connect-profile',

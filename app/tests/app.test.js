@@ -360,7 +360,7 @@ test('selected relay connection is exact rather than fallback',()=>{
   assert.match(ensure,/exact-profile\.request/);
   assert.match(ensure,/-ProfileSha \$sha/);
   assert.match(backend,/exact-profile\.request/);
-  assert.match(backend,/_linux\('connect-profile', \[sha\]\)/);
+  assert.match(backend,/_linux\('connect-profile', \[sha\], \{\s*expectedCancelEpoch: initialCancelEpoch/);
 });
 
 test('explicit Windows disconnect cancels queued recovery and exact requests before running recovery task',()=>{
@@ -1025,6 +1025,9 @@ test('Linux exact relay failure falls through to adaptive recovery when exact ro
   const target={sha256:'f'.repeat(64),country:'JP',host:'target',ip:'198.51.100.20',active:false,quarantined:false};
   const recoveredSha='1'.repeat(64);
   fs.writeFileSync(path.join(stateDir,'preferred-profile.json'),JSON.stringify(previous));
+  // The pre-existing selection flow had already requested desired=on.
+  // Off/missing intent now intentionally suppresses auto-reconnect.
+  fs.writeFileSync(path.join(stateDir,'desired-state'),'on\n');
   const backend=new Backend({version:'test',resourcesPath:tmp,appPath:tmp,userData:tmp,emit:()=>{}});
   backend.platform='linux';
   backend.backendRoot=tmp;
@@ -1065,7 +1068,7 @@ test('Linux general recovery is present in every post-selection validation failu
   const block=backend.slice(backend.indexOf('async connectProfile'),backend.indexOf('async _directInternetPath'));
   assert.match(block,/const recoverAnyLinux = async/);
   assert.match(block,/this\.platform !== 'linux'/);
-  assert.match(block,/await this\._linux\('connect'\)/);
+  assert.match(block,/await this\._linux\('connect', \[\], \{\s*expectedCancelEpoch: initialCancelEpoch/);
   assert.match(block,/SELECTED_RELAY_FAILED_GENERAL_RECOVERY/);
   assert.match(block,/SELECTED_RELAY_NOT_ACTIVE_GENERAL_RECOVERY/);
   assert.match(block,/SELECTED_RELAY_COUNTRY_MISMATCH_GENERAL_RECOVERY/);

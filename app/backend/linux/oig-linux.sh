@@ -11,6 +11,7 @@ LEGACY_CONN="OIG-JP-UDP-LIVE"
 CONSOLE_CONN="OIG-Console-Gateway"
 KEEP="$STATE/linux.keep"
 LOCK="$STATE/gateway.lock"
+DISCONNECT_GENERATION="$STATE/disconnect-generation"
 FACTORY_PY="$OIG_HOME/linux/config_factory.py"
 DESIRED="$STATE/desired-state"
 mkdir -p "$STATE" "$EVIDENCE"
@@ -43,6 +44,19 @@ desired_state() {
     # Only an explicit Connect or saved desired=on may restore a tunnel.
     echo off
   fi
+}
+
+disconnect_generation() {
+  if [[ -f "$DISCONNECT_GENERATION" && ! -L "$DISCONNECT_GENERATION" ]]; then
+    tr -d '\r\n' < "$DISCONNECT_GENERATION"
+  else
+    printf '%s\n' "initial"
+  fi
+}
+
+connect_request_live() {
+  [[ "$(desired_state)" == on &&
+     "$(disconnect_generation)" == "$REQUEST_DISCONNECT_GENERATION" ]]
 }
 
 delete_connection_name() {
@@ -473,7 +487,9 @@ connect_one() {
   if printf '%s\n' "$existing_names" | grep -Fxq -- "$import_name"; then
     return 19
   fi
+  connect_request_live || return 76
   delete_named_connections
+  connect_request_live || return 76
   imported="$(nmcli connection import type openvpn file "$profile" 2>&1)" || return 12
   uuid="$(nmcli -t -f UUID,NAME connection show | awk -F: -v n="$import_name" '$2==n {print $1; exit}')"
   [[ -n "$uuid" ]] || return 12
@@ -490,9 +506,19 @@ connect_one() {
     nmcli connection delete uuid "$uuid" >/dev/null 2>&1 || true
     return 12
   fi
+  if ! connect_request_live; then
+    nmcli connection delete uuid "$uuid" >/dev/null 2>&1 || true
+    return 76
+  fi
   if ! nmcli -w 30 connection up uuid "$uuid" >/dev/null 2>&1; then
     nmcli connection delete uuid "$uuid" >/dev/null 2>&1 || true
     return 13
+  fi
+
+  if ! connect_request_live; then
+    nmcli connection down uuid "$uuid" >/dev/null 2>&1 || true
+    nmcli connection delete uuid "$uuid" >/dev/null 2>&1 || true
+    return 76
   fi
 
   # Persist relay identity immediately. If the caller disappears during the
@@ -501,7 +527,9 @@ connect_one() {
   write_profile_state "$state_file" "$host" "$ipaddr" "$port" "$profile" "$expected" "$protocol" "$country" "" true ""
 
   for _ in 1 2 3 4 5 6; do
+    connect_request_live || return 76
     sleep 3
+    connect_request_live || return 76
     if healthy; then
       local stat observed_country
       stat="$(json_status)"
@@ -513,6 +541,7 @@ connect_one() {
       observed_ip="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1]).get("ip",""))' "$stat")"
       write_profile_state "$state_file" "$host" "$ipaddr" "$port" "$profile" "$expected" "$protocol" "$country" "$observed_country" false "$observed_ip"
       rm -f "$previous_state"
+      connect_request_live || return 76
       touch "$KEEP"
       stop_watchdog
       return 0
@@ -573,6 +602,12 @@ PYIPV6
 
 connect_gateway() {
   local exact_sha="${1:-}"
+  # Disconnect is an immediate cancellation signal, including during slow
+  # imported OpenVPN handshakes and later health probes.
+  if ! connect_request_live; then
+    echo "Connect canceled by a newer Disconnect." >&2
+    return 76
+  fi
   if [[ -z "$exact_sha" ]] && healthy; then
     touch "$KEEP"
     python3 "$FACTORY_PY" status --common "$OIG_COMMON" >/dev/null 2>&1 || true
@@ -593,6 +628,7 @@ connect_gateway() {
     return 23
   fi
   python3 "$FACTORY_PY" ensure --common "$OIG_COMMON" >/dev/null
+  connect_request_live || return 76
   [[ -f "$OIG_COMMON/runtime/udp-cache/index.json" ]] || { echo "Config pool index missing" >&2; return 20; }
 
   start_watchdog
@@ -603,11 +639,14 @@ connect_gateway() {
   max_cycle=1
   [[ -n "$exact_sha" ]] && max_cycle=0
   for ((cycle=0; cycle<=max_cycle; cycle++)); do
+    connect_request_live || return 76
     local had=0
     while IFS="$(printf '\t')" read -r host ipaddr port leaf sha protocol country; do
       [[ -n "$ipaddr" ]] || continue
       had=1
+      connect_request_live || return 76
       if connect_one "$host" "$ipaddr" "$port" "$leaf" "$sha" "$protocol" "$country"; then
+        connect_request_live || return 76
         stat="$(json_status)"
         printf '%s\n' "$stat" > "$EVIDENCE/connect-last-success.json"
         record_success "$sha" "$host" "$ipaddr" "$port" "$stat"
@@ -615,6 +654,9 @@ connect_gateway() {
         return 0
       else
         rc=$?
+        # Cancellation is an operator intent, not a failed relay candidate.
+        # Disconnect owns the teardown when it acquires this same lock.
+        [[ "$rc" -ne 76 ]] || return 76
         reason="CODE_$rc"
         printf '{"host":"%s","ip":"%s","port":"%s","protocol":"%s","result":"FAIL","code":%s,"cycle":%s}\n' "$host" "$ipaddr" "$port" "$protocol" "$rc" "$cycle" >> "$attempts"
         record_failure "$sha" "$host" "$ipaddr" "$port" "$reason"
@@ -624,6 +666,7 @@ connect_gateway() {
     if [[ -n "$exact_sha" ]]; then
       break
     elif [[ "$cycle" -eq 0 ]]; then
+      connect_request_live || return 76
       python3 "$FACTORY_PY" refresh --common "$OIG_COMMON" >/dev/null || true
     elif [[ "$had" -eq 0 ]]; then
       break
@@ -657,7 +700,25 @@ teardown_gateway() {
 }
 
 disconnect_gateway() {
+  # Publish cancellation BEFORE waiting for a possible slow TLS handshake
+  # under the gateway lock. Older queued Connect requests then refuse.
   set_desired off "${1:-${action:-disconnect}}"
+  local marker="$STATE/.disconnect-generation.$$"
+  (umask 077; printf '%s.%s.%s\n' "$$" "$RANDOM" "$(date +%s%N)" > "$marker") ||
+    { echo "Unable to publish Disconnect cancellation." >&2; return 75; }
+  mv -f -- "$marker" "$DISCONNECT_GENERATION"
+  # Periodic Ensure already holds fd9's lock; do not deadlock on another fd.
+  if [[ "${action:-}" != "ensure" ]]; then
+    exec 9>"$LOCK"
+    if ! flock -w 90 9; then
+      echo "Disconnect cancellation recorded; teardown lock unavailable." >&2
+      return 75
+    fi
+  fi
+  # Reconcile inside the lock: an in-flight Connect might have written
+  # desired=on between our initial off signal and the epoch publication.
+  # The initial set_desired already recorded the operator intent.
+  printf '%s\n' off > "$DESIRED"
   teardown_gateway
   echo "DISCONNECTED"
 }
@@ -771,6 +832,14 @@ console_disable() {
 }
 
 action="${1:-status}"
+# Read BEFORE waiting for flock: a queued Connect cannot resurrect a VPN
+# if an explicit Disconnect canceled the request in the meantime.
+REQUEST_DISCONNECT_GENERATION="$(disconnect_generation)"
+if [[ -n "${OIG_EXPECT_DISCONNECT_GENERATION+x}" &&
+      "$OIG_EXPECT_DISCONNECT_GENERATION" != "$REQUEST_DISCONNECT_GENERATION" ]]; then
+  echo "Obsolete Linux gateway request canceled by Disconnect." >&2
+  exit 76
+fi
 if [[ "$action" == "connect" || "$action" == "connect-profile" || "$action" == "refresh" || "$action" == "ensure" || "$action" == "factory-refresh" ]]; then
   exec 9>"$LOCK"
   if [[ "$action" == "ensure" ]]; then
@@ -783,6 +852,10 @@ if [[ "$action" == "connect" || "$action" == "connect-profile" || "$action" == "
       echo "Another gateway operation did not finish within 90 seconds." >&2
       exit 75
     fi
+  fi
+  if [[ "$(disconnect_generation)" != "$REQUEST_DISCONNECT_GENERATION" ]]; then
+    echo "Queued operation canceled by a newer Disconnect." >&2
+    exit 76
   fi
 fi
 
@@ -812,6 +885,10 @@ case "$action" in
     if ! preconnect_no_foreign_nm_vpn || ! preconnect_public_ipv6_absent; then
       echo "Refusing relay switch: independent VPN or public/unknown IPv6 route; current tunnel preserved." >&2
       exit 24
+    fi
+    if [[ "$(disconnect_generation)" != "$REQUEST_DISCONNECT_GENERATION" ]]; then
+      echo "Relay switch canceled by a newer Disconnect; current tunnel preserved." >&2
+      exit 76
     fi
     set_desired on "connect-profile"
     teardown_gateway >/dev/null 2>&1 || true
