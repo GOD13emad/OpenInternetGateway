@@ -32,6 +32,7 @@ on:
       - 'app/tests/killswitch-nft-executor-smoke.py'
       - 'app/tests/killswitch-nft-executor.test.js'
       - 'app/tests/hosted-linux-nft-executor-smoke.py'
+      - 'app/tests/hosted-linux-root-boot-kernel-smoke.py'
       - 'app/tests/local-linux-nft-kernel-netns-smoke.py'
       - 'app/tests/local-linux-nft-kernel-netns.test.js'
       - 'app/backend/linux/killswitch_bootstrap.py'
@@ -90,6 +91,7 @@ jobs:
           ast.parse(pathlib.Path('app/backend/linux/killswitch_nft_executor.py').read_text())
           ast.parse(pathlib.Path('app/tests/killswitch-nft-executor-smoke.py').read_text())
           ast.parse(pathlib.Path('app/tests/hosted-linux-nft-executor-smoke.py').read_text())
+          ast.parse(pathlib.Path('app/tests/hosted-linux-root-boot-kernel-smoke.py').read_text())
           ast.parse(pathlib.Path('app/tests/local-linux-nft-kernel-netns-smoke.py').read_text())
           ast.parse(pathlib.Path('app/backend/linux/killswitch_bootstrap.py').read_text())
           ast.parse(pathlib.Path('app/tests/killswitch-bootstrap-smoke.py').read_text())
@@ -148,6 +150,13 @@ jobs:
           set -e
           test "$executor_code" -ne 0
           test "$executor_result" = 'REFUSED: owner host or non-disposable runner'
+          set +e
+          boot_kernel_result="$(env -u GITHUB_ACTIONS -u RUNNER_ENVIRONMENT -u GITHUB_REPOSITORY \
+            python3 -B app/tests/hosted-linux-root-boot-kernel-smoke.py --isolated-docker-only 2>&1)"
+          boot_kernel_code=$?
+          set -e
+          test "$boot_kernel_code" -ne 0
+          test "$boot_kernel_result" = 'REFUSED: owner host or non-disposable runner'
           echo 'OWNER_HOST_REFUSED=PASS'
       - name: Real OIG NetworkManager import plus scoped live OpenVPN TUN in isolated Docker netns
         shell: bash
@@ -169,5 +178,6 @@ jobs:
             ${{ runner.temp }}/oig-hosted-nm/oig-hosted-active-timer-rollback.json
             ${{ runner.temp }}/oig-hosted-nm/oig-hosted-nft-killswitch-smoke.json
             ${{ runner.temp }}/oig-hosted-nm/oig-hosted-nft-executor.json
+            ${{ runner.temp }}/oig-hosted-nm/oig-hosted-root-boot-kernel.json
           if-no-files-found: warn
           retention-days: 7

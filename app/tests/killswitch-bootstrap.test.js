@@ -23,6 +23,32 @@ test('Linux root boot lockdown refuses owner checkout and passes offline fail-cl
     assert.match(qa.stdout, /OIG_ROOT_BOOT_MOCKED_NFT_0600_CHECK_THEN_COMMIT_PASS/);
   });
 
+test('Hosted real root-boot nft Kernel acceptance refuses ordinary Linux host',
+  { skip: process.platform !== 'linux' }, () => {
+    const script = path.join(__dirname, 'hosted-linux-root-boot-kernel-smoke.py');
+    const env = { ...process.env };
+    for (const key of [
+      'OIG_HOSTED_CONTAINER', 'GITHUB_ACTIONS', 'RUNNER_ENVIRONMENT',
+      'GITHUB_REPOSITORY', 'GITHUB_EVENT_NAME', 'GITHUB_RUN_ID'
+    ]) delete env[key];
+    const refused = spawnSync('python3', ['-B', script, '--isolated-docker-only'], {
+      encoding: 'utf8', timeout: 6000, env
+    });
+    assert.notEqual(refused.status, 0, refused.stdout);
+    assert.equal(
+      refused.stderr.trim(),
+      'REFUSED: owner host or non-disposable runner'
+    );
+    const unknown = spawnSync('python3', ['-B', script, '--untrusted'], {
+      encoding: 'utf8', timeout: 6000, env
+    });
+    assert.notEqual(unknown.status, 0, unknown.stdout);
+    assert.equal(
+      unknown.stderr.trim(),
+      'REFUSED: owner host or non-disposable runner'
+    );
+  });
+
 test('Linux optional root systemd unit parses but is deliberately not installable',
   { skip: process.platform !== 'linux' }, () => {
     const unit = spawnSync('python3', ['-B', '-I', python, '--print-noninstallable-unit-preview'], {

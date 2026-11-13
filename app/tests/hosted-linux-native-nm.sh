@@ -87,7 +87,7 @@ NMCONF
     # The container creates its private receipt as 0600/root. Transfer only
     # the artifact's ownership to the runner user for actions/upload-artifact.
     # Never loosen permissions or mount owner-host sensitive directories.
-    for receipt in /out/oig-hosted-native-nm.json /out/oig-hosted-native-nm-live.json /out/oig-hosted-native-nm-fullipv4.json /out/oig-hosted-active-crash-rollback.json /out/oig-hosted-active-timer-rollback.json /out/oig-hosted-nft-killswitch-smoke.json /out/oig-hosted-nft-executor.json; do
+    for receipt in /out/oig-hosted-native-nm.json /out/oig-hosted-native-nm-live.json /out/oig-hosted-native-nm-fullipv4.json /out/oig-hosted-active-crash-rollback.json /out/oig-hosted-active-timer-rollback.json /out/oig-hosted-nft-killswitch-smoke.json /out/oig-hosted-nft-executor.json /out/oig-hosted-root-boot-kernel.json; do
       if [[ -f "$receipt" ]]; then
         chown "${OIG_RUNNER_UID:?}:${OIG_RUNNER_GID:?}" "$receipt"
         chmod 0600 "$receipt"
@@ -295,6 +295,10 @@ PYRESTORE
   # Exercise the independently scoped, test-only command executor against
   # the disposable kernel's nft state (never on the owner host).
   python3 -B /work/app/tests/hosted-linux-nft-executor-smoke.py --isolated-docker-only
+  # Independently verify the opt-in root BOOT TABLE's actual nft kernel
+  # behavior using a separate disposable table, never the production host.
+  # This tests the pure boot-lockdown core, NOT the uninstalled systemd unit.
+  python3 -B /work/app/tests/hosted-linux-root-boot-kernel-smoke.py --isolated-docker-only
   exit 0
 fi
 
@@ -477,3 +481,28 @@ assert r.get("authorizedTunnelUnlockVerified") is False
 assert r.get("physicalHostNetworkChanged") is False
 print("HOSTED_DISPOSABLE_LOCKDOWN_ENGINE_REAL_KERNEL_PASS")
 PYEXEC
+
+test -s "$out/oig-hosted-root-boot-kernel.json"
+python3 -B - "$out/oig-hosted-root-boot-kernel.json" <<'PYROOTBOOT'
+import json,sys
+r=json.load(open(sys.argv[1],encoding="utf8"))
+assert r.get("schema") == "oig-hosted-root-boot-kernel-v1"
+assert r.get("pass") is True
+for field in (
+    "isolatedDockerScopeVerified", "kernelInitialLockdownVerified",
+    "kernelIdempotentRestartVerified", "kernelTableContentsVerified",
+    "outputDefaultDropVerified", "forwardDefaultDropVerified",
+    "isolatedOwnedTableRemoved", "containerRouteDnsBaselineRestored"
+):
+    assert r.get(field) is True, field
+assert type(r.get("physicalIpv4DnsDropDelta")) is int
+assert r["physicalIpv4DnsDropDelta"] >= 8
+for field in (
+    "productionKillSwitchVerified", "bootPersistenceVerified",
+    "installedRootServiceVerified", "realOpenVpnIdentityVerified",
+    "physicalOwnerNetworkChanged"
+):
+    assert r.get(field) is False, field
+assert "failureClass" not in r
+print("HOSTED_ROOT_BOOT_TABLE_ISOLATED_KERNEL_LOCKDOWN_AND_RESTART_PASS")
+PYROOTBOOT
