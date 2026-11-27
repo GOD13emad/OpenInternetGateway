@@ -9,7 +9,9 @@ Open Internet Gateway (OIG) is a cross-platform desktop application for maintain
 
 The Windows and Linux backends are different, but both sit behind the same Electron dashboard, lifecycle model, health gates, multi-country relay inventory, Self-Healing Config Factory, and verified GitHub update workflow.
 
-## Current release line: 2.5.14
+## Current published release: v2.5.19
+
+Official download: [v2.5.19 release](https://github.com/GOD13emad/OpenInternetGateway/releases/tag/v2.5.19) (Windows installer, Linux DEB and AppImage, SHA256SUMS.txt). The repository screenshot above is historical; it is not proof of an active connection or release acceptance. Source-level QA branches and newer development versions are not published releases.
 
 ### Connections
 
