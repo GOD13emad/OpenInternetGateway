@@ -209,9 +209,11 @@ class Backend {
   _windowsPwshPath() {
     if (this.platform !== 'win32') return '';
     const candidates = [];
+    // Only app-controlled, packaged or prepared developer runtimes may run
+    // PowerShell helpers. Environment-provided ProgramFiles/PATH paths can be
+    // redirected and must not become a privileged executable authority.
     if (this.resourcesPath) candidates.push(path.join(this.resourcesPath, 'pwsh', 'pwsh.exe'));
-    if (process.env.ProgramFiles) candidates.push(path.join(process.env.ProgramFiles, 'PowerShell', '7', 'pwsh.exe'));
-    if (process.env['ProgramFiles(x86)']) candidates.push(path.join(process.env['ProgramFiles(x86)'], 'PowerShell', '7', 'pwsh.exe'));
+    if (this.appPath) candidates.push(path.join(this.appPath, 'vendor', 'pwsh', 'pwsh.exe'));
     // PATH can include user-writable directories; never resolve a privileged helper from it.
     return candidates.find(candidate => { try { return fs.existsSync(candidate); } catch { return false; } }) || '';
   }
