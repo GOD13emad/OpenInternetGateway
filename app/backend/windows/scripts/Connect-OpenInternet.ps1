@@ -1,6 +1,7 @@
 [CmdletBinding()]
 param([string]$ProfileSha='')
 $ErrorActionPreference='Stop'
+. (Join-Path $PSScriptRoot 'Route-Pair.ps1')
 $Root=Split-Path -Parent $PSScriptRoot
 $desired=Join-Path $Root 'state\desired-state.json'
 $exact=Join-Path $Root 'state\exact-profile.request'
@@ -59,13 +60,15 @@ $minimumCompletionAt=(Get-Date).AddSeconds(2)
 do{
  Start-Sleep -Seconds 1
  $routes=@(Get-NetRoute -AddressFamily IPv4 -ErrorAction SilentlyContinue|Where-Object{$_.DestinationPrefix -in @('0.0.0.0/1','128.0.0.0/1')})
+ $routePairValid=Test-OigFullRoutePair -Routes $routes
+ $ipv6Safe=if($routePairValid){Test-OigIpv6EgressSafe -InterfaceIndex ([int]$routes[0].InterfaceIndex)}else{$false}
  $cf=@(curl.exe -4 --max-time 4 -s https://www.cloudflare.com/cdn-cgi/trace)
  $loc=[string]((($cf|Where-Object{$_ -like 'loc=*'}|Select-Object -First 1)-replace '^loc=',''));$loc=$loc.Trim()
  $svc=Get-Service OVPNConnectorService -ErrorAction SilentlyContinue
  $activeSha=''
  if(Test-Path -LiteralPath $current){try{$activeSha=([string](Get-Content -LiteralPath $current -Raw -Encoding UTF8|ConvertFrom-Json).sha256).Trim().ToLowerInvariant()}catch{}}
  $exactOk=(-not $expectedSha -or ($activeSha -and $activeSha -eq $expectedSha))
- if($routes.Count -ge 2 -and $loc -and $loc -ne 'IR' -and $svc -and $svc.Status -eq 'Running' -and $exactOk){
+ if($routePairValid -and $ipv6Safe -and $loc -and $loc -ne 'IR' -and $svc -and $svc.Status -eq 'Running' -and $exactOk){
    Remove-Item -LiteralPath $exact -Force -ErrorAction SilentlyContinue
    Write-Host $(if($expectedSha){'CONNECTED EXACT'}else{'CONNECTED'})
    exit 0
@@ -76,7 +79,7 @@ do{
  if($expectedSha -and (Get-Date) -ge $minimumCompletionAt){
    $task=Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
    if($task -and [string]$task.State -ne 'Running' -and -not(Test-Path -LiteralPath $exact)){
-     if($activeSha -ne $expectedSha -or -not $svc -or $svc.Status -ne 'Running' -or $routes.Count -lt 2){
+     if($activeSha -ne $expectedSha -or -not $svc -or $svc.Status -ne 'Running' -or -not $routePairValid -or -not $ipv6Safe){
        throw 'Selected relay failed validation. Gateway intent remains on so the previous preferred relay can be restored.'
      }
    }

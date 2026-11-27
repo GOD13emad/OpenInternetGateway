@@ -228,7 +228,8 @@ test('Windows status tolerates a transient geo probe failure only for a real man
   assert.match(winBlock,/\$managedActive=\(\$svc -and \$svc\.Status -eq 'Running'\)/);
   assert.match(winBlock,/\$probeDegraded=\$false/);
   assert.match(winBlock,/healthProbeDegraded=\[bool\]\$probeDegraded/);
-  assert.match(winBlock,/connected=\(\$routes\.Count -ge 2 -and \$managedActive/);
+  assert.match(winStatus,/Connected=\(\$routes\.Count -ge 2 -and \$routePairValid -and \$ipv6Safe -and \$managedActive/);
+  assert.match(winBlock,/connected=\(\$routes\.Count -ge 2 -and \$routePairValid -and \$ipv6Safe -and \$managedActive/);
 });
 
 test('Linux failed exact relay does not turn desired gateway intent off',()=>{

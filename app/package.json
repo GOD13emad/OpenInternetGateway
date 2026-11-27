@@ -17,7 +17,7 @@
     "dist:linux": "electron-builder --linux AppImage deb --publish never"
   },
   "devDependencies": {
-    "electron": "44.4.5",
+    "electron": "44.10.2",
     "electron-builder": "^26.0.12"
   },
   "build": {
@@ -107,6 +107,12 @@
   },
   "desktopName": "OpenInternetGateway.desktop",
   "overrides": {
-    "@electron/get": "5.0.0"
+    "@electron/get": "5.0.0",
+    "app-builder-lib": {
+      "minimatch": "11.0.4"
+    },
+    "@electron/universal": {
+      "minimatch": "11.0.4"
+    }
   }
 }
